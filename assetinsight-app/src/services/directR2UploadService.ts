@@ -1,0 +1,750 @@
+import api from './api';
+import { Platform } from 'react-native';
+import { randomUUID } from 'expo-crypto';
+import { loadNativeAuctionCamera } from '../components/camera/nativeAuctionCameraModule';
+import { createUploadOperation, cancellableUploadRequest, registerUploadCancellation, type UploadOperation } from './uploadCancellation';
+import { isRetryableRequestError } from './connectivityService';
+
+const FileSystem = require('expo-file-system/legacy');
+
+export type DirectUploadFile = {
+  uri: string;
+  name: string;
+  type: string;
+  size?: number;
+  fieldname?: 'images' | 'videos';
+  lotIndex?: number;
+  imageIndex?: number;
+  captureOrder?: number;
+  originalOrder?: number;
+  role?: 'main' | 'extra' | 'video';
+};
+
+export type DirectUploadProgressStage =
+  | 'preparing'
+  | 'creating_session'
+  | 'uploading'
+  | 'finalizing'
+  | 'complete';
+
+export type DirectUploadProgress = {
+  percent: number;
+  stage: DirectUploadProgressStage;
+  message: string;
+  completedFiles: number;
+  totalFiles: number;
+  uploadedBytes: number;
+  totalBytes: number;
+  activeFileName?: string;
+};
+
+export type DirectUploadProgressCallback = (
+  progress: number,
+  detail?: DirectUploadProgress
+) => void;
+
+export type DirectUploadSessionResponse = {
+  sessionId: string;
+  reportId?: string;
+  jobId: string;
+  status?: string;
+  resumed?: boolean;
+  alreadyQueued?: boolean;
+  processed?: boolean;
+  readyToComplete?: boolean;
+  files: Array<{
+    fileId: string;
+    key: string;
+    uploadUrl: string;
+    method: 'PUT';
+    contentType: string;
+    headers?: Record<string, string>;
+  }>;
+};
+
+const DIRECT_UPLOAD_CONCURRENCY = 4;
+const DIRECT_UPLOAD_RETRIES = 2;
+const DIRECT_UPLOAD_SESSION_REFRESH_RETRIES = 1;
+const COMPLETE_SESSION_RETRIES = 4;
+// The server already performs bounded R2 retries with a fresh stream. Keep the
+// client retry count low so a storage outage queues a large resumable session
+// promptly instead of retrying hundreds of files for hours.
+const SERVER_FALLBACK_RETRIES = 2;
+const SERVER_FALLBACK_TIMEOUT_MS = 120000;
+
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+function normalizeUploadError(error: unknown, fallbackMessage: string): Error {
+  const err =
+    error instanceof Error
+      ? error
+      : new Error(typeof error === 'string' && error.trim() ? error : fallbackMessage);
+  // Only transport failures and transient HTTP responses are recoverable.
+  // Marking a 400/403/413 response as "network" used to send online reports
+  // into the offline queue and hide the actionable server response.
+  if (isRetryableRequestError(err)) {
+    (err as any).isRecoverableUploadError = true;
+    (err as any).code = (err as any).code || 'ERR_NETWORK';
+  }
+  if (!err.message) err.message = fallbackMessage;
+  return err;
+}
+
+type R2UploadError = Error & { status?: number; responseBody?: string };
+
+function makeR2UploadError(file: DirectUploadFile, status?: number, responseBody?: string): R2UploadError {
+  const detail = responseBody?.trim().replace(/\s+/g, " ").slice(0, 180);
+  const error = new Error(
+    `R2 upload failed for ${file.name}${status ? ` (${status})` : ""}${detail ? `: ${detail}` : ""}`
+  ) as R2UploadError;
+  error.status = status;
+  error.responseBody = responseBody;
+  return error;
+}
+
+async function uploadOneWithFileSystem(
+  operation: UploadOperation,
+  file: DirectUploadFile,
+  uploadUrl: string,
+  contentType: string,
+  onFileProgress?: (sentBytes: number, totalBytes?: number) => void,
+  signedHeaders?: Record<string, string>
+) {
+  operation.assertActive();
+  const headers = {
+    ...(signedHeaders || {}),
+    'Content-Type': contentType || file.type || 'application/octet-stream',
+  };
+  const uploadType = FileSystem.FileSystemUploadType?.BINARY_CONTENT ?? 'BINARY_CONTENT';
+
+  if (typeof FileSystem.createUploadTask === 'function') {
+    const task = FileSystem.createUploadTask(
+      uploadUrl,
+      file.uri,
+      {
+        httpMethod: 'PUT',
+        uploadType,
+        headers,
+      },
+      (progress: any) => {
+        if (!operation.isActive()) return;
+        const sent = Number(progress?.totalBytesSent || 0);
+        const expected = Number(progress?.totalBytesExpectedToSend || file.size || 0) || undefined;
+        onFileProgress?.(sent, expected);
+      }
+    );
+    const unregister = registerUploadCancellation(() => { void Promise.resolve(task.cancelAsync?.()).catch(() => undefined); });
+    let result;
+    try { result = await task.uploadAsync(); } finally { unregister(); }
+    operation.assertActive();
+    const status = Number(result?.status || 0);
+    if (status < 200 || status >= 300) {
+      throw makeR2UploadError(file, status, String((result as any)?.body || ""));
+    }
+    return;
+  }
+
+  // Legacy uploadAsync cannot be cancelled; use the abortable fetch fallback instead.
+  throw new Error('Cancellable filesystem upload is not available');
+}
+
+async function uploadOne(
+  operation: UploadOperation,
+  file: DirectUploadFile,
+  uploadUrl: string,
+  contentType: string,
+  signedHeaders?: Record<string, string>,
+  onFileProgress?: (sentBytes: number, totalBytes?: number) => void
+) {
+  operation.assertActive();
+  if (Platform.OS === 'android' && file.uri.startsWith('content://')) {
+    const native = await loadNativeAuctionCamera();
+    operation.assertActive();
+    if (!native.streamContentUriUpload) throw new Error('This app version cannot stream gallery photos. Install the updated mobile build; your draft remains on this device.');
+    const id = randomUUID();
+    const unregister = registerUploadCancellation(() => { void Promise.resolve(native.cancelContentUriUpload?.(id)).catch(() => undefined); });
+    try {
+      const result = await native.streamContentUriUpload({ id, uri: file.uri, url: uploadUrl,
+        headers: { ...(signedHeaders || {}), 'Content-Type': contentType || file.type }, size: file.size || 0,
+        onProgress: (sent, expected) => { if (operation.isActive()) onFileProgress?.(sent, expected); } });
+      operation.assertActive();
+      if (result.status < 200 || result.status >= 300) throw makeR2UploadError(file, result.status, result.body);
+    } finally { unregister(); }
+    return;
+  }
+  try {
+    await uploadOneWithFileSystem(operation, file, uploadUrl, contentType, onFileProgress, signedHeaders);
+    return;
+  } catch (error: any) {
+    operation.assertActive();
+    // A signed R2 response is authoritative. Do not hide a 4xx/5xx failure by
+    // attempting a second transport with the same invalid URL.
+    if (Number(error?.status || 0) > 0) throw error;
+    console.warn('[DirectR2Upload] Filesystem upload failed, using fetch fallback:', error);
+  }
+
+  await cancellableUploadRequest(operation, async (signal) => {
+    const source = await fetch(file.uri, { signal });
+    operation.assertActive();
+    const blob = await source.blob();
+    operation.assertActive();
+    onFileProgress?.(0, blob.size || file.size);
+    const response = await fetch(uploadUrl, {
+      signal,
+      method: 'PUT',
+      headers: {
+        ...(signedHeaders || {}),
+        'Content-Type': contentType || file.type || 'application/octet-stream',
+      },
+      body: blob,
+    });
+    operation.assertActive();
+    if (!response.ok) {
+      throw makeR2UploadError(file, response.status, await response.text().catch(() => ""));
+    }
+    onFileProgress?.(blob.size || file.size || 1, blob.size || file.size);
+  });
+}
+
+async function uploadOneWithRetry(
+  operation: UploadOperation,
+  file: DirectUploadFile,
+  uploadUrl: string,
+  contentType: string,
+  signedHeaders?: Record<string, string>,
+  onFileProgress?: (sentBytes: number, totalBytes?: number) => void
+) {
+  let lastError: unknown;
+  for (let attempt = 0; attempt <= DIRECT_UPLOAD_RETRIES; attempt++) {
+    operation.assertActive();
+    try {
+      await uploadOne(operation, file, uploadUrl, contentType, signedHeaders, onFileProgress);
+      return;
+    } catch (error) {
+      operation.assertActive();
+      lastError = error;
+      if (!isRetryableRequestError(error)) break;
+      if (attempt < DIRECT_UPLOAD_RETRIES) {
+        await sleep(500 * (attempt + 1));
+      }
+    }
+  }
+  throw normalizeUploadError(lastError, `Upload failed for ${file.name}`);
+}
+
+/** Shared by report and draft uploads so both paths use the same native-safe R2 transport. */
+export async function uploadLocalFileToPresignedUrl(
+  file: DirectUploadFile,
+  uploadUrl: string,
+  contentType?: string
+) {
+  await uploadOneWithRetry(createUploadOperation(), file, uploadUrl, contentType || file.type);
+}
+
+async function mapWithConcurrency<T>(
+  items: T[],
+  concurrency: number,
+  worker: (item: T, index: number) => Promise<void>
+) {
+  const limit = Math.max(1, Math.min(concurrency, items.length || 1));
+  let nextIndex = 0;
+  await Promise.all(
+    Array.from({ length: limit }, async () => {
+      while (true) {
+        const index = nextIndex++;
+        if (index >= items.length) break;
+        await worker(items[index], index);
+      }
+    })
+  );
+}
+
+function buildManifest(files: DirectUploadFile[]) {
+  return files.map((file, index) => ({
+    fileId: `${file.fieldname || 'images'}-${index}`,
+    name: file.name || `${file.fieldname || 'image'}-${index + 1}`,
+    type: file.type || 'application/octet-stream',
+    size: file.size,
+    fieldname: file.fieldname || 'images',
+    lotIndex: file.lotIndex,
+    imageIndex: file.imageIndex ?? index,
+    captureOrder: file.captureOrder ?? file.originalOrder ?? index,
+    originalOrder: index,
+    role: file.role || (file.fieldname === 'videos' ? 'video' : 'main'),
+  }));
+}
+
+async function createOrResumeUploadSession(
+  operation: UploadOperation,
+  endpoint: '/asset' | '/lot-listing',
+  details: Record<string, any>,
+  manifest: ReturnType<typeof buildManifest>
+) {
+  const response = await cancellableUploadRequest(operation, (signal) => api.post<{ data: DirectUploadSessionResponse }>(
+    `${endpoint}/upload-session`,
+    { details, files: manifest },
+    { timeout: 60000, signal }
+  ));
+  return response.data.data;
+}
+
+async function completeUploadSessionWithRetry(
+  operation: UploadOperation,
+  endpoint: '/asset' | '/lot-listing',
+  sessionId: string,
+  onRetry: (attempt: number, maxAttempts: number) => void
+) {
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= COMPLETE_SESSION_RETRIES; attempt += 1) {
+    operation.assertActive();
+    try {
+      return await cancellableUploadRequest(operation, (signal) => api.post(
+        `${endpoint}/upload-session/${sessionId}/complete`,
+        {},
+        { timeout: 120000, signal }
+      ));
+    } catch (error) {
+      operation.assertActive();
+      lastError = error;
+      if (!isRetryableRequestError(error) || attempt >= COMPLETE_SESSION_RETRIES) {
+        throw normalizeUploadError(error, 'The upload could not be finalized');
+      }
+
+      // Completion is idempotent on the server. Retrying this exact session
+      // confirms the existing report instead of uploading hundreds of files
+      // again or accidentally creating a duplicate report.
+      onRetry(attempt + 1, COMPLETE_SESSION_RETRIES);
+      await sleep(Math.min(8000, 1000 * 2 ** (attempt - 1)));
+    }
+  }
+  throw normalizeUploadError(lastError, 'The upload could not be finalized');
+}
+
+async function verifyUploadSessionFile(
+  operation: UploadOperation,
+  endpoint: '/asset' | '/lot-listing',
+  sessionId: string,
+  fileId: string
+): Promise<boolean> {
+  try {
+    const response = await cancellableUploadRequest(operation, (signal) => api.post(
+      `${endpoint}/upload-session/${sessionId}/files/${encodeURIComponent(fileId)}/verify`,
+      {},
+      { timeout: 30000, signal }
+    ));
+    return response?.data?.data?.verified === true;
+  } catch (error: any) {
+    operation.assertActive();
+    const status = Number(error?.response?.status || 0);
+    const code = String(error?.response?.data?.code || '');
+    if (
+      status === 409 &&
+      ['UPLOAD_NOT_VERIFIED', 'UPLOAD_FILE_SIZE_MISMATCH'].includes(code)
+    ) {
+      return false;
+    }
+    throw error;
+  }
+}
+
+async function uploadOneThroughServerFallback(
+  operation: UploadOperation,
+  endpoint: '/asset' | '/lot-listing',
+  sessionId: string,
+  fileId: string,
+  file: DirectUploadFile,
+  onFileProgress?: (sentBytes: number, totalBytes?: number) => void,
+  onRetry?: (attempt: number, maxAttempts: number) => void
+) {
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= SERVER_FALLBACK_RETRIES; attempt += 1) {
+    operation.assertActive();
+    // React Native multipart bodies are one-use. Rebuild the body for every
+    // retry so a transient R2/server response cannot replay an exhausted form.
+    const formData = new FormData();
+    formData.append('file', {
+      uri: file.uri,
+      name: file.name || 'upload.jpg',
+      type: file.type || 'application/octet-stream',
+    } as any);
+    try {
+      await cancellableUploadRequest(operation, (signal) => api.post(
+        `${endpoint}/upload-session/${sessionId}/files/${encodeURIComponent(fileId)}`,
+        formData,
+        {
+          headers: { 'Content-Type': 'multipart/form-data' },
+          timeout: SERVER_FALLBACK_TIMEOUT_MS,
+          signal,
+          onUploadProgress: (event: any) => {
+            if (!operation.isActive()) return;
+            onFileProgress?.(
+              Number(event?.loaded || 0),
+              Number(event?.total || file.size || 0) || undefined
+            );
+          },
+        }
+      ));
+      onFileProgress?.(file.size || 1, file.size);
+      return;
+    } catch (error) {
+      operation.assertActive();
+      lastError = error;
+
+      // The server may have committed the object before its response was lost.
+      // Verify first so retries never upload the same image again unnecessarily.
+      try {
+        if (await verifyUploadSessionFile(operation, endpoint, sessionId, fileId)) {
+          onFileProgress?.(file.size || 1, file.size);
+          return;
+        }
+      } catch (verificationError) {
+        operation.assertActive();
+        if (!isRetryableRequestError(verificationError)) throw verificationError;
+      }
+
+      if (!isRetryableRequestError(error) || attempt >= SERVER_FALLBACK_RETRIES) {
+        break;
+      }
+      onRetry?.(attempt + 1, SERVER_FALLBACK_RETRIES);
+      await sleep(Math.min(5000, 600 * 2 ** (attempt - 1)));
+    }
+  }
+  throw normalizeUploadError(lastError, `Upload failed for ${file.name}`);
+}
+
+async function resolveRuntimeFileSizes(
+  operation: UploadOperation,
+  files: DirectUploadFile[],
+  onResolved: (resolvedCount: number) => void
+) {
+  const sizes = new Array<number>(files.length).fill(1);
+  let resolvedCount = 0;
+
+  await mapWithConcurrency(files, 8, async (file, index) => {
+    operation.assertActive();
+    const suppliedSize = Number(file.size || 0);
+    if (Number.isFinite(suppliedSize) && suppliedSize > 0) {
+      sizes[index] = suppliedSize;
+    } else {
+      try {
+        const isContentUri = Platform.OS === 'android' && file.uri.startsWith('content://');
+        const native = isContentUri ? await loadNativeAuctionCamera() : undefined;
+        operation.assertActive();
+        if (isContentUri && !native?.getContentUriInfo) throw new Error('Install the updated app to read gallery photo sizes. Your draft remains saved.');
+        const info = isContentUri ? await native!.getContentUriInfo!(file.uri)
+          : await FileSystem.getInfoAsync(file.uri, { size: true });
+        operation.assertActive();
+        const localSize = Number(info?.size || 0);
+        if (info?.exists && Number.isFinite(localSize) && localSize > 0) {
+          sizes[index] = localSize;
+          file.size = localSize;
+        } else if (isContentUri) {
+          throw new Error('A gallery photo is unavailable or its size cannot be read. Restore its permission or replace it before submitting.');
+        }
+      } catch (error) {
+        operation.assertActive();
+        if (file.uri.startsWith('content://')) throw error;
+        console.warn(`[DirectR2Upload] Could not read size for ${file.name}:`, error);
+      }
+    }
+    resolvedCount += 1;
+    onResolved(resolvedCount);
+  });
+
+  return sizes;
+}
+
+export async function uploadReportFilesDirectToR2(args: {
+  endpoint: '/asset' | '/lot-listing';
+  details: Record<string, any>;
+  files: DirectUploadFile[];
+  onProgress?: DirectUploadProgressCallback;
+  operation?: UploadOperation;
+}): Promise<{ jobId: string; reportId: string; message: string; phase?: string; status?: string }> {
+  const operation = args.operation || createUploadOperation();
+  operation.assertActive();
+  // Size resolution must not mutate the caller's saved draft, order or media identity.
+  const files = args.files.map((file) => ({ ...file }));
+  const totalFiles = args.files.length;
+  let lastPercent = -1;
+  let lastStage: DirectUploadProgressStage | undefined;
+  let lastCompletedFiles = -1;
+  let lastMessage = '';
+  const emitProgress = (
+    requestedPercent: number,
+    detail: Omit<DirectUploadProgress, 'percent'>
+  ) => {
+    if (!operation.isActive()) return;
+    // Upload retries can report fewer bytes than a prior attempt. Keep the
+    // user-facing percentage monotonic while retaining the latest file counts.
+    const percent = Math.max(lastPercent, Math.max(0, Math.min(100, Math.round(requestedPercent))));
+    if (
+      percent === lastPercent &&
+      detail.stage === lastStage &&
+      detail.completedFiles === lastCompletedFiles &&
+      detail.message === lastMessage
+    ) {
+      return;
+    }
+    lastPercent = percent;
+    lastStage = detail.stage;
+    lastCompletedFiles = detail.completedFiles;
+    lastMessage = detail.message;
+    args.onProgress?.(percent, { percent, ...detail });
+  };
+
+  emitProgress(1, {
+    stage: 'preparing',
+    message: `Preparing ${totalFiles} ${totalFiles === 1 ? 'file' : 'files'}...`,
+    completedFiles: 0,
+    totalFiles,
+    uploadedBytes: 0,
+    totalBytes: 0,
+  });
+  const runtimeFileSizes = await resolveRuntimeFileSizes(operation, files, (resolvedCount) => {
+    const preparationPercent = totalFiles > 0 ? 1 + (resolvedCount / totalFiles) * 3 : 4;
+    emitProgress(preparationPercent, {
+      stage: 'preparing',
+      message: `Preparing files (${resolvedCount} of ${totalFiles})...`,
+      completedFiles: 0,
+      totalFiles,
+      uploadedBytes: 0,
+      totalBytes: 0,
+    });
+  });
+  operation.assertActive();
+  const manifest = buildManifest(files);
+  const totalBytes = runtimeFileSizes.reduce((sum, size) => sum + Math.max(1, size), 0) || 1;
+  const expectedBytes = [...runtimeFileSizes];
+  const sentBytes = new Array<number>(totalFiles).fill(0);
+  const completedIndexes = new Set<number>();
+
+  const reportFileProgress = (
+    index: number,
+    sent: number,
+    expected?: number,
+    activeFileName?: string
+  ) => {
+    const normalizedExpected = Number(expected || 0);
+    if (Number.isFinite(normalizedExpected) && normalizedExpected > expectedBytes[index]) {
+      expectedBytes[index] = normalizedExpected;
+    }
+    const fileExpected = Math.max(1, expectedBytes[index]);
+    const normalizedSent = Math.max(0, Number(sent || 0));
+    sentBytes[index] = Math.min(fileExpected, Math.max(sentBytes[index], normalizedSent));
+    const dynamicTotalBytes = expectedBytes.reduce((sum, size) => sum + Math.max(1, size), 0) || totalBytes;
+    const uploadedBytes = sentBytes.reduce((sum, size) => sum + Math.max(0, size), 0);
+    const uploadRatio = Math.max(0, Math.min(1, uploadedBytes / dynamicTotalBytes));
+    emitProgress(8 + uploadRatio * 84, {
+      stage: 'uploading',
+      message: `Uploading ${completedIndexes.size} of ${totalFiles} files...`,
+      completedFiles: completedIndexes.size,
+      totalFiles,
+      uploadedBytes,
+      totalBytes: dynamicTotalBytes,
+      activeFileName,
+    });
+  };
+
+  const markFileComplete = (index: number, fileName: string) => {
+    completedIndexes.add(index);
+    sentBytes[index] = Math.max(1, expectedBytes[index]);
+    reportFileProgress(index, sentBytes[index], expectedBytes[index], fileName);
+  };
+
+  emitProgress(5, {
+    stage: 'creating_session',
+    message: 'Preparing secure upload...',
+    completedFiles: 0,
+    totalFiles,
+    uploadedBytes: 0,
+    totalBytes,
+  });
+  let session = await createOrResumeUploadSession(operation, args.endpoint, args.details, manifest);
+  if (session.alreadyQueued && session.reportId) {
+    emitProgress(100, {
+      stage: 'complete',
+      message: 'Submission already received.',
+      completedFiles: totalFiles,
+      totalFiles,
+      uploadedBytes: totalBytes,
+      totalBytes,
+    });
+    return {
+      jobId: session.jobId,
+      reportId: session.reportId,
+      message: "Submission already accepted and is being processed.",
+      phase: session.processed || session.status === "processed" ? "done" : "processing",
+      status: session.status || "processing",
+    };
+  }
+  let uploadById = new Map(session.files.map((file) => [file.fileId, file]));
+
+  if (!session.readyToComplete) {
+    emitProgress(8, {
+      stage: 'uploading',
+      message: `Uploading 0 of ${totalFiles} files...`,
+      completedFiles: 0,
+      totalFiles,
+      uploadedBytes: 0,
+      totalBytes,
+    });
+    const pendingIndexes = files.map((_, index) => index);
+    for (let refreshAttempt = 0; refreshAttempt <= DIRECT_UPLOAD_SESSION_REFRESH_RETRIES; refreshAttempt += 1) {
+      const failures: Array<{ index: number; error: unknown }> = [];
+      await mapWithConcurrency(pendingIndexes, DIRECT_UPLOAD_CONCURRENCY, async (index) => {
+        operation.assertActive();
+        const file = files[index];
+        const descriptor = manifest[index];
+        const target = uploadById.get(descriptor.fileId);
+        if (!target) throw new Error(`Missing upload target for ${file.name}`);
+        try {
+          await uploadOneWithRetry(
+            operation,
+            file,
+            target.uploadUrl,
+            target.contentType,
+            target.headers,
+            (sent, expected) => reportFileProgress(index, sent, expected, file.name)
+          );
+          markFileComplete(index, file.name);
+        } catch (error) {
+          failures.push({ index, error });
+        }
+      });
+
+      if (!failures.length) break;
+      if (refreshAttempt >= DIRECT_UPLOAD_SESSION_REFRESH_RETRIES) {
+        // Direct R2 uploads can be blocked by a device VPN, carrier, or R2
+        // network policy. Fall back per file through the authenticated API,
+        // retaining this exact session and manifest.
+        const verificationFailures: Array<{ index: number; error: unknown }> = [];
+        const needsFallback: Array<{ index: number; error: unknown }> = [];
+        operation.assertActive();
+
+        emitProgress(Math.max(8, lastPercent), {
+          stage: 'uploading',
+          message: `Checking ${failures.length} interrupted uploads...`,
+          completedFiles: completedIndexes.size,
+          totalFiles,
+          uploadedBytes: sentBytes.reduce((sum, size) => sum + Math.max(0, size), 0),
+          totalBytes,
+        });
+
+        // A direct R2 PUT can succeed while Android receives an opaque network
+        // error. Verify those objects concurrently before proxying any bytes.
+        await mapWithConcurrency(
+          failures,
+          DIRECT_UPLOAD_CONCURRENCY,
+          async (failure) => {
+            const file = files[failure.index];
+            const descriptor = manifest[failure.index];
+            try {
+              const verified = await verifyUploadSessionFile(
+                operation,
+                args.endpoint,
+                session.sessionId,
+                descriptor.fileId
+              );
+              if (verified) markFileComplete(failure.index, file.name);
+              else needsFallback.push(failure);
+            } catch (error) {
+              if (!isRetryableRequestError(error)) {
+                verificationFailures.push({ index: failure.index, error });
+              } else {
+                needsFallback.push(failure);
+              }
+            }
+          }
+        );
+
+        if (verificationFailures.length) {
+          throw normalizeUploadError(
+            verificationFailures[0].error,
+            `Upload verification failed for ${args.files[verificationFailures[0].index].name}`
+          );
+        }
+
+        // Keep the proxy fallback sequential for compatibility with servers
+        // deployed before atomic per-file session updates. Abort on the first
+        // exhausted failure: the upload session is durable, and the form catch
+        // queues that same session for retry instead of blocking on every file.
+        needsFallback.sort((left, right) => left.index - right.index);
+        for (const failure of needsFallback) {
+          operation.assertActive();
+          const file = files[failure.index];
+          const descriptor = manifest[failure.index];
+          try {
+            await uploadOneThroughServerFallback(
+              operation,
+              args.endpoint,
+              session.sessionId,
+              descriptor.fileId,
+              file,
+              (sent, expected) => reportFileProgress(failure.index, sent, expected, file.name),
+              (attempt, maxAttempts) => {
+                emitProgress(Math.max(8, lastPercent), {
+                  stage: 'uploading',
+                  message: `Retrying ${file.name} (${attempt} of ${maxAttempts})...`,
+                  completedFiles: completedIndexes.size,
+                  totalFiles,
+                  uploadedBytes: sentBytes.reduce(
+                    (sum, size) => sum + Math.max(0, size),
+                    0
+                  ),
+                  totalBytes,
+                  activeFileName: file.name,
+                });
+              }
+            );
+            markFileComplete(failure.index, file.name);
+          } catch (error) {
+            throw normalizeUploadError(error, `Upload failed for ${file.name}`);
+          }
+        }
+        break;
+      }
+
+      // Reusing the same manifest and client submission id returns the same
+      // session with fresh signed targets. Completed files are left untouched.
+      operation.assertActive();
+      session = await createOrResumeUploadSession(operation, args.endpoint, args.details, manifest);
+      uploadById = new Map(session.files.map((file) => [file.fileId, file]));
+      pendingIndexes.splice(0, pendingIndexes.length, ...failures.map((failure) => failure.index));
+    }
+  }
+
+  operation.assertActive();
+  emitProgress(95, {
+    stage: 'finalizing',
+    message: 'Finalizing submission...',
+    completedFiles: totalFiles,
+    totalFiles,
+    uploadedBytes: totalBytes,
+    totalBytes,
+  });
+  const completeResponse = await completeUploadSessionWithRetry(
+    operation,
+    args.endpoint,
+    session.sessionId,
+    (attempt, maxAttempts) => {
+      emitProgress(95, {
+        stage: 'finalizing',
+        message: `Server is busy. Confirming submission (${attempt} of ${maxAttempts})...`,
+        completedFiles: totalFiles,
+        totalFiles,
+        uploadedBytes: totalBytes,
+        totalBytes,
+      });
+    }
+  );
+  emitProgress(100, {
+    stage: 'complete',
+    message: 'Upload complete.',
+    completedFiles: totalFiles,
+    totalFiles,
+    uploadedBytes: totalBytes,
+    totalBytes,
+  });
+  return completeResponse.data;
+}

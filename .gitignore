@@ -1,0 +1,44 @@
+# App dependencies, generated bundles, native build caches and local test output.
+node_modules/
+.next/
+.expo/
+.gradle/
+.kotlin/
+.cxx/
+build/
+dist/
+coverage/
+.playwright-output/
+playwright-report/
+test-results/
+artifacts/
+*.tsbuildinfo
+*.log
+.DS_Store
+
+# Local environment and signing credentials never belong in source control.
+.env
+.env.*
+!.env.example
+.npmrc
+credentials.json
+google-services.json
+GoogleService-Info.plist
+local.properties
+*.pem
+*.key
+*.p8
+*.p12
+*.pfx
+*.jks
+*.keystore
+*.mobileprovision
+*.apk
+*.aab
+*.ipa
+
+# Local assistant state.
+AGENTS.md
+CLAUDE.md
+.codex/
+.ai/
