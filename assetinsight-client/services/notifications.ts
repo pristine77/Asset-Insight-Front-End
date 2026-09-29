@@ -20,13 +20,14 @@ export type NotificationPage = {
   total: number;
 };
 
-export const notificationCacheKey = (page = 1, limit = 20) =>
-  `/notifications?page=${page}&limit=${limit}`;
+const notificationPath = (page = 1, limit = 20) => `/notifications?page=${page}&limit=${limit}`;
+export const notificationCacheKey = (page = 1, limit = 20, ownerId?: string) =>
+  ownerId ? `${notificationPath(page, limit)}&cacheOwner=${encodeURIComponent(ownerId)}` : notificationPath(page, limit);
 
 export const NotificationsService = {
   async list(page = 1, limit = 20): Promise<NotificationPage> {
     const { data } = await API.get<NotificationPage>(
-      notificationCacheKey(page, limit)
+      notificationPath(page, limit)
     );
     return data;
   },

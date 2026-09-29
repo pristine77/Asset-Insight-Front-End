@@ -131,6 +131,7 @@ export default function ReportFormPage({ kind }: Props) {
 
   const returnTo = handoff?.returnTo || "/dashboard";
   const title = kind === "asset" ? "Asset Report" : "Lot Listing";
+  const showingFreshLot = freshLotOpened && !continuation;
   const statusLabel =
     draftStatus?.label ||
     (draftStatus?.status === "saving"
@@ -206,12 +207,15 @@ export default function ReportFormPage({ kind }: Props) {
 
   return (
     <main className={styles.page}>
-      <header className={styles.header}>
+      <header className={showingFreshLot ? `${styles.header} ${styles.freshLotHeader}` : styles.header}>
         <div className={styles.headingGroup}>
           <p className={styles.eyebrow}>Report workspace</p>
           <h1 ref={workspaceHeadingRef} tabIndex={-1} className={styles.title}>{title}</h1>
-          <p className={styles.description}>
-            {freshLotOpened
+          <p
+            className={showingFreshLot ? `${styles.description} ${styles.freshLotDescription}` : styles.description}
+            role={showingFreshLot ? "status" : undefined}
+          >
+            {showingFreshLot
               ? `Fresh lot for contract ${handoff?.auctioneer?.contract.contractNo}. Add new media when ready.`
               : "Complete details, organize media, and save or submit when ready."}
           </p>
@@ -253,13 +257,16 @@ export default function ReportFormPage({ kind }: Props) {
         ) : continuation ? (
           <div className={styles.continuation}>
             <h2 ref={continuationHeadingRef} tabIndex={-1}>Report accepted</h2>
-            <p>Your report is processing. Preview and approval requirements are unchanged.</p>
+            <p>Your upload was accepted. Processing continues in the background; review its preview before generating files.</p>
             {continuation.pending ? (
               <p role="status">Opening a fresh {title.toLowerCase()} form for this contract…</p>
             ) : continuation.alreadyUsed ? (
               <p role="status">The next form already has a report. Open your reports to continue; no new submission was made.</p>
             ) : (
-              <p role="alert">{continuation.error}</p>
+              <>
+                <p role="alert">{continuation.error}</p>
+                <p>The accepted upload will not be submitted again. Retry only opens the next form once the server confirms this contract is available to you.</p>
+              </>
             )}
             <div className={styles.continuationActions}>
               {!continuation.pending && !continuation.alreadyUsed && continuation.reportId ? (
@@ -274,7 +281,7 @@ export default function ReportFormPage({ kind }: Props) {
           </div>
         ) : kind === "asset" ? (
           <AssetForm
-            key={handoff?.auctioneer?.workItemId || "asset"}
+            key={handoff?.resumeDraft?.clientDraftId || handoff?.auctioneer?.workItemId || "asset"}
             onSuccess={complete}
             onAcceptedAndContinue={handoff?.auctioneer ? continueAfterAccepted : undefined}
             onCancel={() => router.push(returnTo)}
@@ -293,7 +300,7 @@ export default function ReportFormPage({ kind }: Props) {
           />
         ) : (
           <LotListingForm
-            key={handoff?.auctioneer?.workItemId || "lot-listing"}
+            key={handoff?.resumeDraft?.clientDraftId || handoff?.auctioneer?.workItemId || "lot-listing"}
             onSuccess={complete}
             onAcceptedAndContinue={handoff?.auctioneer ? continueAfterAccepted : undefined}
             onCancel={() => router.push(returnTo)}

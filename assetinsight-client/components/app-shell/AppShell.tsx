@@ -16,6 +16,7 @@ import {
   Search,
   Sun,
   X,
+  ArrowLeftRight,
 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import useSWR from "swr";
@@ -24,13 +25,17 @@ import { useColorMode } from "@/components/providers/ColorModeProvider";
 import { UserAvatar } from "@/components/user/UserAvatar";
 import { useAuthContext } from "@/context/AuthContext";
 import { AuctioneerService } from "@/services/auctioneer";
+import { useWorkspaceMode } from "./useWorkspaceMode";
+import { ListingActivitySync } from "./ListingActivitySync";
+import { pathMatches } from "@/lib/workspace";
 import {
   notificationCacheKey,
   NotificationsService,
 } from "@/services/notifications";
 import {
   isNavItemActive,
-  PAGE_TITLES,
+  pageTitle,
+  CRM_NAVIGATION,
   PRIMARY_NAVIGATION,
   SECONDARY_NAVIGATION,
   type NavItem,
@@ -106,9 +111,21 @@ function NavLink({
 
 export default function AppShell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
-  const { user, sessionPresent, logout, loggingOut } = useAuthContext();
-  const userId = user?._id || user?.id;
-  const requestOwner = userId || (sessionPresent ? "pending-session" : null);
+  const { user, loading, loggingOut, deviceAccess } = useAuthContext();
+  const ownerId = user?._id || user?.id;
+  if (loading || loggingOut || deviceAccess || !ownerId) return <div className="app-page" role="status">Opening workspace…</div>;
+  if (pathname === "/workspaces") return <>{children}</>;
+  if (pathMatches(pathname, "/crm") && user?.isCrmAgent !== true) return (
+    <div className="app-page"><section className="app-surface app-section"><h1>CRM access required</h1><p>CRM is available only to assigned CRM users. Contact an administrator if you need access.</p><Link className="app-button app-button--primary" href="/dashboard">Open Listings</Link></section></div>
+  );
+  return <AuthorizedShell key={ownerId} ownerId={ownerId}>{children}</AuthorizedShell>;
+}
+
+function AuthorizedShell({ children, ownerId }: { children: React.ReactNode; ownerId: string }) {
+  const pathname = usePathname();
+  const { user, logout, loggingOut } = useAuthContext();
+  const mode = useWorkspaceMode(pathname, ownerId, user?.isCrmAgent === true);
+  const isCrm = mode === "crm";
   const { resolvedTheme, setMode, toggleMode } = useColorMode();
   const [collapsed, setCollapsed] = useState(false);
   const [mobileOpen, setMobileOpen] = useState(false);
@@ -116,7 +133,7 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
   const [showNotifications, setShowNotifications] = useState(false);
 
   const { data: summary } = useSWR(
-    requestOwner ? ["auctioneer/navigation-summary", requestOwner] : null,
+    mode === "listings" ? ["auctioneer/navigation-summary", ownerId] : null,
     navSummaryFetcher,
     {
       keepPreviousData: false,
@@ -127,7 +144,7 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
     }
   );
   const { data: notificationSummary } = useSWR(
-    requestOwner ? notificationCacheKey(1, 10) : null,
+    mode ? notificationCacheKey(1, 10, ownerId) : null,
     () => NotificationsService.list(1, 10),
     {
       refreshInterval: visibleRefreshInterval,
@@ -147,7 +164,9 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
 
   useEffect(() => {
     setMobileOpen(false);
-  }, [pathname]);
+    setShowDrafts(false);
+    setShowNotifications(false);
+  }, [pathname, mode]);
 
   useEffect(() => {
     if (!mobileOpen) return;
@@ -165,10 +184,10 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
 
   const visiblePrimary = useMemo(
     () =>
-      PRIMARY_NAVIGATION.filter((item) =>
+      (isCrm ? CRM_NAVIGATION : PRIMARY_NAVIGATION).filter((item) =>
         item.visible ? item.visible(user) : true
       ),
-    [user]
+    [user, isCrm]
   );
   const workspaceNavigation = useMemo(
     () =>
@@ -184,19 +203,19 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
       ),
     [visiblePrimary]
   );
-  const title =
-    Object.entries(PAGE_TITLES).find(([prefix]) =>
-      pathname.startsWith(prefix)
-    )?.[1] ?? "Workspace";
+  const title = pageTitle(pathname);
   const userLabel = user?.username || user?.email || "Loading account";
   const closeMobile = () => setMobileOpen(false);
   const toggleDesktopNavigation = () => setCollapsed((value) => !value);
+
+  if (!mode) return <div className="app-page" role="status">Opening workspace…</div>;
 
   return (
     <div
       className={styles.shell}
       data-collapsed={collapsed}
       data-mobile-open={mobileOpen}
+      data-workspace={mode}
     >
       <button
         className={styles.mobileBackdrop}
@@ -209,7 +228,7 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
         aria-label="Primary navigation"
       >
         <div className={styles.brandRow}>
-          <Link className={styles.brand} href="/dashboard" onClick={closeMobile}>
+          <Link className={styles.brand} href={isCrm ? "/crm" : "/dashboard"} onClick={closeMobile}>
             <span className={styles.brandLogo}>
               <BrandLockup compact />
             </span>
@@ -242,8 +261,12 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
         </div>
 
         <div className={styles.navScroll}>
+          {user?.isCrmAgent === true ? <Link href="/workspaces" className={styles.workspaceSwitch} onClick={closeMobile} title={collapsed ? "Switch workspace" : undefined} aria-label={`Switch workspace, current ${isCrm ? "CRM" : "Listings"}`}>
+            <ArrowLeftRight size={18} aria-hidden />
+            <span className={styles.navText}><strong>{isCrm ? "CRM" : "Listings"}</strong><small>Switch workspace</small></span>
+          </Link> : null}
           <nav className={styles.navGroup}>
-            <p className={styles.navLabel}>Workspace</p>
+            <p className={styles.navLabel}>{isCrm ? "CRM workspace" : "Workspace"}</p>
             <ul className={styles.navList}>
               {workspaceNavigation.map((item) => (
                 <NavLink
@@ -259,7 +282,7 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
                   closeMobile={closeMobile}
                 />
               ))}
-              <li>
+              {!isCrm ? <li>
                 <button
                   className={`${styles.navLink} ${styles.actionButton}`}
                   title={collapsed ? "Drafts" : undefined}
@@ -273,11 +296,11 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
                   </span>
                   <span className={styles.navText}>Drafts</span>
                 </button>
-              </li>
+              </li> : null}
             </ul>
           </nav>
 
-          <nav className={styles.navGroup}>
+          {reviewNavigation.length > 0 ? <nav className={styles.navGroup}>
             <p className={styles.navLabel}>Review</p>
             <ul className={styles.navList}>
               {reviewNavigation.map((item) => (
@@ -290,7 +313,7 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
                 />
               ))}
             </ul>
-          </nav>
+          </nav> : null}
 
           <nav className={styles.navGroup}>
             <p className={styles.navLabel}>Account</p>
@@ -369,9 +392,10 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
           >
             <Menu size={22} strokeWidth={1.8} aria-hidden />
           </button>
+          {isCrm ? <span className={styles.workspaceTitle}>CRM workspace</span> : null}
 
           <div className={styles.topbarActions}>
-            <form
+            {!isCrm ? <form
               className={styles.searchForm}
               action="/reports"
               method="get"
@@ -395,7 +419,7 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
               >
                 <Search size={19} strokeWidth={1.8} aria-hidden />
               </button>
-            </form>
+            </form> : null}
 
             <button
               type="button"
@@ -460,8 +484,8 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
             </button>
             <Link
               className={styles.mobileIconButton}
-              href="/reports"
-              aria-label="Search reports"
+              href={isCrm ? "/crm/tasks" : "/reports"}
+              aria-label={isCrm ? "Search CRM tasks" : "Search reports"}
             >
               <Search size={18} aria-hidden />
             </Link>
@@ -480,10 +504,10 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
             </button>
           </div>
         </header>
-        <div className={styles.content}>{children}</div>
+        <div className={styles.content}>{mode === "listings" ? <ListingActivitySync ownerId={ownerId} /> : null}{children}</div>
       </main>
 
-      {showDrafts ? (
+      {showDrafts && !isCrm ? (
         <InputsHistoryModal
           isOpen
           onClose={() => setShowDrafts(false)}

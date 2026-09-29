@@ -10,6 +10,82 @@ The production administration console for Asset Insight. It is a Next.js App Rou
 
 ## Runtime architecture
 
+### YouTube videos
+
+`/youtube` lets admin and superadmin connect one YouTube channel through Google.
+The channel owner reviews the integration/privacy/YouTube terms before connecting,
+including access for other authorized administrators to this shared channel. The
+OAuth redirect is the exact admin origin plus `/youtube/callback`; this page
+removes the authorization query immediately and requires **Finish connecting**.
+The one-time code is sent only to the same-origin HttpOnly BFF; Google credentials
+and encrypted refresh tokens belong to the backend, never this application.
+
+The bounded BFF exposes `status` (GET), `connect`, `complete`, `disconnect`, `revoke`,
+`erase-data` and `acknowledge-revocation` (POST) under `/api/admin/youtube`. Mutations enforce same-origin JSON, exact fields
+and body limits. They are not automatically replayed after authentication failure
+or ambiguous responses. Disconnect requires the current connection revision and
+confirmation; local disconnect does not revoke Google's grant or remove stored
+history. **Revoke access & remove stored YouTube data** posts
+`{revision,confirm:true}` to `/revoke` only after a fresh unchecked confirmation. It requests
+grant revocation and YouTube-data cleanup; those outcomes are displayed separately.
+Neither action deletes remote YouTube videos, R2 originals, reports or ZIP media.
+Google account access controls and YouTube Studio remain available as explicit
+external links. Missing server `canConnect` capability disables new connections.
+When automatic revocation cannot be completed and the backend exposes
+`canAcknowledgeRevocation`, a separate fresh confirmation can record that an
+administrator already removed access in Google Account settings. This posts the
+same exact revision/confirm shape to `/acknowledge-revocation`. The resulting
+`manually_confirmed` state is explicitly administrator-reported, never presented
+as a Google-verified revocation. Ordinary revoke/erase cannot bypass this state.
+
+Future explicitly reviewed Asset/Lot submissions create pending review entries,
+not YouTube uploads. **Review video** submits exact title, description, selected
+private/unlisted/public visibility, saved `updatedAt` and `policyConsent:true` to
+`/videos/:id/review`. No video bytes are sent before this explicit admin review.
+The title is at most 100 Unicode code points; the description at most 5,000 UTF-8
+bytes. No truncation or trimming occurs; angle brackets, malformed surrogate text
+and unsupported controls are rejected. Editing any field clears consent. Both
+the modal and server require a current channel/report revision; ambiguous replies
+or conflicts close the stale review and require refresh, without replay.
+Oversized proposed report text is explicitly marked `metadataOmitted` and both
+review fields start blank, with a warning to enter replacement YouTube text.
+The original report text is preserved; the proposal is never silently shortened
+or uploaded. This keeps one long description from breaking the inventory page.
+
+Public/unlisted visibility follows the existing report release gate. Report file
+generation does not wait for YouTube. Confirmed public/unlisted links remain in
+the video list. Excel keeps its original column layout without a YouTube column;
+video review never regenerates report files automatically. Existing files and
+stored video links are not rewritten or recovered by this layout change.
+Connecting does not backfill historical reports. Google may restrict an unaudited
+API project's uploads to private status; the UI explains this rather than claiming
+that a requested public setting proves publication. Backend setup/support must
+ship before this page. No additional admin environment secrets are required.
+
+The video status list requests 20 rows per page, without polling. Pending review,
+private, uploading, needs-attention, removed, confirmed unlisted and public outcomes
+remain separate. Only confirmed public/unlisted rows expose a watch link. An eligible **Retry reviewed request**
+posts the exact saved `updatedAt` revision to `/videos/:id/retry-publication`.
+It requests metadata publication of an existing released video, never a second
+upload. Conflicts and uncertain responses require manual refresh; provider/error
+rows remain visible. Ordinary report submission/release remains authoritative.
+
+Review/erasure mutations share same-origin guards and never replay on 401. The
+review body has a 32 KiB transport bound to allow JSON escaping of valid 5 KiB text;
+connect/privacy bodies remain 1 KiB. Parsers strip tokens, private source URLs and
+provider error data. New controls require backend support before this admin build.
+
+Focused policy checks: `node --test tests/youtube.test.mjs`. Rendered QA must use
+an isolated backend fixture; do not connect or publish to a real channel as a test.
+
+Verification (2026-09-28): admin verify and 85 policy tests pass. Isolated
+production-build Chromium checks cover 25 flows at 320/390/768/1366px, light/dark,
+keyboard consent, role denial, callback query/Flight stripping, one-time completion,
+token redaction, disconnect cancellation/conflicts, missing configuration, paginated
+videos and publication retry. Axe checks have no WCAG A/AA violations in the tested
+states. Browser plugin was unavailable; existing Playwright dependencies were reused.
+Real Google consent, YouTube uploads/publication, Safari and Firefox were not tested.
+
 ### Report Activity
 
 `/report-activity` provides a searchable Asset/Lot Listing activity table and a

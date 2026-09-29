@@ -19,6 +19,7 @@ import {
   Search,
   Shield,
   Users,
+  Video,
   X,
   type LucideIcon,
 } from "lucide-react";
@@ -174,6 +175,7 @@ export default function AdminNavbarV2({ children }: { children?: ReactNode }) {
       { href: "/reports", label: "Approved Reports", icon: FileCheck2 },
       { href: "/pending-approvals", label: "Pending Approvals", icon: ClipboardCheck },
       { href: "/report-activity", label: "Report Activity", icon: Camera },
+      { href: "/youtube", label: "YouTube Videos", icon: Video },
       { href: "/users", label: "Users", icon: Users },
       {
         href: "/devices",

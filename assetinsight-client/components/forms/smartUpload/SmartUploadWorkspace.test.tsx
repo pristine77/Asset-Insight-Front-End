@@ -16,6 +16,11 @@ const mocks = vi.hoisted(() => ({
   getCompletionStatus: vi.fn(),
   createSession: vi.fn(),
   uploadFiles: vi.fn(),
+  saveServerDraft: vi.fn(),
+  cancel: vi.fn(),
+  startDetection: vi.fn(),
+  waitGrouping: vi.fn(),
+  releaseMedia: vi.fn(),
 }));
 
 vi.mock("./storage", () => ({
@@ -23,13 +28,13 @@ vi.mock("./storage", () => ({
   deleteSmartUploadDraft: mocks.deleteDraft,
   loadSmartUploadFile: vi.fn(),
   loadSmartUploadDraft: mocks.loadDraft,
-  releaseSmartUploadMedia: vi.fn(),
-  saveServerSmartUploadDraft: vi.fn(),
+  releaseSmartUploadMedia: mocks.releaseMedia,
+  saveServerSmartUploadDraft: mocks.saveServerDraft,
   updateSmartUploadDraft: mocks.updateDraft,
 }));
 
 vi.mock("@/services/smartUpload", () => ({
-  cancelSmartUpload: vi.fn(),
+  cancelSmartUpload: mocks.cancel,
   completeSmartUpload: mocks.complete,
   recoverSmartUploadCompletion: mocks.recover,
   getSmartUploadCompletionStatus: mocks.getCompletionStatus,
@@ -39,10 +44,10 @@ vi.mock("@/services/smartUpload", () => ({
     error instanceof Error ? error.message : "Smart Upload failed",
   getSmartUploadErrorCode: vi.fn(),
   getSmartUploadGrouping: mocks.getGrouping,
-  startSmartUploadDetection: vi.fn(),
+  startSmartUploadDetection: mocks.startDetection,
   updateSmartUploadDividers: mocks.updateGrouping,
   uploadSmartUploadFiles: mocks.uploadFiles,
-  waitForSmartUploadGrouping: vi.fn(),
+  waitForSmartUploadGrouping: mocks.waitGrouping,
 }));
 
 const PREVIEW_URL =
@@ -124,7 +129,235 @@ describe("SmartUploadWorkspace preview memory bounds", () => {
     vi.resetAllMocks();
     mocks.updateDraft.mockResolvedValue(undefined);
     mocks.deleteDraft.mockResolvedValue(undefined);
+    mocks.releaseMedia.mockResolvedValue(undefined);
     mocks.getCompletionStatus.mockResolvedValue({ sessionId: "session-1", status: "ready", accepted: false });
+  });
+
+  it("closes queued numbered detection without cancelling or deleting it, then reopens the same review", async () => {
+    const { draft, grouping } = createReviewState(6, 3);
+    draft.stage = "classifying";
+    draft.details.smart_upload_grouping_method = "lot_number";
+    grouping.groupingMethod = "lot_number";
+    grouping.groupingStatus = "classifying";
+    grouping.classificationJobId = "classification-1";
+    grouping.groups.forEach((group, index) => { group.lotNumber = String(2500 + index); });
+    mocks.loadDraft.mockResolvedValue(draft);
+    mocks.getGrouping.mockResolvedValue(grouping);
+    mocks.waitGrouping.mockImplementation(({ signal }: { signal: AbortSignal }) => new Promise((_, reject) => {
+      signal.addEventListener("abort", () => reject(new DOMException("Polling stopped", "AbortError")), { once: true });
+    }));
+    const onClose = vi.fn();
+    const onSubmitted = vi.fn();
+    const props = { kind: "asset" as const, userId: "user-1", scopeId: "scope-1", details: {}, onClose, onSubmitted };
+    const view = render(<SmartUploadWorkspace {...props} open />);
+    fireEvent.click(await screen.findByRole("button", { name: "Close and keep processing" }));
+    expect(onClose).toHaveBeenCalledOnce();
+    expect((mocks.waitGrouping.mock.calls[0][0].signal as AbortSignal).aborted).toBe(true);
+    expect(screen.getByText(/reopen this saved upload from Drafts/)).toBeInTheDocument();
+    expect(mocks.cancel).not.toHaveBeenCalled();
+    expect(mocks.deleteDraft).not.toHaveBeenCalled();
+    expect(mocks.complete).not.toHaveBeenCalled();
+    expect(onSubmitted).not.toHaveBeenCalled();
+    view.rerender(<SmartUploadWorkspace {...props} open={false} />);
+    mocks.getGrouping.mockResolvedValue({ ...grouping, groupingStatus: "review_ready" });
+    view.rerender(<SmartUploadWorkspace {...props} open />);
+    await screen.findByLabelText("Lot number");
+    expect(screen.getByLabelText("Lot number")).toHaveValue("2500");
+    expect(screen.getByRole("button", { name: "Create preview" })).toBeDisabled();
+    expect(mocks.createSession).not.toHaveBeenCalled();
+    expect(mocks.uploadFiles).not.toHaveBeenCalled();
+    expect(mocks.startDetection).not.toHaveBeenCalled();
+    expect(mocks.updateDraft.mock.calls.some((call) => call[2].stage === "failed")).toBe(false);
+  });
+
+  it.each([
+    { method: "lot_number", jobId: undefined, confirmed: 3 },
+    { method: "lot_number", jobId: "classification-1", confirmed: 2 },
+    { method: "black_divider", jobId: "classification-1", confirmed: 3 },
+  ] as const)("keeps $method processing open without a safe numbered receipt ($jobId, $confirmed files)", async ({ method, jobId, confirmed }) => {
+    const { draft, grouping } = createReviewState(3);
+    draft.stage = "classifying";
+    draft.details.smart_upload_grouping_method = method;
+    Object.assign(grouping, { groupingMethod: method, groupingStatus: "classifying", classificationJobId: jobId, confirmedFileCount: confirmed });
+    mocks.loadDraft.mockResolvedValue(draft);
+    mocks.getGrouping.mockResolvedValue(grouping);
+    mocks.waitGrouping.mockImplementation(() => new Promise(() => undefined));
+    const onClose = vi.fn();
+    render(<SmartUploadWorkspace open kind="asset" userId="user-1" scopeId="scope-1" details={{}} onClose={onClose} onSubmitted={vi.fn()} />);
+    await waitFor(() => expect(mocks.waitGrouping).toHaveBeenCalledOnce());
+    fireEvent.click(screen.getByRole("button", { name: method === "lot_number" ? "Close Lot Number Upload" : "Close Smart Upload" }));
+    expect(onClose).not.toHaveBeenCalled();
+    expect(screen.queryByRole("button", { name: "Close and keep processing" })).not.toBeInTheDocument();
+    expect(screen.getByRole("alert")).toHaveTextContent(method === "lot_number" ? "processing is confirmed" : "Wait for this step to finish");
+    expect(mocks.cancel).not.toHaveBeenCalled();
+  });
+
+  it("allows closing only after initial numbered classification acceptance, not while start is pending", async () => {
+    const { draft, grouping } = createReviewState(3);
+    draft.stage = "selected";
+    draft.sessionId = undefined;
+    draft.details.smart_upload_grouping_method = "lot_number";
+    Object.assign(grouping, { groupingMethod: "lot_number", groupingStatus: "classifying", classificationJobId: "classification-1" });
+    mocks.loadDraft.mockResolvedValue(draft);
+    mocks.createSession.mockResolvedValue({ sessionId: "session-1", groupingMethod: "lot_number" });
+    mocks.uploadFiles.mockResolvedValue(undefined);
+    let accept!: (value: SmartUploadGrouping) => void;
+    mocks.startDetection.mockImplementation(() => new Promise((resolve) => { accept = resolve; }));
+    mocks.waitGrouping.mockImplementation(({ signal }: { signal: AbortSignal }) => new Promise((_, reject) => {
+      signal.addEventListener("abort", () => reject(new DOMException("Polling stopped", "AbortError")), { once: true });
+    }));
+    const onClose = vi.fn();
+    render(<SmartUploadWorkspace open groupingMethod="lot_number" kind="asset" userId="user-1" scopeId="scope-1" details={{}} onClose={onClose} onSubmitted={vi.fn()} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Upload & detect lots" }));
+    await waitFor(() => expect(mocks.startDetection).toHaveBeenCalledOnce());
+    fireEvent.click(screen.getByRole("button", { name: "Close Lot Number Upload" }));
+    expect(onClose).not.toHaveBeenCalled();
+    expect(screen.queryByRole("button", { name: "Close and keep processing" })).not.toBeInTheDocument();
+    await act(async () => accept(grouping));
+    fireEvent.click(await screen.findByRole("button", { name: "Close and keep processing" }));
+    expect(onClose).toHaveBeenCalledOnce();
+    expect(mocks.updateDraft).toHaveBeenCalledWith("user-1", "asset", expect.objectContaining({ stage: "classifying" }), "scope-1");
+    expect(mocks.cancel).not.toHaveBeenCalled();
+    expect(mocks.deleteDraft).not.toHaveBeenCalled();
+    expect(mocks.updateDraft.mock.calls.some((call) => call[2].stage === "failed")).toBe(false);
+  });
+
+  it("restores numbered mode, retains 5,000 images and bounds rendered photo pages", async () => {
+    const { draft, grouping } = createReviewState(5000, 50);
+    draft.details.smart_upload_grouping_method = "lot_number";
+    grouping.groupingMethod = "lot_number";
+    grouping.groups.forEach((group, index) => { group.lotNumber = String(2500 + index); });
+    mocks.loadDraft.mockResolvedValue(draft);
+    mocks.getGrouping.mockResolvedValue(grouping);
+    render(workspace()); // Entry defaults black; persisted method wins.
+    await screen.findByRole("heading", { name: "Lot Number Upload" });
+    await screen.findByText("Lots 1-6 of 100");
+    expect(screen.getByText("Lot 2500")).toBeInTheDocument();
+    expect(screen.queryByText("Upload sequence")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Use as divider/ })).not.toBeInTheDocument();
+    await waitFor(() => expect(document.querySelectorAll("img")).toHaveLength(18));
+    fireEvent.click(screen.getByRole("button", { name: "Next photos" }));
+    await screen.findByText("Photos 13-24 of 50");
+    expect(document.querySelectorAll("img")).toHaveLength(18);
+    expect(screen.getByRole("button", { name: "Create preview" })).toBeDisabled();
+    fireEvent.click(screen.getByRole("checkbox", { name: /I checked every lot number/ }));
+    expect(screen.getByRole("button", { name: "Create preview" })).toBeEnabled();
+    expect(mocks.uploadFiles).not.toHaveBeenCalled();
+  });
+
+  it("saves corrected numbers without acknowledgement, then confirms the exact revised groups", async () => {
+    const { draft, grouping } = createReviewState(6, 3);
+    draft.details.smart_upload_grouping_method = "lot_number";
+    grouping.groupingMethod = "lot_number";
+    grouping.groups[0].lotNumber = "2500";
+    grouping.groups[1].lotNumber = "2501";
+    grouping.unresolvedLotNumberFileIds = ["images-1"];
+    mocks.loadDraft.mockResolvedValue(draft);
+    mocks.getGrouping.mockResolvedValue(grouping);
+    mocks.updateGrouping.mockImplementation(async (args) => ({ ...grouping, revision: grouping.revision + 1, groups: args.groups.map((group: { fileIds: string[]; lotNumber?: string }, index: number) => ({ ...group, groupIndex: index, imageCount: group.fileIds.length, overLimit: false })) }));
+    mocks.complete.mockResolvedValue({ reportId: "r", jobId: "j", message: "queued" });
+    render(workspace());
+    const input = await screen.findByLabelText("Lot number");
+    fireEvent.click(screen.getByRole("checkbox", { name: /I checked every lot number/ }));
+    fireEvent.change(input, { target: { value: "02500A" } });
+    expect(screen.getByRole("button", { name: "Create preview" })).toBeDisabled();
+    fireEvent.click(screen.getByRole("button", { name: "Save lot number" }));
+    await screen.findByText("Lot 02500A");
+    expect(mocks.updateGrouping.mock.calls[0][0]).toMatchObject({ groups: [{ fileIds: ["images-0", "images-1", "images-2"], lotNumber: "02500A" }, { fileIds: ["images-3", "images-4", "images-5"], lotNumber: "2501" }], dividerFileIds: [] });
+    expect(mocks.updateGrouping.mock.calls[0][0]).not.toHaveProperty("acknowledgeLotNumberReview");
+    expect(screen.getByRole("checkbox", { name: /I checked every lot number/ })).not.toBeChecked();
+    fireEvent.click(screen.getByRole("checkbox", { name: /I checked every lot number/ }));
+    fireEvent.click(screen.getByRole("button", { name: "Create preview" }));
+    await waitFor(() => expect(mocks.complete).toHaveBeenCalledTimes(1));
+    expect(mocks.updateGrouping.mock.calls[1][0]).toMatchObject({ revision: 1, confirm: true, acknowledgeLotNumberReview: true });
+  });
+
+  it("keeps number edits after a failed save", async () => {
+    const { draft, grouping } = createReviewState(3);
+    draft.details.smart_upload_grouping_method = "lot_number";
+    grouping.groupingMethod = "lot_number";
+    grouping.groups[0].lotNumber = "2500";
+    mocks.loadDraft.mockResolvedValue(draft);
+    mocks.getGrouping.mockResolvedValue(grouping);
+    mocks.updateGrouping.mockRejectedValue(new Error("Connection interrupted"));
+    render(workspace());
+    fireEvent.change(await screen.findByLabelText("Lot number"), { target: { value: "2509" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save lot number" }));
+    await screen.findByText("Connection interrupted");
+    expect(screen.getByLabelText("Lot number")).toHaveValue("2509");
+  });
+
+  it("splits, joins and undoes numbered boundaries without removing or reordering a photo", async () => {
+    const { draft, grouping } = createReviewState(4, 4);
+    draft.details.smart_upload_grouping_method = "lot_number";
+    grouping.groupingMethod = "lot_number";
+    grouping.groups[0].lotNumber = "2500";
+    grouping.metrics = [{ fileId: "images-2", kind: "lot_start", lotNumber: "2501", meanLuminance: 0, variance: 0, darkPixelRatio: 0, isDivider: false }];
+    mocks.loadDraft.mockResolvedValue(draft);
+    mocks.getGrouping.mockResolvedValue(grouping);
+    let revision = 0;
+    mocks.updateGrouping.mockImplementation(async (args) => ({ ...grouping, revision: ++revision, groups: args.groups.map((group: { fileIds: string[]; lotNumber?: string }, index: number) => ({ ...group, groupIndex: index, imageCount: group.fileIds.length, overLimit: false })) }));
+    render(workspace());
+    await screen.findByLabelText("Lot number");
+    fireEvent.click(screen.getAllByRole("button", { name: "Start new lot here" })[1]);
+    await screen.findByText("Lot 2501");
+    expect(mocks.updateGrouping.mock.calls[0][0].groups).toEqual([{ fileIds: ["images-0", "images-1"], lotNumber: "2500" }, { fileIds: ["images-2", "images-3"], lotNumber: "2501" }]);
+    fireEvent.click(screen.getByRole("button", { name: "Join previous lot" }));
+    await screen.findByText("Joined with the previous lot. All images were retained.");
+    expect(mocks.updateGrouping.mock.calls[1][0].groups).toEqual([{ fileIds: ["images-0", "images-1", "images-2", "images-3"], lotNumber: "2500" }]);
+    fireEvent.click(screen.getByRole("button", { name: "Undo" }));
+    await screen.findByText("Previous lot arrangement restored.");
+    expect(mocks.updateGrouping.mock.calls[2][0].groups).toEqual(mocks.updateGrouping.mock.calls[0][0].groups);
+    for (const [call] of mocks.updateGrouping.mock.calls) {
+      expect(call.dividerFileIds).toEqual([]);
+      expect(call.groups.flatMap((group: { fileIds: string[] }) => group.fileIds)).toEqual(["images-0", "images-1", "images-2", "images-3"]);
+      expect(call).not.toHaveProperty("acknowledgeLotNumberReview");
+    }
+  });
+
+  it("recovers numbered mode from a server-only draft with the default entry method", async () => {
+    const { draft, grouping } = createReviewState(3);
+    grouping.groupingMethod = "lot_number";
+    grouping.groups[0].lotNumber = "2500";
+    mocks.loadDraft.mockResolvedValue(null);
+    mocks.getGrouping.mockResolvedValue(grouping);
+    mocks.saveServerDraft.mockImplementation(async (args) => ({ ...draft, ...args }));
+    render(<SmartUploadWorkspace open kind="asset" userId="user-1" scopeId="scope-1" resumeSessionId="session-1" details={{}} onClose={vi.fn()} onSubmitted={vi.fn()} />);
+    await screen.findByRole("heading", { name: "Lot Number Upload" });
+    expect(screen.getByLabelText("Lot number")).toHaveValue("2500");
+    expect(mocks.saveServerDraft).toHaveBeenCalledWith(expect.objectContaining({ details: expect.objectContaining({ smart_upload_grouping_method: "lot_number" }) }));
+    expect(mocks.uploadFiles).not.toHaveBeenCalled();
+  });
+
+  it("requires a missing lot number and does not offer to exclude unreadable numbered photos", async () => {
+    const { draft, grouping } = createReviewState(3);
+    draft.details.smart_upload_grouping_method = "lot_number";
+    grouping.groupingMethod = "lot_number";
+    grouping.metrics = [{ fileId: "images-1", error: "Unreadable original", meanLuminance: 0, variance: 0, darkPixelRatio: 0, isDivider: false }];
+    mocks.loadDraft.mockResolvedValue(draft);
+    mocks.getGrouping.mockResolvedValue(grouping);
+    render(workspace());
+    await screen.findByLabelText("Lot number");
+    fireEvent.click(screen.getByRole("checkbox", { name: /I checked every lot number/ }));
+    expect(screen.getByRole("button", { name: "Create preview" })).toBeDisabled();
+    expect(screen.queryByRole("button", { name: "Exclude from report" })).not.toBeInTheDocument();
+    expect(mocks.updateGrouping).not.toHaveBeenCalled();
+  });
+
+  it("blocks duplicate lot numbers even after explicit review acknowledgement", async () => {
+    const { draft, grouping } = createReviewState(6);
+    draft.details.smart_upload_grouping_method = "lot_number";
+    grouping.groupingMethod = "lot_number";
+    grouping.groups.forEach((group) => { group.lotNumber = "2500"; });
+    grouping.warnings = ["Lot number 2500 appears more than once. Review the boundaries and number before confirming."];
+    mocks.loadDraft.mockResolvedValue(draft);
+    mocks.getGrouping.mockResolvedValue(grouping);
+    render(workspace());
+    await screen.findByLabelText("Lot number");
+    expect(screen.getByText(grouping.warnings[0])).toBeVisible();
+    fireEvent.click(screen.getByRole("checkbox", { name: /I checked every lot number/ }));
+    expect(screen.getByRole("button", { name: "Create preview" })).toBeDisabled();
+    expect(mocks.updateGrouping).not.toHaveBeenCalled();
   });
 
   it("pages large reviews instead of accumulating full-resolution images", async () => {

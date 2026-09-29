@@ -131,6 +131,7 @@ const normalizeNativePhoto = (
     displayUri: existing?.displayUri ?? rawDisplayUri ?? rawUri ?? uri,
     name: optionalString(raw.name) ?? existing?.name ?? fallbackName,
     type: optionalString(raw.type) ?? existing?.type ?? guessMimeType(uri, fallbackType),
+    size: optionalNumber(raw.size) ?? existing?.size,
     width: optionalNumber(raw.width) ?? existing?.width,
     height: optionalNumber(raw.height) ?? existing?.height,
     megapixels: optionalNumber(raw.megapixels) ?? existing?.megapixels,
@@ -315,10 +316,11 @@ const NativeAuctionCameraScreen: React.FC<CameraScreenProps> = (props) => {
       const startingPhotos = JSON.stringify(current.lots);
       const recovered = fallbackJournal ? fallbackJournal.lots as MixedLot[] : normalizeNativeLots(journal, current.lots);
       const count = recovered.reduce((total, lot) => total + lot.files.length + lot.extraFiles.length, 0);
-      if (!count && !recovered.some((lot) => lot.videoFile)) return;
-      Alert.alert('Recover camera photos?', `${count} photos in ${recovered.length} lots were saved by an interrupted camera session. Recovering restores that photo layout; your report details are kept.`, [
+      const videos = recovered.reduce((total, lot) => total + (lot.videoFile ? 1 : 0), 0);
+      if (!count && !videos) return;
+      Alert.alert(videos ? 'Recover camera media?' : 'Recover camera photos?', `${count} photos${videos ? ` and ${videos} video${videos === 1 ? '' : 's'}` : ''} in ${recovered.length} lots were saved by an interrupted camera session. Recovering restores that media layout; your report details are kept.`, [
         { text: 'Not now', style: 'cancel' },
-        { text: 'Recover photos', onPress: () => {
+        { text: videos ? 'Recover media' : 'Recover photos', onPress: () => {
           void (async () => {
             if (!stillCurrent()) return;
             if (JSON.stringify(latestPropsRef.current.lots) !== startingPhotos) {

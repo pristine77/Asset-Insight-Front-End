@@ -30,7 +30,7 @@ async function tryRefresh(request: NextRequest): Promise<string | null> {
 export async function proxyJsonWithAdminAuth(
   request: NextRequest,
   targetPath: string,
-  init: { method?: string; headers?: Record<string, string>; body?: BodyInit | undefined } = {}
+  init: { method?: string; headers?: Record<string, string>; body?: BodyInit | undefined; replayAfterRefresh?: boolean } = {}
 ) {
   let token = request.cookies.get("cv_admin")?.value;
   let refreshedInitially = false;
@@ -52,7 +52,7 @@ export async function proxyJsonWithAdminAuth(
     cache: "no-store",
   });
 
-  if (res.status !== 401) {
+  if (res.status !== 401 || init.replayAfterRefresh === false) {
     if (res.status === 204) {
       const response = new NextResponse(null, { status: 204 });
       if (refreshedInitially) setAccessCookie(response, token);

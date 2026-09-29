@@ -922,7 +922,8 @@ class CameraViewActivity : BaseActivity() {
                 }
             }
         }
-        engine.onVideoRecorded = { uri -> runOnUiThread { onRecordingSaved(uri) } }
+        engine.onVideoFinalizing = { uri -> viewModel.onVideoRecorded(uri) }
+        engine.onVideoRecorded = { uri -> onRecordingSaved(uri) }
         engine.onRecordingError = { err ->
             runOnUiThread {
                 clearPreviewFreeze()
@@ -1600,10 +1601,7 @@ class CameraViewActivity : BaseActivity() {
         }
 
         binding.textViewDone.setOnClickListener {
-            if (captureInFlight.get() || processingCount > 0) {
-                android.widget.Toast.makeText(this, "Please wait for the photo to finish saving.", android.widget.Toast.LENGTH_SHORT).show()
-                return@setOnClickListener
-            }
+            if (waitForCapture()) return@setOnClickListener
             val returnStartMs = SystemClock.elapsedRealtime()
             viewModel.repository.finaliseCurrentLot(viewModel.currentLotNumber.value ?: 1)
             viewModel.finalisePendingExtraPhotos()
@@ -1626,6 +1624,10 @@ class CameraViewActivity : BaseActivity() {
     }
 
     private fun waitForCapture(): Boolean {
+        if (pendingStartRecording || isRecordButtonLocked || (::engine.isInitialized && engine.isRecording())) {
+            toast(if (::engine.isInitialized && engine.isStopping()) "Please wait for the video to finish saving." else "Stop recording before leaving this lot.")
+            return true
+        }
         if (!captureInFlight.get() && processingCount == 0) return false
         toast("Please wait for the photo to finish saving.")
         return true
@@ -1756,6 +1758,10 @@ class CameraViewActivity : BaseActivity() {
 
         binding.imageViewRecordVideo.setOnClickListener {
             if (!::engine.isInitialized) return@setOnClickListener
+            if (captureInFlight.get() || processingCount > 0) {
+                toast("Please wait for the photo to finish saving.")
+                return@setOnClickListener
+            }
             if (isRecordButtonLocked) return@setOnClickListener
             if (engine.isStopping()) return@setOnClickListener
 
@@ -2028,6 +2034,7 @@ class CameraViewActivity : BaseActivity() {
 
     private fun setupGalleryClick() {
         val openGallery: () -> Unit = open@{
+            if (waitForCapture()) return@open
             val uris = viewModel.getDisplayedLotUris()
             if (uris.isEmpty()) return@open
 
@@ -3215,17 +3222,21 @@ class CameraViewActivity : BaseActivity() {
         binding.previewView.postDelayed(recordingTimer!!, 1000)
     }
 
-    private fun onRecordingSaved(uri: Uri) {
+    private fun onRecordingSaved(uri: Uri): Boolean {
         lastVideoUri = uri
-        stopRecordingUI()
         viewModel.onVideoRecorded(uri)
-        toast("Video saved!")
+        val journalSaved = viewModel.repository.isCapturePersisted()
+        stopRecordingUI()
+        if (journalSaved) toast("720p video saved")
+        else toast("Video retained. Tap Done to save its lot details.")
+        return journalSaved
     }
 
     private fun stopRecordingUI() {
         // Unlock screen orientation
         requestedOrientation = android.content.pm.ActivityInfo.SCREEN_ORIENTATION_FULL_SENSOR
         isRecording = false; pendingStartRecording = false
+        isRecordButtonLocked = false
         binding.recordingTimer.visibility = View.GONE
         binding.recordingDot.visibility = View.GONE
         recordingTimer?.let { binding.previewView.removeCallbacks(it) }

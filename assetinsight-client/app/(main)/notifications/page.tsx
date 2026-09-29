@@ -1,6 +1,7 @@
 "use client";
 
 import { Bell, Check, CheckCheck, Trash2 } from "lucide-react";
+import Link from "next/link";
 import { useMemo, useState } from "react";
 import useSWR, { mutate } from "swr";
 import { toast } from "@/components/ui/toast";
@@ -8,6 +9,8 @@ import { notificationCacheKey, NotificationsService, type WorkspaceNotification 
 import styles from "./Notifications.module.css";
 import PreviewReminderContent from "@/components/notifications/PreviewReminderContent";
 import { previewReminderDetails } from "@/lib/previewReminderNotification";
+import { crmNotificationHref } from "@/lib/crmNotification";
+import { useAuthContext } from "@/context/AuthContext";
 
 type Filter = "all" | "new" | "seen";
 
@@ -16,13 +19,15 @@ function formatDate(value: string) {
 }
 
 export default function NotificationsPage() {
+  const { user } = useAuthContext();
+  const ownerId = user?._id || user?.id;
   const [filter, setFilter] = useState<Filter>("all");
-  const cacheKey = notificationCacheKey(1, 100);
+  const cacheKey = ownerId ? notificationCacheKey(1, 100, ownerId) : null;
   const { data, isLoading, error } = useSWR(cacheKey, () => NotificationsService.list(1, 100), { revalidateOnFocus: true });
   const items = useMemo(() => (data?.items || []).filter((item) => filter === "all" || (filter === "new" ? !item.read : item.read)), [data?.items, filter]);
   const seenCount = Math.max(0, (data?.total || 0) - (data?.unreadCount || 0));
 
-  const refresh = () => mutate((key) => typeof key === "string" && key.startsWith("/notifications?"));
+  const refresh = () => mutate((key) => typeof key === "string" && key.startsWith("/notifications?") && key.endsWith(`&cacheOwner=${encodeURIComponent(ownerId || "")}`));
   const markRead = async (item: WorkspaceNotification) => {
     if (item.read) return;
     await NotificationsService.markRead(item.id);
@@ -73,6 +78,7 @@ export default function NotificationsPage() {
                   <summary>Read message and report guidance</summary>
                   <PreviewReminderContent item={item} />
                 </details> : <p>{item.body}</p>}
+                {crmNotificationHref(item) ? <Link className="app-button app-button--secondary" href={crmNotificationHref(item)!} onClick={() => { void markRead(item).catch(() => undefined); }}>Open CRM</Link> : null}
                 <time>{formatDate(item.createdAt)}</time></div>
               <div className={styles.actions}>
                 {!item.read ? <button title="Mark read" aria-label={`Mark ${item.title} read`} onClick={() => void markRead(item)}><Check size={17} /></button> : null}

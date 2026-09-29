@@ -40,6 +40,7 @@ import {
   waitForSmartUploadGrouping,
   type SmartUploadGrouping,
   type SmartUploadCompletionResult,
+  type SmartUploadGroupingMethod,
 } from "@/services/smartUpload";
 import {
   createSmartUploadDraft,
@@ -61,6 +62,7 @@ import {
 import { SMART_UPLOAD_MAX_FILES, SMART_UPLOAD_MAX_FILE_BYTES, SMART_UPLOAD_MAX_TOTAL_BYTES } from "./limits";
 
 type Props = {
+  groupingMethod?: SmartUploadGroupingMethod;
   open: boolean;
   kind: SmartUploadKind;
   userId: string;
@@ -189,6 +191,9 @@ function groupingReviewState(
   draft: SmartUploadDraft,
   grouping: SmartUploadGrouping
 ) {
+  if (draft.details.smart_upload_grouping_method === "lot_number" && grouping.groupingMethod !== "lot_number") {
+    throw new Error("This server has not confirmed Lot Number Upload support. Keep this upload and update the backend before continuing; no preview was submitted.");
+  }
   const unplacedDividerIds = unresolvedDividerIdsFor(draft, grouping);
   const ambiguous =
     unplacedDividerIds.length > 0 ||
@@ -200,7 +205,7 @@ function groupingReviewState(
     unplacedDividerIds,
     ambiguous,
     details: withPersistedOrderReview(
-      draft.details,
+      { ...draft.details, smart_upload_grouping_method: grouping.groupingMethod || "black_divider" },
       unplacedDividerIds,
       ambiguous
     ),
@@ -446,9 +451,9 @@ function ImagePreview({
   );
 }
 
-function progressLabel(stage: SmartUploadDraft["stage"]) {
+function progressLabel(stage: SmartUploadDraft["stage"], numbered = false) {
   if (stage === "uploading") return "Uploading images";
-  if (stage === "classifying") return "Detecting black dividers";
+  if (stage === "classifying") return numbered ? "Reading lot-number photos" : "Detecting black dividers";
   if (stage === "submitting") return "Creating preview";
   if (stage === "review") return "Review detected lots";
   if (stage === "failed") return "Smart Upload needs attention";
@@ -487,6 +492,7 @@ function attachGroupingUrls(
 }
 
 export default function SmartUploadWorkspace({
+  groupingMethod = "black_divider",
   open,
   kind,
   userId,
@@ -501,6 +507,11 @@ export default function SmartUploadWorkspace({
   const [loadingDraft, setLoadingDraft] = useState(false);
   const [draft, setDraft] = useState<SmartUploadDraft | null>(null);
   const [grouping, setGrouping] = useState<SmartUploadGrouping | null>(null);
+  const [acknowledgedRevision, setAcknowledgedRevision] = useState<number | null>(null);
+  const [lotNumberEdit, setLotNumberEdit] = useState<{ key: string; value: string } | null>(null);
+  const numbered = (grouping?.groupingMethod || draft?.details.smart_upload_grouping_method || groupingMethod) === "lot_number";
+  const workspaceTitle = numbered ? "Lot Number Upload" : "Smart Upload";
+  const hasUnsavedLotNumber = Boolean(numbered && lotNumberEdit && lotNumberEdit.value !== (grouping?.groups.find((group) => group.fileIds[0] === lotNumberEdit.key)?.lotNumber || ""));
   const [progress, setProgress] = useState<UploadProgress | null>(null);
   const [dragActive, setDragActive] = useState(false);
   const [busyFileId, setBusyFileId] = useState<string | null>(null);
@@ -534,7 +545,7 @@ export default function SmartUploadWorkspace({
   const uploadLockRef = useRef(false);
   const completionLockRef = useRef(false);
   const detailsRef = useRef(details);
-  detailsRef.current = details;
+  detailsRef.current = { ...details, smart_upload_grouping_method: groupingMethod };
   const callbacksRef = useRef({ onSubmitted, onClose });
   callbacksRef.current = { onSubmitted, onClose };
 
@@ -545,6 +556,8 @@ export default function SmartUploadWorkspace({
     if (signal?.aborted) return;
     setDraft(null);
     setGrouping(null);
+    setAcknowledgedRevision(null);
+    setLotNumberEdit(null);
     try {
       await callbacksRef.current.onSubmitted(result);
     } catch {
@@ -595,6 +608,8 @@ export default function SmartUploadWorkspace({
     if (!open || !userId) return;
     let cancelled = false;
     setLoadingDraft(true);
+    setAcknowledgedRevision(null);
+    setLotNumberEdit(null);
     setError(null);
     setDraft(null);
     setGrouping(null);
@@ -652,7 +667,7 @@ export default function SmartUploadWorkspace({
             clientSubmissionId:
               clientSubmissionId || newSubmissionId(kind),
             sessionId: resumeSessionId,
-            details: detailsRef.current,
+            details: { ...detailsRef.current, smart_upload_grouping_method: serverGrouping.groupingMethod || "black_divider" },
             stage,
             files: uniqueFiles.map((file) => ({
               fileId: file.fileId,
@@ -676,9 +691,9 @@ export default function SmartUploadWorkspace({
         if (cancelled || !restored) return;
         // Current form details win when a user resumes before upload. Once a
         // session exists the same client submission id keeps server retries safe.
-        const resumed = {
+        const resumed: SmartUploadDraft = {
           ...restored,
-          details: { ...restored.details, ...detailsRef.current },
+          details: { ...restored.details, ...detailsRef.current, smart_upload_grouping_method: restored.details.smart_upload_grouping_method || "black_divider" },
           // A browser close can interrupt an in-flight PUT. The server session
           // and confirmed files are reusable, so expose an explicit resume action.
           stage:
@@ -779,6 +794,7 @@ export default function SmartUploadWorkspace({
                 setDraft((current) =>
                   current ? { ...current, stage: "classifying" } : current
                 );
+                if (result.groupingMethod === "lot_number") setLoadingDraft(false);
                 abortRef.current?.abort();
                 const controller = new AbortController();
                 abortRef.current = controller;
@@ -890,6 +906,21 @@ export default function SmartUploadWorkspace({
     draft?.stage === "classifying" ||
     checkingCompletion ||
     Boolean(busyFileId);
+  // A persisted session and the server's queued job receipt—not the local
+  // classifying stage alone—prove that closing cannot interrupt transport.
+  const canCloseWhileClassifying = Boolean(
+    numbered &&
+    !loadingDraft &&
+    !checkingCompletion &&
+    !busyFileId &&
+    draft?.stage === "classifying" &&
+    draft.sessionId === grouping?.sessionId &&
+    grouping?.groupingMethod === "lot_number" &&
+    grouping.groupingStatus === "classifying" &&
+    grouping.classificationJobId &&
+    grouping.expectedFileCount > 0 &&
+    grouping.confirmedFileCount === grouping.expectedFileCount
+  );
   const hasUnrecoverableLiveFiles = Boolean(
     draft?.files.some((file) => !file.uploaded && Boolean(file.file))
   );
@@ -908,16 +939,21 @@ export default function SmartUploadWorkspace({
     !selectedOrderAcknowledged;
 
   const requestClose = useCallback(() => {
-    if (active || selectionMustStayOpen) {
+    if ((active && !canCloseWhileClassifying) || selectionMustStayOpen) {
       setError(
         selectionMustStayOpen
           ? "This browser could not store a recovery copy. Upload or discard these selected files before closing Smart Upload."
-          : "Smart Upload is still working. Wait for this step to finish before closing."
+          : numbered
+            ? "Keep Lot Number Upload open until every image is uploaded and processing is confirmed."
+            : "Smart Upload is still working. Wait for this step to finish before closing."
       );
       return;
     }
+    // Stop this window's polling only. Never cancel the durable server job or
+    // remove the saved session that the user will reopen for explicit review.
+    if (canCloseWhileClassifying) abortRef.current?.abort();
     onClose();
-  }, [active, onClose, selectionMustStayOpen]);
+  }, [active, canCloseWhileClassifying, numbered, onClose, selectionMustStayOpen]);
 
   useEffect(() => {
     if (!open) return;
@@ -934,7 +970,7 @@ export default function SmartUploadWorkspace({
   }, [open, requestClose]);
 
   useEffect(() => {
-    if (!open || (!active && !selectionMustStayOpen)) return;
+    if (!open || ((!active || canCloseWhileClassifying) && !selectionMustStayOpen)) return;
     const preventAccidentalNavigation = (event: BeforeUnloadEvent) => {
       event.preventDefault();
       event.returnValue = "";
@@ -943,7 +979,7 @@ export default function SmartUploadWorkspace({
     return () => {
       window.removeEventListener("beforeunload", preventAccidentalNavigation);
     };
-  }, [active, open, selectionMustStayOpen]);
+  }, [active, canCloseWhileClassifying, open, selectionMustStayOpen]);
 
   const fileById = useMemo(
     () => new Map((draft?.files || []).map((item) => [item.fileId, item])),
@@ -993,7 +1029,7 @@ export default function SmartUploadWorkspace({
     [selectedGroupFiles, selectedLotPhotoPage]
   );
   const hasIneffectiveDivider = Boolean(
-    grouping?.warnings.some((warning) =>
+    !numbered && grouping?.warnings.some((warning) =>
       /(first image|last image|consecutive|non-empty lots|cannot separate)/i.test(
         warning
       )
@@ -1187,8 +1223,8 @@ export default function SmartUploadWorkspace({
         setSelectedOrderAcknowledged(false);
         setSequencePage(0);
         setGroupPage(0);
-        const resolvedOrder = resolveSmartUploadFileOrder(selected);
-        const unresolvedDividerIds = resolvedOrder.ambiguous
+        const resolvedOrder = resolveSmartUploadFileOrder(selected, { groupingMethod });
+        const unresolvedDividerIds = groupingMethod !== "lot_number" && resolvedOrder.ambiguous
           ? resolvedOrder.files.flatMap((file, index) =>
               isLikelySmartUploadDividerName(file.name) ? [`images-${index}`] : []
             )
@@ -1230,7 +1266,7 @@ export default function SmartUploadWorkspace({
         setError(getSmartUploadError(selectionError));
       }
     },
-    [clientSubmissionId, kind, scopeId, userId]
+    [clientSubmissionId, groupingMethod, kind, scopeId, userId]
   );
 
   const runUploadAndDetection = useCallback(async () => {
@@ -1289,7 +1325,7 @@ export default function SmartUploadWorkspace({
         {
           sessionId: session.sessionId,
           stage: "uploading",
-          details: { ...draft.details, ...detailsRef.current },
+          details: { ...draft.details, ...detailsRef.current, smart_upload_grouping_method: draft.details.smart_upload_grouping_method || "black_divider" },
         },
         scopeId
       );
@@ -1337,6 +1373,7 @@ export default function SmartUploadWorkspace({
         () => undefined
       );
       const started = await startSmartUploadDetection(kind, session.sessionId);
+      setError(null);
       setGrouping(started);
       abortRef.current?.abort();
       const controller = new AbortController();
@@ -1345,8 +1382,9 @@ export default function SmartUploadWorkspace({
         kind,
         sessionId: session.sessionId,
         signal: controller.signal,
-        onProgress: setGrouping,
+        onProgress: (next) => { if (!controller.signal.aborted) setGrouping(next); },
       });
+      if (controller.signal.aborted) return;
       const reviewFiles = attachGroupingUrls(confirmedFiles, detected);
       const reviewDraft = {
         ...sessionDraft,
@@ -1642,6 +1680,7 @@ export default function SmartUploadWorkspace({
       notice: string,
       focusLotIndex: number,
       options: {
+        lotNumbers?: Array<string | undefined>;
         resolvedDividerId?: string;
         dividerFileIds?: string[];
         confirmOrder?: boolean;
@@ -1694,11 +1733,12 @@ export default function SmartUploadWorkspace({
           dividerFileIds:
             options.dividerFileIds || grouping.dividerFileIds,
           revision: grouping.revision,
-          groups: nextGroups,
+          groups: numbered ? nextGroups.map((fileIds, index) => ({ fileIds, lotNumber: (options.lotNumbers ? options.lotNumbers[index] : grouping.groups[index]?.lotNumber) ?? "" })) : nextGroups,
           orderReviewRequired: nextOrderingAmbiguous,
           unresolvedDividerIds: nextUnplacedDividerIds,
         });
         setGrouping(updated);
+        if (options.lotNumbers) setLotNumberEdit(null);
         const reviewFiles = attachGroupingUrls(draft.files, updated);
         const reviewState = groupingReviewState(
           { ...draft, files: reviewFiles, details: provisionalDetails },
@@ -1752,6 +1792,7 @@ export default function SmartUploadWorkspace({
       draft,
       grouping,
       kind,
+      numbered,
       orderingReview?.ambiguous,
       recoverStaleGrouping,
       scopeId,
@@ -1804,11 +1845,13 @@ export default function SmartUploadWorkspace({
       if (!source || fileIndex >= source.length) return;
       const nextLot = source.splice(fileIndex);
       nextGroups.splice(lotIndex + 1, 0, nextLot);
+      const lotNumbers = grouping.groups.map((group) => group.lotNumber);
+      lotNumbers.splice(lotIndex + 1, 0, grouping.metrics.find((metric) => metric.fileId === nextLot[0])?.lotNumber || "");
       void saveAuthoritativeGroups(
         nextGroups,
         `Created Lot ${lotIndex + 2} with ${nextLot.length} photos.`,
         lotIndex + 1,
-        resolvedDividerId ? { resolvedDividerId } : {}
+        { lotNumbers, ...(resolvedDividerId ? { resolvedDividerId } : {}) }
       );
     },
     [grouping, saveAuthoritativeGroups]
@@ -1882,6 +1925,7 @@ export default function SmartUploadWorkspace({
       {
         recordUndo: false,
         dividerFileIds: snapshot.dividerFileIds,
+        lotNumbers: snapshot.groups.map((group) => group.lotNumber),
         restoreUnplacedDividerIds: snapshot.unplacedDividerIds,
         restoreOrderingAmbiguous: snapshot.orderingAmbiguous,
       }
@@ -1896,15 +1940,17 @@ export default function SmartUploadWorkspace({
       grouping.metrics.some(
         (metric) => Boolean(metric.error) && !dividerSet.has(metric.fileId)
       ) ||
-      grouping.warnings.some((warning) =>
+      (!numbered && grouping.warnings.some((warning) =>
         /(first image|last image|consecutive|non-empty lots|cannot separate)/i.test(
           warning
         )
-      ) ||
+      )) ||
       grouping.orderReviewRequired ||
       grouping.unresolvedDividerIds.length > 0 ||
       orderingReview?.ambiguous === true ||
       unplacedDividerIds.length > 0
+      || (numbered && (acknowledgedRevision !== grouping.revision || grouping.warnings.length > 0 || grouping.groups.some((group) => !group.lotNumber?.trim())))
+      || hasUnsavedLotNumber
     ) {
       setError("Resolve every image and lot-order warning before creating the preview.");
       return;
@@ -1931,7 +1977,8 @@ export default function SmartUploadWorkspace({
           sessionId: draft.sessionId,
           dividerFileIds: grouping.dividerFileIds,
           revision: grouping.revision,
-          groups: grouping.groups.map((group) => group.fileIds),
+          groups: grouping.groups.map((group) => numbered ? { fileIds: group.fileIds, lotNumber: group.lotNumber } : group.fileIds),
+          acknowledgeLotNumberReview: numbered && acknowledgedRevision === grouping.revision,
           orderReviewRequired: false,
           unresolvedDividerIds: [],
           confirm: true,
@@ -1969,6 +2016,9 @@ export default function SmartUploadWorkspace({
     dividerSet,
     grouping,
     kind,
+    numbered,
+    acknowledgedRevision,
+    hasUnsavedLotNumber,
     orderingReview?.ambiguous,
     refreshLatestGrouping,
     runCompletion,
@@ -2035,7 +2085,8 @@ export default function SmartUploadWorkspace({
     grouping.orderReviewRequired ||
     grouping.unresolvedDividerIds.length > 0 ||
     orderingReview?.ambiguous === true ||
-    unplacedDividerIds.length > 0;
+    unplacedDividerIds.length > 0 ||
+    (numbered && (acknowledgedRevision !== grouping?.revision || Boolean(grouping?.warnings.length) || grouping?.groups.some((group) => !group.lotNumber?.trim()) || hasUnsavedLotNumber));
 
   return createPortal(
     <div
@@ -2050,7 +2101,7 @@ export default function SmartUploadWorkspace({
             type="button"
             onClick={requestClose}
             className="grid h-10 w-10 shrink-0 place-items-center rounded-md border border-[var(--app-control-border)] bg-[var(--app-panel)] hover:bg-[var(--app-panel-alt)]"
-            aria-label="Close Smart Upload"
+            aria-label={`Close ${workspaceTitle}`}
           >
             <ArrowLeft className="h-5 w-5" />
           </button>
@@ -2059,10 +2110,10 @@ export default function SmartUploadWorkspace({
               id={`smart-upload-${kind}-title`}
               className="truncate text-lg font-bold sm:text-xl"
             >
-              Smart Upload
+              {workspaceTitle}
             </h2>
             <p className="truncate text-xs text-[var(--app-text-muted)] sm:text-sm">
-              Black images separate Bundle lots automatically.
+              {numbered ? "A lot-number photo starts each lot and stays with its photos." : "Black images separate Bundle lots automatically."}
             </p>
           </div>
         </div>
@@ -2175,7 +2226,7 @@ export default function SmartUploadWorkspace({
                 </div>
                 <h3 className="mt-5 text-2xl font-bold">Drop all lot images here</h3>
                 <p className="mt-2 text-sm leading-6 text-[var(--app-text-muted)]">
-                  Keep one black image between lots. Smart Upload suggests an order
+                  {numbered ? "Start every lot with its lot-number sign. All photos, including the signs, are kept. Review and correct lot numbers and boundaries before creating a preview. " : "Keep one black image between lots. "}Upload suggests an order
                   when a computer returns files in folder order, then asks you to
                   confirm anything that cannot be proved safely.
                 </p>
@@ -2217,7 +2268,7 @@ export default function SmartUploadWorkspace({
                       ) : (
                         <ScanLine className="h-3.5 w-3.5" />
                       )}
-                      {progressLabel(draft.stage)}
+                      {progressLabel(draft.stage, numbered)}
                     </span>
                     <span className="text-sm text-[var(--app-text-muted)]">
                       {draft.files.length ? `${draft.files.length.toLocaleString()} images - ${formatBytes(totalBytes)}` : "Saved server upload"}
@@ -2242,7 +2293,7 @@ export default function SmartUploadWorkspace({
                       : draft.stage === "classifying"
                         ? `${Math.round(grouping?.progressPercent || 0)}% classified`
                         : draft.stage === "review"
-                          ? `${grouping?.groups.length || 0} lots detected - ${grouping?.dividerFileIds.length || 0} dividers excluded`
+                          ? `${grouping?.groups.length || 0} lots detected - ${numbered ? "all images retained" : `${grouping?.dividerFileIds.length || 0} dividers excluded`}`
                           : draft.stage === "submitting"
                             ? "Images uploaded. Waiting for preview processing to be confirmed."
                           : selectionReviewRequired
@@ -2262,6 +2313,16 @@ export default function SmartUploadWorkspace({
                   </button>
                 ) : null}
               </section>
+
+              {canCloseWhileClassifying ? (
+                <section aria-label="Background lot processing" className="flex flex-col gap-3 rounded-md border border-[var(--app-border)] bg-[var(--app-panel)] p-4 sm:flex-row sm:items-center sm:justify-between">
+                  <div className="min-w-0 text-sm leading-6">
+                    <p className="font-semibold">All images are uploaded. Lot-number processing will continue safely on the server.</p>
+                    <p className="text-[var(--app-text-muted)]">You can close this window and reopen this saved upload from Drafts. Review the lots before creating a preview; it will not submit automatically.</p>
+                  </div>
+                  <button type="button" onClick={requestClose} className="min-h-11 shrink-0 rounded-md border border-[var(--app-control-border)] px-4 text-sm font-bold">Close and keep processing</button>
+                </section>
+              ) : null}
 
               {draft.stage === "submitting" ? (
                 <section aria-label="Preview creation status" className="rounded-md border border-[var(--app-border)] bg-[var(--app-panel)] p-4 sm:p-5">
@@ -2356,8 +2417,7 @@ export default function SmartUploadWorkspace({
                       : `${unreadableImages.length} images could not be checked`}
                   </p>
                   <p className="mt-1 text-sm leading-6">
-                    Smart Upload will not put an unreadable image into a report. Exclude
-                    it below, or discard this upload and re-select a replacement image.
+                    {numbered ? "One or more originals could not be read. Keep your original files and replace unreadable images before starting a new upload; no image will be silently removed." : "Smart Upload will not put an unreadable image into a report. Exclude it below, or discard this upload and re-select a replacement image."}
                   </p>
                   <ul className="mt-3 grid gap-2 text-sm">
                     {unreadableImages.slice(0, 10).map((metric) => (
@@ -2368,14 +2428,14 @@ export default function SmartUploadWorkspace({
                         <span className="min-w-0 break-all font-semibold">
                           {fileById.get(metric.fileId)?.name || metric.fileId}
                         </span>
-                        <button
+                        {!numbered ? <button
                           type="button"
                           onClick={() => excludeUnreadableImage(metric.fileId)}
                           disabled={Boolean(busyFileId)}
                           className="min-h-10 shrink-0 rounded-md border border-[var(--app-danger-border)] px-3 font-bold disabled:opacity-50"
                         >
                           Exclude from report
-                        </button>
+                        </button> : null}
                       </li>
                     ))}
                   </ul>
@@ -2541,7 +2601,10 @@ export default function SmartUploadWorkspace({
                         <button
                           key={group.groupIndex}
                           type="button"
-                          onClick={() => setSelectedLotIndex(group.groupIndex)}
+                          onClick={() => {
+                            if (hasUnsavedLotNumber) { setError("Save the edited lot number before switching lots."); return; }
+                            setSelectedLotIndex(group.groupIndex);
+                          }}
                           aria-pressed={selectedLotIndex === group.groupIndex}
                           className={`w-full overflow-hidden rounded-md border bg-[var(--app-panel)] text-left ${
                             group.overLimit
@@ -2563,14 +2626,14 @@ export default function SmartUploadWorkspace({
                           </div>
                           <div className="flex items-center justify-between gap-3 px-3 py-3">
                             <div>
-                              <p className="font-bold">Lot {group.groupIndex + 1}</p>
+                              <p className="font-bold">Lot {numbered ? group.lotNumber || "— number needed" : group.groupIndex + 1}</p>
                               <p className="text-xs text-[var(--app-text-muted)]">
                                 {group.imageCount} photos - Bundle
                               </p>
                             </div>
                             {group.overLimit ? (
                               <span className="rounded bg-[var(--app-danger-soft)] px-2 py-1 text-xs font-bold text-[var(--app-danger)]">
-                                Add divider
+                                Split lot
                               </span>
                             ) : (
                               <Check className="h-5 w-5 text-emerald-600" />
@@ -2623,17 +2686,40 @@ export default function SmartUploadWorkspace({
                   <div className="flex flex-wrap items-start justify-between gap-3">
                     <div>
                       <h3 id="selected-lot-heading" className="text-lg font-bold">
-                        Lot {selectedLotIndex + 1} - {selectedGroup.imageCount} photos
+                        Lot {numbered ? selectedGroup.lotNumber || "— number needed" : selectedLotIndex + 1} - {selectedGroup.imageCount} photos
                       </h3>
                       <p className="mt-1 text-sm text-[var(--app-text-muted)]">
-                        Check this lot only. If a neighbour photo slipped across the boundary,
-                        move it with one tap.
+                        {numbered ? "The first photo starts this lot. Correct boundaries by splitting or joining lots; image order is preserved." : "Check this lot only. If a neighbour photo slipped across the boundary, move it with one tap."}
                       </p>
                     </div>
                     <span className="rounded-md bg-[var(--app-accent-soft)] px-3 py-1 text-xs font-bold text-[var(--app-accent)]">
                       Reviewing {selectedLotIndex + 1} of {grouping.groups.length}
                     </span>
                   </div>
+                  {numbered ? <div className="mt-4 flex flex-col gap-3 sm:flex-row sm:items-end">
+                    <label className="grid gap-1 text-sm font-semibold" htmlFor="smart-lot-number">Lot number
+                      <input id="smart-lot-number" maxLength={32} className="app-field min-h-11 w-full sm:w-48"
+                        value={lotNumberEdit?.key === selectedGroup.fileIds[0] ? lotNumberEdit.value : selectedGroup.lotNumber || ""}
+                        placeholder="Enter the sign number" disabled={Boolean(busyFileId)}
+                        onChange={(event) => setLotNumberEdit({ key: selectedGroup.fileIds[0], value: event.target.value })} />
+                    </label>
+                    <button type="button" disabled={Boolean(busyFileId) || lotNumberEdit?.key !== selectedGroup.fileIds[0]}
+                      className="min-h-11 rounded-md border border-[var(--app-control-border)] px-3 text-sm font-semibold disabled:opacity-40"
+                      onClick={() => {
+                        const lotNumbers = grouping.groups.map((group, index) => index === selectedLotIndex ? lotNumberEdit?.value.trim() || "" : group.lotNumber);
+                        void saveAuthoritativeGroups(grouping.groups.map((group) => [...group.fileIds]), "Lot number saved. Review the updated arrangement before creating the preview.", selectedLotIndex, { lotNumbers });
+                      }}>Save lot number</button>
+                    {selectedLotIndex > 0 ? <button type="button" disabled={Boolean(busyFileId) || hasUnsavedLotNumber || selectedGroup.imageCount + grouping.groups[selectedLotIndex - 1].imageCount > 200}
+                      className="min-h-11 rounded-md border border-[var(--app-control-border)] px-3 text-sm font-semibold disabled:opacity-40"
+                      onClick={() => {
+                        const groups = grouping.groups.map((group) => [...group.fileIds]);
+                        const lotNumbers = grouping.groups.map((group) => group.lotNumber);
+                        groups[selectedLotIndex - 1].push(...groups[selectedLotIndex]);
+                        groups.splice(selectedLotIndex, 1);
+                        lotNumbers.splice(selectedLotIndex, 1);
+                        void saveAuthoritativeGroups(groups, "Joined with the previous lot. All images were retained.", selectedLotIndex - 1, { lotNumbers });
+                      }}>Join previous lot</button> : null}
+                  </div> : null}
                   <div className="mt-4 grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-6">
                     {visibleSelectedGroupFiles.map((item, visibleFileIndex) => {
                       const fileIndex =
@@ -2666,13 +2752,13 @@ export default function SmartUploadWorkspace({
                                       : undefined)
                                 )
                               }
-                              disabled={Boolean(busyFileId)}
+                              disabled={Boolean(busyFileId) || hasUnsavedLotNumber}
                               className="min-h-10 rounded-md border border-[var(--app-control-border)] px-2 text-xs font-bold disabled:opacity-50"
                             >
                               Start new lot here
                             </button>
                           ) : null}
-                          <div className="grid grid-cols-2 gap-2">
+                          {!numbered ? <div className="grid grid-cols-2 gap-2">
                             <button
                               type="button"
                               onClick={() =>
@@ -2717,7 +2803,7 @@ export default function SmartUploadWorkspace({
                               Next
                               <ArrowRight className="h-3.5 w-3.5" />
                             </button>
-                          </div>
+                          </div> : null}
                         </div>
                       </article>
                       );
@@ -2819,8 +2905,8 @@ export default function SmartUploadWorkspace({
                 </section>
               ) : null}
 
-              {grouping?.groupingStatus === "review_ready" ||
-              grouping?.groupingStatus === "confirmed" ? (
+              {!numbered && (grouping?.groupingStatus === "review_ready" ||
+              grouping?.groupingStatus === "confirmed") ? (
                 <section aria-labelledby="sequence-heading">
                   <div className="flex items-end justify-between gap-3">
                     <div>
@@ -2918,6 +3004,17 @@ export default function SmartUploadWorkspace({
                   ) : null}
                 </section>
               ) : null}
+              {numbered && grouping && draft.stage === "review" ? <section className="rounded-md border border-[var(--app-border)] bg-[var(--app-panel)] p-4" aria-label="Lot-number review">
+                <h3 className="font-bold">Confirm lot numbers and boundaries</h3>
+                {grouping.warnings.length ? <div role="alert" className="mt-2 text-sm text-[var(--app-danger)]"><ul className="list-disc pl-5">{grouping.warnings.slice(0, 10).map((warning, index) => <li key={index}>{warning}</li>)}</ul>{grouping.warnings.length > 10 ? <p>{grouping.warnings.length - 10} more warnings. Review the remaining lots.</p> : null}</div> : null}
+                <p className="mt-2 text-sm leading-6 text-[var(--app-text-muted)]">Every sign photo remains the first photo of its lot. Check each number, and use Start new lot here or Join previous lot to correct boundaries. No photos are discarded.</p>
+                {(grouping.unresolvedLotNumberFileIds?.length || 0) > 0 ? <p role="status" className="mt-2 text-sm text-[var(--app-warning)]">{grouping.unresolvedLotNumberFileIds?.length} photos could not be confidently classified. Review their surrounding lots: {grouping.unresolvedLotNumberFileIds?.slice(0, 10).map((id) => fileById.get(id)?.name || id).join(", ")}{(grouping.unresolvedLotNumberFileIds?.length || 0) > 10 ? "…" : ""}</p> : null}
+                <label className="mt-3 flex min-h-11 cursor-pointer items-start gap-3 text-sm font-semibold">
+                  <input type="checkbox" className="mt-1 h-5 w-5 shrink-0" disabled={Boolean(busyFileId)} checked={acknowledgedRevision === grouping.revision}
+                    onChange={(event) => setAcknowledgedRevision(event.target.checked ? grouping.revision : null)} />
+                  I checked every lot number and boundary, including uncertain photos. Keep all photos in the reviewed lots.
+                </label>
+              </section> : null}
               </> : null}
             </>
           )}
@@ -2938,7 +3035,7 @@ export default function SmartUploadWorkspace({
                 ? "Confirm where the next lot starts before creating the preview."
                 : orderingReview?.ambiguous
                   ? "Check the detected lots and confirm the image order before creating the preview."
-                  : grouping.warnings?.[0] || "Keep at least one report image."
+                  : numbered ? "Save every lot number and confirm the reviewed boundaries." : grouping.warnings?.[0] || "Keep at least one report image."
               : `${grouping.groups.length} Bundle lots are ready for preview.`}
           </p>
           <button

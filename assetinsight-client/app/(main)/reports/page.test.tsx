@@ -8,6 +8,7 @@ import {
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AssetReport } from "@/services/assets";
 import type { LotListing } from "@/services/lotListing";
+import { toast } from "@/components/ui/toast";
 import ReportsPage from "./page";
 
 const mocks = vi.hoisted(() => ({
@@ -276,6 +277,23 @@ describe("My Reports thumbnails", () => {
     expect(within(asset).getByText("Approved; awaiting release")).toBeInTheDocument();
     expect(within(lot).getByText(/Lot Listings release automatically/)).toBeInTheDocument();
     expect(within(lot).queryByRole("button", { name: /Download/ })).not.toBeInTheDocument();
+  });
+
+  it("describes an initial-processing retry without claiming files were queued", async () => {
+    mocks.getAssetReports.mockResolvedValue({ data: [{
+      ...reportWithThumbnail, status: "error", job_status: "error",
+      workflow_stage: "error", downloadable: false, preview_available: false,
+      job_error: "The imported contract needs an auction event before automatic lot numbers can be assigned. Ask the auction team to check its event.",
+    }] });
+    mocks.resubmitReport.mockReset().mockResolvedValue({ retry_stage: "initial_preview" });
+    vi.mocked(toast.success).mockClear();
+    render(<ReportsPage />);
+    const table = await screen.findByRole("table", { name: "Generated reports" });
+    const row = within(table).getByRole("row", { name: /CV-THUMB-100/ });
+    fireEvent.click(within(row).getByRole("button", { name: "Retry" }));
+    await waitFor(() => expect(toast.success).toHaveBeenCalledWith("Report processing queued again."));
+    expect(mocks.resubmitReport).toHaveBeenCalledWith(reportWithThumbnail._id);
+    expect(toast.success).not.toHaveBeenCalledWith("File generation queued again.");
   });
 
   it("shows legacy error_message when no canonical workflow state is available", async () => {

@@ -154,6 +154,8 @@ android {
 }
 
 dependencies {
+    // Existing camera module dependency, exposed only to the isolated recording assertions.
+    androidTestImplementation "androidx.camera:camera-video:1.5.3"
     implementation "androidx.exifinterface:exifinterface:1.3.7"
     // The version of react-native is set by the React Native Gradle Plugin
     implementation("com.facebook.react:react-android")

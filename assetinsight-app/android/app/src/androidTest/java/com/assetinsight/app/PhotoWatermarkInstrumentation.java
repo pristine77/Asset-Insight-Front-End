@@ -15,13 +15,27 @@ import expo.modules.auctioncamera.utils.PhotoWatermarkReceipt;
 
 /** Offline native-pixel/receipt smoke test. No login, API calls or report writes. */
 public class PhotoWatermarkInstrumentation extends Instrumentation {
-    @Override public void onCreate(Bundle arguments) { super.onCreate(arguments); start(); }
+    private boolean videoOnly;
+    private boolean recordVideo;
+    @Override public void onCreate(Bundle arguments) {
+        super.onCreate(arguments);
+        videoOnly = arguments != null && "true".equals(arguments.getString("videoOnly"));
+        recordVideo = arguments != null && "true".equals(arguments.getString("recordVideo"));
+        start();
+    }
     private static void check(boolean condition, String message) {
         if (!condition) throw new AssertionError(message);
     }
     @Override public void onStart() {
         Bundle result = new Bundle();
         try {
+            ListingVideoAssertions.run(getTargetContext());
+            if (videoOnly) {
+                String recording = recordVideo ? ListingVideoAssertions.record(this) : "Actual camera capture not requested.";
+                result.putString("stream", "PASS: strict HD/30fps/5Mbps profile, unsupported capability policy, durable video/gallery references, denied-gallery fallback and revision-bound journal cleanup. " + recording);
+                finish(Activity.RESULT_OK, result);
+                return;
+            }
             CaptureJournalAssertions.run(getTargetContext());
             ContentUriUploaderAssertions.run(getTargetContext());
             File directory = new File(getTargetContext().getExternalFilesDir(null), "watermark-qa");

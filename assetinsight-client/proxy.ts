@@ -1,4 +1,5 @@
 import { NextResponse, type NextRequest } from "next/server";
+import { safeAppNextPath } from "@/lib/workspace";
 
 const ACCESS_COOKIE = "cv_access_token";
 const REFRESH_COOKIE = "cv_refresh_token";
@@ -8,6 +9,8 @@ function isPublicPath(pathname: string) {
   return (
     pathname === "/" ||
     pathname === "/welcome" ||
+    pathname === "/privacy" ||
+    pathname === "/terms/youtube" ||
     pathname.startsWith("/login") ||
     pathname.startsWith("/signup") ||
     pathname.startsWith("/verify-email") ||
@@ -35,13 +38,7 @@ function getSessionState(request: NextRequest) {
 }
 
 function getSafeNextPath(request: NextRequest) {
-  const next = request.nextUrl.searchParams.get("next");
-
-  if (!next || !next.startsWith("/") || next.startsWith("//") || isAuthPath(next)) {
-    return "/dashboard";
-  }
-
-  return next;
+  return safeAppNextPath(request.nextUrl.searchParams.get("next"));
 }
 
 export function proxy(request: NextRequest) {
@@ -51,11 +48,13 @@ export function proxy(request: NextRequest) {
   const hasDeviceRequest = Boolean(request.cookies.get(DEVICE_PENDING_COOKIE)?.value);
 
   if (hasDeviceRequest && !hasSession && !isPublicPath(pathname)) {
-    return NextResponse.redirect(new URL("/device-access", request.url));
+    const deviceUrl = new URL("/device-access", request.url);
+    deviceUrl.searchParams.set("next", `${pathname}${nextUrl.search}`);
+    return NextResponse.redirect(deviceUrl);
   }
 
   if (pathname.startsWith("/device-access") && hasSession && !hasDeviceRequest) {
-    return NextResponse.redirect(new URL("/dashboard", request.url));
+    return NextResponse.redirect(new URL(getSafeNextPath(request), request.url));
   }
 
   if (!hasSession && !isPublicPath(pathname)) {
@@ -66,6 +65,10 @@ export function proxy(request: NextRequest) {
 
   if (isAuthPath(pathname) && hasSession) {
     return NextResponse.redirect(new URL(getSafeNextPath(request), request.url));
+  }
+
+  if (hasSession && (pathname === "/" || pathname === "/welcome")) {
+    return NextResponse.redirect(new URL("/workspaces", request.url));
   }
 
   return NextResponse.next();

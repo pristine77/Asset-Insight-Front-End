@@ -26,12 +26,14 @@ vi.mock("next/dynamic", () => ({
       auctioneer,
       onAcceptedAndContinue,
       onSuccess,
+      onDraftStatusChange,
       resumeDraft,
       resumeLocalDraftScopeId,
     }: {
       auctioneer?: AuctioneerWorkItemSetup;
       onAcceptedAndContinue?: (reportId: string | undefined) => void;
       onSuccess?: () => void;
+      onDraftStatusChange?: (status: "dirty", label?: string) => void;
       resumeDraft?: unknown;
       resumeLocalDraftScopeId?: string;
     }) {
@@ -41,9 +43,14 @@ vi.mock("next/dynamic", () => ({
           {auctioneer?.contract.contractNo || "No imported contract"}
           <span data-testid="work-item">{auctioneer?.workItemId}</span>
           <span data-testid="submission">{auctioneer?.clientSubmissionId}</span>
+          <span data-testid="contract-metadata">{JSON.stringify(auctioneer?.contract)}</span>
+          <span data-testid="source-lots">{auctioneer?.lots.length}</span>
           <span data-testid="media-count">{mediaCount}</span>
           <span data-testid="resume-state">{resumeDraft || resumeLocalDraftScopeId ? "resume" : "fresh"}</span>
-          <button onClick={() => setMediaCount((count) => count + 1)}>Add mock photo</button>
+          <button onClick={() => {
+            setMediaCount((count) => count + 1);
+            onDraftStatusChange?.("dirty", "Unsaved changes");
+          }}>Add mock photo</button>
           <button onClick={onSuccess}>Normal submit accepted</button>
           {onAcceptedAndContinue ? <>
             <button onClick={() => onAcceptedAndContinue("accepted-report-1")}>Continue accepted report</button>
@@ -128,11 +135,19 @@ describe("ReportFormPage handoff", () => {
     expect(screen.getByTestId("submission")).toHaveTextContent("submission-101");
     expect(screen.getByTestId("media-count")).toHaveTextContent("0");
     expect(screen.getByTestId("resume-state")).toHaveTextContent("fresh");
+    expect(screen.getByTestId("contract-metadata")).toHaveTextContent(JSON.stringify(previous.contract));
+    expect(screen.getByTestId("source-lots")).toHaveTextContent("0");
     expect(screen.getByTestId(`${kind}-handoff`)).toHaveTextContent("CV-E2E-100");
+    expect(screen.getByRole("status")).toHaveTextContent("Fresh lot for contract CV-E2E-100");
+    expect(screen.getByRole("status")).toHaveClass("freshLotDescription");
+    expect(screen.getByRole("status").closest("header")).toHaveClass("freshLotHeader");
     expect(mocks.continueWorkItem).toHaveBeenCalledExactlyOnceWith("work-100", "accepted-report-1");
     expect(mocks.routerPush).not.toHaveBeenCalled();
     // The continuation commits the new form before its focus effect runs.
     await waitFor(() => expect(screen.getByRole("heading", { level: 1 })).toHaveFocus());
+    fireEvent.click(screen.getByRole("button", { name: "Add mock photo" }));
+    expect(screen.getByText("Unsaved changes")).toBeInTheDocument();
+    expect(screen.getByRole("status").closest("header")).toHaveClass("freshLotHeader");
   });
 
   it("retries only continuation with the same accepted receipt, with a single-flight lock", async () => {
@@ -165,6 +180,27 @@ describe("ReportFormPage handoff", () => {
     expect(mocks.continueWorkItem).not.toHaveBeenCalled();
   });
 
+  it.each(["asset", "lot-listing"] as const)("keeps a genuine assignment denial visible for %s until the same-pair handoff succeeds", async (kind) => {
+    const previous = seedHandoff(kind);
+    const message = "This contract is no longer assigned to you in Incoming. Your accepted report is unchanged.";
+    mocks.continueWorkItem.mockRejectedValueOnce({ response: { status: 409, data: {
+      code: "auctioneer_continuation_assignment_unavailable", message,
+    } } }).mockResolvedValueOnce(freshSuccessor(previous));
+    render(<ReportFormPage kind={kind} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Continue accepted report" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent(message);
+    expect(screen.getByText(/accepted upload will not be submitted again/i)).toBeInTheDocument();
+    expect(screen.queryByTestId(`${kind}-handoff`)).not.toBeInTheDocument();
+    expect(mocks.routerPush).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Retry open new form" }));
+    await waitFor(() => expect(screen.getByTestId("work-item")).toHaveTextContent("work-101"));
+    expect(mocks.continueWorkItem.mock.calls).toEqual([
+      [previous.workItemId, "accepted-report-1"], [previous.workItemId, "accepted-report-1"],
+    ]);
+    expect(screen.getByTestId("media-count")).toHaveTextContent("0");
+    expect(screen.getByTestId("source-lots")).toHaveTextContent("0");
+  });
+
   it("does not open an empty form for an already-used successor", async () => {
     seedHandoff();
     mocks.continueWorkItem.mockResolvedValueOnce({ ...freshSuccessor(), status: "report_created", reportId: "report-101" });
@@ -188,6 +224,8 @@ describe("ReportFormPage handoff", () => {
   it("keeps ordinary accepted submission navigation unchanged", async () => {
     seedHandoff();
     render(<ReportFormPage kind="asset" />);
+    expect(await screen.findByText("Complete details, organize media, and save or submit when ready.")).not.toHaveClass("freshLotDescription");
+    expect(screen.getByRole("heading", { level: 1 }).closest("header")).not.toHaveClass("freshLotHeader");
     fireEvent.click(await screen.findByRole("button", { name: "Normal submit accepted" }));
     expect(mocks.routerPush).toHaveBeenCalledExactlyOnceWith("/previews");
     expect(mocks.continueWorkItem).not.toHaveBeenCalled();

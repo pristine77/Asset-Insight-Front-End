@@ -17,11 +17,11 @@ export default function ProtectedRoute({
   useEffect(() => {
     if (loading || loggingOut || user) return;
     if (deviceAccess) {
-      router.replace("/device-access");
+      router.replace(`/device-access?next=${encodeURIComponent(`${pathname || "/workspaces"}${window.location.search}`)}`);
       return;
     }
     if (!sessionPresent) {
-      const loginUrl = `/login?next=${encodeURIComponent(pathname || "/dashboard")}`;
+      const loginUrl = `/login?next=${encodeURIComponent(`${pathname || "/workspaces"}${window.location.search}`)}`;
       router.replace(loginUrl);
     }
   }, [
@@ -35,8 +35,7 @@ export default function ProtectedRoute({
   ]);
 
   if (
-    deviceAccess ||
-    (!loading && !sessionPresent && !user)
+    deviceAccess || loading || loggingOut || !user
   ) {
     return (
       <div className="app-page" role="status" aria-live="polite">
@@ -44,7 +43,7 @@ export default function ProtectedRoute({
           <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
             <span className="app-spinner" aria-hidden />
             <span className="app-muted">
-              {deviceAccess ? "Opening device access…" : "Opening sign in…"}
+              {deviceAccess ? "Opening device access…" : loading || sessionPresent ? "Opening workspace…" : "Opening sign in…"}
             </span>
           </div>
         </div>

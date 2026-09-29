@@ -32,6 +32,7 @@ import AuthLightShell, {
   AuthSpinner,
 } from "@/components/auth/AuthLightShell";
 import BrandLockup from "@/components/auth/BrandLockup";
+import { safeAppNextPath } from "@/lib/workspace";
 
 function formatDate(value?: string) {
   if (!value) return "Today";
@@ -76,7 +77,7 @@ export default function DeviceAccessView() {
   useEffect(() => {
     if (loading) return;
     if (user && !deviceAccess) {
-      router.replace("/dashboard");
+      router.replace(safeAppNextPath(new URLSearchParams(window.location.search).get("next")));
     } else if (!user && !deviceAccess) {
       router.replace("/login");
     }

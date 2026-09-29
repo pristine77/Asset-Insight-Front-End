@@ -14,6 +14,57 @@ Do not run `expo prebuild --clean`, delete `android/`, or regenerate the native 
 
 Use `java -version` and `./gradlew --version` from `android/` to confirm the selected JDK. React Native recommends JDK 17; see [React Native environment setup](https://reactnative.dev/docs/0.81/set-up-your-environment).
 
+## Asset and Lot Listing video — 2026-09-24
+
+The listing cameras record an optional MP4 clip per capture lot at **720p / 30 fps**
+(1280 × 720, or the portrait equivalent), with a 5 Mbps target bitrate. Still-photo
+quality, manual shutter/FPS and low-light settings cannot raise video resolution or
+lower its configured frame rate. Android CameraX uses strict HD with no other-quality
+fallback on any lens/rebind path. The fallback camera uses a separate video session,
+an explicit MP4 container, and checks the negotiated resolution/FPS before recording.
+Unsupported devices show an error and retain normal photo capture. Configured frame
+rate is not a promise that a busy/overheating device will deliver every frame; validate
+real-device recordings before release. See [CameraX video capture](https://developer.android.com/media/camera/camerax/video-capture).
+
+Done, lot navigation and photo capture cannot race video preparation, recording or
+final saving. Native Android records to durable `files/camera-videos`, journals the
+original before gallery publication, and hands back the MediaStore URI only after
+the updated lot journal is saved. Only then can its own intermediate be removed.
+Gallery failure retains the durable original. The fallback records directly into
+document storage and retains its existing optional gallery-save behavior; offline
+saves and upload retries do not create more original copies.
+
+Both forms show video attachments separately from photo counts and allow reference-only
+removal. Direct R2 uploads use existing native streaming/cancellable filesystem transport
+with at most four workers. Sparse `mixed_lots[].video_count` values, including zero,
+preserve lot associations on both direct and legacy multipart paths. Video bytes are
+never put through still-image resizing or watermarking. The camera's existing photo
+stamp policy is unchanged. Offline remains Save/review/manual Submit or Resume only.
+
+Backend support must ship before the updated mobile binary: Asset previously discarded
+videos during preview generation, and mobile Lot Listing omitted them from submissions.
+The updated backend retains trusted R2 originals in previews, file regeneration, merged
+Asset reports and the images/media ZIP. A missing clip fails file publication rather
+than silently producing a ZIP without it. Existing historical reports are not repaired
+or regenerated automatically. No Auctioneer contract, package or migration change is
+required; an OTA-only update cannot replace the Android camera changes.
+
+Verification on 2026-09-24: TypeScript and all **73 Jest suites / 587 tests** pass,
+including real form submission/resume, sparse video mapping, native transport,
+offline reference reuse and fallback-camera mode/unsupported-profile/race tests.
+Android and iOS Hermes exports pass with an isolated API. Android debug and test
+APK builds pass; API35 instrumentation verifies gallery byte equality, durable
+journals, navigation locks, streamed uploads/cancel/four workers and unchanged
+photo-watermark receipts/pixels. An actual emulator recording encoded 1280 × 720
+with the encoder/muxer explicitly configured at 30 fps / 5 Mbps. Its final measured
+cadence was 29.37 fps; an earlier loaded-emulator short sample was 28.91 fps.
+Those measurements are retained as device-timing limitations, not hidden by
+transcoding or claiming an exact constant rate. Physical Android/iOS, long-video
+memory/network endurance, production R2 and signed release testing are still
+required. No production data, packages, push or deployment were involved.
+The corresponding frozen-source backend run passed all 2,257 tests, typecheck,
+build and report-workflow checks, including 122 focused video/upload/merge cases.
+
 ## Dependency and configuration checks
 
 The package configuration pins PostCSS to `8.5.28` through an override to address Expo Metro's older pinned version's security advisories. Both Metro and Tailwind use PostCSS 8; their transform APIs were checked before applying this same-major override. Confirm the installed and locked versions with `npm ls postcss` and rerun `npm audit` after dependency changes. Review the override when upgrading Expo; do not override unrelated native dependencies to force an audit result.

@@ -33,23 +33,33 @@ jest.mock('react-native-safe-area-context', () => ({
 jest.mock('react-native-vision-camera', () => {
   const React = require('react');
   const { Text, TouchableOpacity } = require('react-native');
-  const device = { id: 'isolated-camera', minZoom: 1, maxZoom: 3, physicalDevices: [] };
+  const device = { id: 'isolated-camera', minZoom: 1, maxZoom: 3, physicalDevices: [], supportsLowLightBoost: true };
   const photoOutput = { capturePhotoToFile: jest.fn(), supportsDepthDataDelivery: false };
-  const videoOutput = { createRecorder: jest.fn() };
+  const videoOutput = { createRecorder: jest.fn(), currentResolution: { width: 1280, height: 720 } };
+  const fixture = { photoOutput, videoOutput, selectedFPS: 30, cameraProps: null as any, videoOptions: null as any };
   const requestPermission = jest.fn(async () => true);
   return {
-    Camera: React.forwardRef((props: any, _ref: any) => (
-      <TouchableOpacity accessibilityRole="button" accessibilityLabel="Start test camera" onPress={() => { props.onConfigured(); props.onStarted(); }}>
+    Camera: React.forwardRef((props: any, _ref: any) => {
+      const started = React.useRef(false);
+      fixture.cameraProps = props;
+      React.useEffect(() => {
+        if (started.current) {
+          props.onSessionConfigSelected({ selectedFPS: fixture.selectedFPS });
+          props.onConfigured();
+          props.onStarted();
+        }
+      }, [props.outputs]);
+      return <TouchableOpacity accessibilityRole="button" accessibilityLabel="Start test camera" onPress={() => { started.current = true; props.onSessionConfigSelected({ selectedFPS: fixture.selectedFPS }); props.onConfigured(); props.onStarted(); }}>
         <Text>Test camera</Text>
-      </TouchableOpacity>
-    )),
+      </TouchableOpacity>;
+    }),
     CommonResolutions: {},
     useCameraDevice: () => device,
     useCameraPermission: () => ({ hasPermission: true, requestPermission }),
     useMicrophonePermission: () => ({ hasPermission: true, requestPermission }),
     usePhotoOutput: () => photoOutput,
-    useVideoOutput: () => videoOutput,
-    fixture: { photoOutput, videoOutput },
+    useVideoOutput: (options: any) => { fixture.videoOptions = options; return videoOutput; },
+    fixture,
   };
 });
 jest.mock('expo-haptics', () => ({ impactAsync: jest.fn(), ImpactFeedbackStyle: { Light: 'Light' } }));
@@ -93,16 +103,16 @@ const sourceLots = (): MixedLot[] => [1, 2].map((number) => ({
   sourceKey: `upstream-${number}`, sourceLotId: `auction-${number}`,
 }));
 
-function Harness({ initialLots = sourceLots(), locked = true, onClose = jest.fn(), onAutoSave = jest.fn(), sourceLabels, manualSubmissionRequired = false, enhanceImages = false, captureContext }: {
+function Harness({ initialLots = sourceLots(), locked = true, onClose = jest.fn(), onAutoSave = jest.fn(), sourceLabels, manualSubmissionRequired = false, enhanceImages = false, captureContext, visible = true }: {
   initialLots?: MixedLot[]; locked?: boolean; onClose?: () => void; onAutoSave?: (lots?: MixedLot[], index?: number) => void; sourceLabels?: string[];
-  manualSubmissionRequired?: boolean; enhanceImages?: boolean; captureContext?: { ownerId: string; draftId: string; sessionId: string };
+  manualSubmissionRequired?: boolean; enhanceImages?: boolean; captureContext?: { ownerId: string; draftId: string; sessionId: string }; visible?: boolean;
 }) {
   const [lots, setLots] = useState(initialLots);
   const [activeLotIdx, setActiveLotIdx] = useState(0);
   return <View>
     <Text testID="saved-lots">{JSON.stringify(lots)}</Text>
     <Text testID="active-lot">{activeLotIdx}</Text>
-    <CameraScreen visible lots={lots} setLots={setLots} activeLotIdx={activeLotIdx} setActiveLotIdx={setActiveLotIdx}
+    <CameraScreen visible={visible} lots={lots} setLots={setLots} activeLotIdx={activeLotIdx} setActiveLotIdx={setActiveLotIdx}
       onClose={onClose} onAutoSave={onAutoSave} lockedStructure={locked} sourceLabels={sourceLabels}
       manualSubmissionRequired={manualSubmissionRequired} enhanceImages={enhanceImages} captureContext={captureContext} />
   </View>;
@@ -120,6 +130,8 @@ beforeEach(() => {
   jest.spyOn(Image, 'getSize').mockImplementation((_uri, success) => { success(1200, 900); });
   fixture().photoOutput.capturePhotoToFile.mockResolvedValue({ filePath: '/raw-camera.jpg' });
   jest.mocked(stampCameraPhoto).mockResolvedValue('file:///stamped-camera.jpg');
+  fixture().selectedFPS = 30;
+  fixture().videoOutput.currentResolution = { width: 1280, height: 720 };
 });
 
 afterEach(async () => { await cleanup(); jest.restoreAllMocks(); });
@@ -267,12 +279,82 @@ it('adds a video to the selected source lot without changing fixed structure', a
   await fireEvent.press(screen.getByRole('button', { name: 'Next lot' }));
   await fireEvent.press(screen.getByText('Rec'));
   await waitFor(() => expect(recorder.startRecording).toHaveBeenCalledTimes(1));
+  expect(fixture().videoOutput.createRecorder).toHaveBeenCalledWith({ filePath: '/documents/camera-videos/stable-capture-id.mp4' });
   await act(async () => { await (recorder.startRecording.mock.calls[0] as any)[0]('/saved-video.mp4'); });
   const result = savedLots();
   expect(result).toHaveLength(2);
   expect(result[0]).toEqual(sourceLots()[0]);
   expect(result[1]).toEqual({ ...sourceLots()[1], videoFile: expect.objectContaining({ uri: 'file:///documents/camera-videos/stable-capture-id.mp4', type: 'video/mp4' }) });
   expect(autoSave).toHaveBeenCalledWith(result, 1);
+});
+
+it.each(['Quality', 'Balanced', 'Speed'])('records HD MP4 at 30 fps independently of %s still-photo quality', async (mode) => {
+  const recorder = { startRecording: jest.fn(async () => {}), stopRecording: jest.fn(async () => {}) };
+  fixture().videoOutput.createRecorder.mockResolvedValue(recorder);
+  await render(<Harness />);
+  await fireEvent.press(screen.getByRole('button', { name: 'Start test camera' }));
+  await fireEvent.press(screen.getByText(mode));
+  await fireEvent.press(screen.getByRole('button', { name: 'Low-light photo mode' }));
+  expect(fixture().cameraProps.constraints[0]).toEqual({ fps: 24 });
+  await fireEvent.press(screen.getByRole('button', { name: 'Record video, 720p at 30 frames per second' }));
+  await waitFor(() => expect(recorder.startRecording).toHaveBeenCalledTimes(1));
+  expect(fixture().videoOptions).toEqual({ targetResolution: { width: 1280, height: 720 }, targetBitRate: 5_000_000, enableAudio: true, fileType: 'mp4' });
+  expect(fixture().cameraProps.outputs).toEqual([fixture().videoOutput]);
+  expect(fixture().cameraProps.constraints).toEqual([{ fps: 30 }, { resolutionBias: fixture().videoOutput }]);
+  expect(fixture().cameraProps.enableLowLightBoost).toBe(false);
+  await act(async () => { await (recorder.startRecording.mock.calls[0] as any)[0]('/documents/camera-videos/stable-capture-id.mp4'); });
+  expect(fixture().cameraProps.outputs).toEqual([fixture().photoOutput]);
+  expect(fixture().cameraProps.constraints[0]).toEqual({ fps: 24 });
+});
+
+it.each([
+  [1920, 1080, 30], [1280, 720, 24], [1280, 720, 60], [640, 480, 30],
+])('refuses negotiated %sx%s at %sfps instead of silently recording another format', async (width, height, fps) => {
+  fixture().videoOutput.currentResolution = { width, height };
+  fixture().selectedFPS = fps;
+  await render(<Harness />);
+  await fireEvent.press(screen.getByRole('button', { name: 'Start test camera' }));
+  await fireEvent.press(screen.getByText('Rec'));
+  await waitFor(() => expect(Alert.alert).toHaveBeenCalledWith('720p recording unavailable', expect.any(String)));
+  expect(fixture().videoOutput.createRecorder).not.toHaveBeenCalled();
+  expect(savedLots()).toEqual(sourceLots());
+  expect(fixture().cameraProps.outputs).toEqual([fixture().photoOutput]);
+});
+
+it('locks the target lot while the recording session is preparing, not just after recording starts', async () => {
+  const recorder = { startRecording: jest.fn(async () => {}), stopRecording: jest.fn(async () => {}) };
+  fixture().videoOutput.createRecorder.mockResolvedValue(recorder);
+  const close = jest.fn();
+  await render(<Harness onClose={close} />);
+  await fireEvent.press(screen.getByRole('button', { name: 'Start test camera' }));
+  await fireEvent.press(screen.getByText('Rec'));
+  await fireEvent.press(screen.getByRole('button', { name: 'Next lot' }));
+  await fireEvent.press(screen.getByRole('button', { name: 'Done' }));
+  expect(screen.getByTestId('active-lot').props.children).toBe(0);
+  expect(close).not.toHaveBeenCalled();
+  await waitFor(() => expect(recorder.startRecording).toHaveBeenCalledTimes(1));
+  await act(async () => { await (recorder.startRecording.mock.calls[0] as any)[0]('/documents/camera-videos/stable-capture-id.mp4'); });
+  expect(savedLots()[0].videoFile?.uri).toContain('/documents/camera-videos/');
+  expect(savedLots()[1].videoFile).toBeUndefined();
+});
+
+it('clears an abandoned preparation when hidden so reopening does not lock the lot or start the old recording', async () => {
+  const recorder = { startRecording: jest.fn(async () => {}), stopRecording: jest.fn(async () => {}) };
+  fixture().videoOutput.createRecorder.mockResolvedValue(recorder);
+  const view = await render(<Harness />);
+  await fireEvent.press(screen.getByRole('button', { name: 'Start test camera' }));
+  await fireEvent.press(screen.getByText('Rec'));
+  await view.rerender(<Harness visible={false} />);
+  await view.rerender(<Harness />);
+  await fireEvent.press(screen.getByRole('button', { name: 'Start test camera' }));
+  await fireEvent.press(screen.getByRole('button', { name: 'Next lot' }));
+  expect(screen.getByTestId('active-lot').props.children).toBe(1);
+  expect(fixture().videoOutput.createRecorder).not.toHaveBeenCalled();
+  await fireEvent.press(screen.getByText('Rec'));
+  await waitFor(() => expect(recorder.startRecording).toHaveBeenCalledTimes(1));
+  await act(async () => { await (recorder.startRecording.mock.calls[0] as any)[0]('/documents/camera-videos/stable-capture-id.mp4'); });
+  expect(savedLots()[1].videoFile).toBeDefined();
+  expect(savedLots()[0].videoFile).toBeUndefined();
 });
 
 it('waits for video local saving and preserves a failed video for retry without recording again', async () => {

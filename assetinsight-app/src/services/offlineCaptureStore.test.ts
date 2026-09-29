@@ -109,10 +109,12 @@ describe('owner-scoped offline capture metadata', () => {
   test('fallback camera journals survive a draft failure, protect original references and reject stale acknowledgements', async () => {
     const { store } = fixtureStore();
     const context = { ownerId: 'owner-one', draftId: 'draft-one', sessionId: 'camera-one' };
-    const lots = [{ id: 'lot-one', files: [{ uri: 'file:///documents/camera-photos/original.jpg', name: 'original.jpg', type: 'image/jpeg' }], extraFiles: [], coverIndex: 0 }];
+    const videoFile = { uri: 'content://media/external/video/media/720', name: 'walkthrough.mp4', type: 'video/mp4', size: 8_000_000, mediaId: 'stable-video' };
+    const lots = [{ id: 'lot-one', files: [{ uri: 'file:///documents/camera-photos/original.jpg', name: 'original.jpg', type: 'image/jpeg' }], extraFiles: [], coverIndex: 0, videoFile }];
     const first = await store.savePendingCapture(context, lots);
     expect(await store.getPendingCapture(context)).toMatchObject({ revision: first.revision, lots });
     expect(await store.getProtectedMediaUris()).toContain(lots[0].files[0].uri);
+    expect(await store.getProtectedMediaUris()).toContain(videoFile.uri);
     await expect(store.savePendingCapture({ ...context, sessionId: 'another' }, lots)).rejects.toThrow('Recover');
     const second = await store.savePendingCapture(context, lots);
     expect(await store.acknowledgePendingCapture(context, first.revision)).toBe(false);

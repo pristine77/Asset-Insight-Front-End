@@ -69,7 +69,7 @@ export function durableMediaOwnership(uri: string): MediaOwnership | null {
     return uri.startsWith(MEDIA_ROOT) ? 'managed' : 'camera';
   }
   // Native Android filesDir is outside Expo's documentDirectory on some builds.
-  if (/^file:\/\/[^?#]*\/files\/camera-photos\//.test(uri)) return 'camera';
+  if (/^file:\/\/[^?#]*\/files\/camera-(?:photos|videos)\//.test(uri)) return 'camera';
   return null;
 }
 

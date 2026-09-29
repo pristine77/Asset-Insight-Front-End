@@ -12,9 +12,13 @@ import {
 } from "@/services/notifications";
 import styles from "./NotificationModal.module.css";
 import { previewReminderDetails } from "@/lib/previewReminderNotification";
+import { crmNotificationHref } from "@/lib/crmNotification";
 import PreviewReminderContent from "./PreviewReminderContent";
+import { useAuthContext } from "@/context/AuthContext";
 
 function notificationHref(item: WorkspaceNotification) {
+  const crmHref = crmNotificationHref(item);
+  if (crmHref) return crmHref;
   const data = item.data || {};
   for (const key of ["href", "url", "path", "route"] as const) {
     const value = data[key];
@@ -22,7 +26,7 @@ function notificationHref(item: WorkspaceNotification) {
       return value;
     }
   }
-  return item.category === "crm" ? "/incoming" : "/reports";
+  return "/reports";
 }
 
 function relativeDate(value: string) {
@@ -36,12 +40,14 @@ function relativeDate(value: string) {
 }
 
 export default function NotificationModal({ onClose }: { onClose: () => void }) {
+  const { user } = useAuthContext();
+  const ownerId = user?._id || user?.id;
   const router = useRouter();
   const panelRef = useRef<HTMLDivElement>(null);
   const [selected, setSelected] = useState<WorkspaceNotification | null>(null);
   const returnFocusRef = useRef<string | null>(null);
   const detailRef = useRef<HTMLDivElement>(null);
-  const cacheKey = notificationCacheKey(1, 10);
+  const cacheKey = ownerId ? notificationCacheKey(1, 10, ownerId) : null;
   const { data, isLoading, error } = useSWR(cacheKey, () => NotificationsService.list(1, 10), {
     revalidateOnFocus: true,
   });
@@ -82,7 +88,7 @@ export default function NotificationModal({ onClose }: { onClose: () => void }) 
   }, [selected]);
 
   const refreshNotificationCaches = async () => {
-    await mutate((key) => typeof key === "string" && key.startsWith("/notifications?"));
+    await mutate((key) => typeof key === "string" && key.startsWith("/notifications?") && key.endsWith(`&cacheOwner=${encodeURIComponent(ownerId || "")}`));
   };
 
   const markRead = async (item: WorkspaceNotification) => {

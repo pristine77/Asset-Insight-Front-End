@@ -58,6 +58,7 @@ export type AssetCreateDetails = {
   mixed_lots?: Array<{
     count: number; // number of main images in this lot
     extra_count?: number; // report-only images in this lot
+    video_count?: number; // ordered clips in this lot, including explicit zeros
     cover_index?: number; // 0-based within the lot
     mode: "single_lot" | "per_item" | "per_photo";
     source_key?: string;
@@ -120,6 +121,19 @@ export const AssetService = {
     // analysis concern and must not silently drop photos from the report.
     const filesToSend = images;
     const videoFiles = Array.isArray(videos) ? videos : [];
+    const videoLotIndexes: number[] = [];
+    if (details.grouping_mode === "mixed" && details.mixed_lots?.some((lot) => lot.video_count !== undefined)) {
+      for (const [lotIndex, lot] of details.mixed_lots.entries()) {
+        const count = lot.video_count;
+        if (typeof count !== "number" || !Number.isSafeInteger(count) || count < 0 || count > videoFiles.length - videoLotIndexes.length) {
+          throw new Error("Video counts do not match the selected lot videos. Review the videos before retrying.");
+        }
+        for (let index = 0; index < count; index += 1) videoLotIndexes.push(lotIndex);
+      }
+      if (videoLotIndexes.length !== videoFiles.length) {
+        throw new Error("Video counts do not match the selected lot videos. Review the videos before retrying.");
+      }
+    }
 
     try {
       const directFiles: DirectUploadFile[] = [
@@ -133,6 +147,7 @@ export const AssetService = {
           file,
           fieldname: "videos" as const,
           imageIndex,
+          ...(videoLotIndexes[imageIndex] !== undefined ? { lotIndex: videoLotIndexes[imageIndex] } : {}),
           role: "video" as const,
         })),
       ];

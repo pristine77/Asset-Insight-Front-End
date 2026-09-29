@@ -11,8 +11,8 @@ export type UpdateUserPayload = {
 };
 
 export const UserService = {
-  async getMe(): Promise<AuthUser> {
-    const { data } = await API.get<AuthUser>("/user/me");
+  async getMe(options?: { signal?: AbortSignal; timeout?: number }): Promise<AuthUser> {
+    const { data } = await API.get<AuthUser>("/user/me", options);
     return data;
   },
 

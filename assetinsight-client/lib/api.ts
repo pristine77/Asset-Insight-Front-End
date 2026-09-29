@@ -5,6 +5,11 @@ import {
   getRefreshToken,
   setAccessToken,
   clearTokens,
+  captureAuthSession,
+  isAuthSessionCurrent,
+  assertAuthSessionCurrent,
+  AuthSessionChangedError,
+  type AuthSessionSnapshot,
 } from "./auth-storage";
 import { getDeviceKey, type RestrictedDeviceAccess } from "./device-access";
 
@@ -13,7 +18,10 @@ const API = axios.create({
   timeout: 600000, // 10 minutes
 });
 
-API.interceptors.request.use(async (config) => {
+API.interceptors.request.use((config) => {
+  const scoped = config as typeof config & { _authSession?: AuthSessionSnapshot };
+  scoped._authSession ??= captureAuthSession();
+  assertAuthSessionCurrent(scoped._authSession);
   config.headers["X-Activity-Source"] = "web";
   const details = config.data?.details || config.data?.formData || config.data;
   const activityId = details?.activity_id || details?.capture_id || config.data?.clientDraftId || details?.client_submission_id || details?.clientSubmissionId;
@@ -35,26 +43,11 @@ API.interceptors.request.use(async (config) => {
     (config.headers as any)["Content-Type"] = (config.headers as any)["Content-Type"] || "application/json";
   }
   return config;
-});
+}, undefined, { synchronous: true });
 
-interface FailedRequest {
-  resolve: (value: unknown) => void;
-  reject: (reason?: any) => void;
-}
-
-let isRefreshing = false;
-let failedQueue: FailedRequest[] = [];
+let refreshFlight: { session: AuthSessionSnapshot; promise: Promise<string> } | null = null;
 let sessionInvalidationEmitted = false;
-
-const processQueue = (error: any, token: string | null = null) => {
-  failedQueue.forEach((prom) => {
-    if (error) prom.reject(error);
-    else prom.resolve(token);
-  });
-  failedQueue = [];
-};
-
-export type RetriableAxiosConfig = AxiosRequestConfig & { _retry?: boolean };
+export type RetriableAxiosConfig = AxiosRequestConfig & { _retry?: boolean; _authSession?: AuthSessionSnapshot };
 
 const DEVICE_ACCESS_CODES = new Set([
   "DEVICE_CONTEXT_REQUIRED",
@@ -99,16 +92,21 @@ function invalidateSession() {
 
 API.interceptors.response.use(
   (response) => {
+    const session = (response.config as RetriableAxiosConfig)._authSession;
+    if (session) assertAuthSessionCurrent(session);
     if (getAccessToken()) sessionInvalidationEmitted = false;
     return response;
   },
   async (error: any) => {
     const originalRequest: RetriableAxiosConfig = error.config || {};
+    const session = originalRequest._authSession;
+    if (session && !isAuthSessionCurrent(session)) return Promise.reject(new AuthSessionChangedError());
     const status = error?.response?.status;
     const responseData = error?.response?.data as RestrictedDeviceAccess | undefined;
     const responseCode = String((responseData as any)?.code || "");
 
-    if (DEVICE_ACCESS_CODES.has(responseCode) || responseData?.authState === "ip_blocked") {
+    // Login owns its restricted response; dispatching it here would invalidate that same attempt.
+    if ((DEVICE_ACCESS_CODES.has(responseCode) || responseData?.authState === "ip_blocked") && originalRequest.url !== "/auth/login") {
       const restricted = normalizeRestrictedAccess(responseData, responseCode);
       if (restricted?.authState === "registration_required" && !restricted.challengeToken) {
         invalidateSession();
@@ -122,75 +120,53 @@ API.interceptors.response.use(
     // token. Refreshing on every 403 caused request storms and masked genuine
     // permissions errors.
     if (status === 401 && !originalRequest._retry) {
-      if (isRefreshing) {
-        return new Promise((resolve, reject) => {
-          failedQueue.push({ resolve, reject });
-        })
-          .then((token) => {
-            (originalRequest.headers as any) =
-              (originalRequest.headers as any) || {};
-            (originalRequest.headers as any)[
-              "Authorization"
-            ] = `Bearer ${token}`;
-            return API(originalRequest as any);
-          })
-          .catch((err) => Promise.reject(err));
-      }
-
       originalRequest._retry = true;
-      isRefreshing = true;
-
-      try {
-        const currentRefreshToken = getRefreshToken();
-        if (!currentRefreshToken) {
-          processQueue(error, null);
-          invalidateSession();
-          return Promise.reject(error);
-        }
-
-        const { data } = await axios.post<{ accessToken?: string }>(
-          `${API_BASE}/auth/refresh-token`,
-          { token: currentRefreshToken },
-          { headers: getDeviceKey() ? { "X-Device-Key": getDeviceKey() as string } : undefined }
-        );
-
-        const newAccessToken = data?.accessToken;
-        if (!newAccessToken) {
-          throw new Error("No access token returned from refresh");
-        }
-
-        setAccessToken(newAccessToken);
-        sessionInvalidationEmitted = false;
-        API.defaults.headers.common[
-          "Authorization"
-        ] = `Bearer ${newAccessToken}`;
-        processQueue(null, newAccessToken);
-        (originalRequest.headers as any) =
-          (originalRequest.headers as any) || {};
-        (originalRequest.headers as any)[
-          "Authorization"
-        ] = `Bearer ${newAccessToken}`;
-        return API(originalRequest as any);
-      } catch (refreshError) {
-        processQueue(refreshError, null);
-        const refreshData = (refreshError as any)?.response?.data as RestrictedDeviceAccess | undefined;
-        const refreshStatus = Number((refreshError as any)?.response?.status || 0);
-        const refreshCode = String((refreshData as any)?.code || "");
-        const restricted = normalizeRestrictedAccess(refreshData, refreshCode);
-        if (restricted?.authState === "registration_required" && !restricted.challengeToken) {
-          invalidateSession();
-        } else if (restricted?.authState) {
-          emitRestrictedAccess(restricted);
-          clearTokens();
-        } else if (refreshStatus >= 400 && refreshStatus < 500) {
-          // Invalid/revoked refresh tokens are terminal. Notify AuthContext
-          // once so protected polling stops and the sign-in screen is shown.
-          invalidateSession();
-        }
-        return Promise.reject(refreshError);
-      } finally {
-        isRefreshing = false;
+      const refreshSession = session || captureAuthSession();
+      if (!refreshFlight || !isAuthSessionCurrent(refreshFlight.session)) {
+        const flight = { session: refreshSession, promise: Promise.resolve("") };
+        flight.promise = (async () => {
+          const currentRefreshToken = getRefreshToken();
+          if (!currentRefreshToken) {
+            invalidateSession();
+            throw error;
+          }
+          try {
+            const { data } = await axios.post<{ accessToken?: string }>(
+              `${API_BASE}/auth/refresh-token`,
+              { token: currentRefreshToken },
+              { headers: getDeviceKey() ? { "X-Device-Key": getDeviceKey() as string } : undefined }
+            );
+            assertAuthSessionCurrent(refreshSession);
+            const newAccessToken = data?.accessToken;
+            if (!newAccessToken) throw new Error("No access token returned from refresh");
+            setAccessToken(newAccessToken);
+            sessionInvalidationEmitted = false;
+            return newAccessToken;
+          } catch (refreshError) {
+            if (!isAuthSessionCurrent(refreshSession)) throw new AuthSessionChangedError();
+            const refreshData = (refreshError as any)?.response?.data as RestrictedDeviceAccess | undefined;
+            const refreshStatus = Number((refreshError as any)?.response?.status || 0);
+            const refreshCode = String((refreshData as any)?.code || "");
+            const restricted = normalizeRestrictedAccess(refreshData, refreshCode);
+            if (restricted?.authState === "registration_required" && !restricted.challengeToken) {
+              invalidateSession();
+            } else if (restricted?.authState) {
+              emitRestrictedAccess(restricted);
+              clearTokens();
+            } else if (refreshStatus >= 400 && refreshStatus < 500) {
+              // Terminal only for the session whose refresh actually failed.
+              invalidateSession();
+            }
+            throw refreshError;
+          }
+        })().finally(() => { if (refreshFlight === flight) refreshFlight = null; });
+        refreshFlight = flight;
       }
+      const token = await refreshFlight.promise;
+      assertAuthSessionCurrent(refreshSession);
+      originalRequest.headers = originalRequest.headers || {};
+      (originalRequest.headers as any).Authorization = `Bearer ${token}`;
+      return API(originalRequest);
     }
 
     return Promise.reject(error);

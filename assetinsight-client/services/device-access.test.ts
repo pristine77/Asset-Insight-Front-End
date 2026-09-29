@@ -23,7 +23,7 @@ vi.mock("@/lib/device-access", () => ({
   storeDeviceAccess: mocks.store,
 }));
 
-vi.mock("@/lib/auth-storage", () => ({ setTokens: vi.fn() }));
+vi.mock("@/lib/auth-storage", async (importOriginal) => ({ ...await importOriginal<typeof import("@/lib/auth-storage")>(), setTokens: vi.fn() }));
 
 import { DeviceAccessService } from "./device-access";
 

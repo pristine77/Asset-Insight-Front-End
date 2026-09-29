@@ -180,6 +180,10 @@ async function uploadOne(
     // A signed R2 response is authoritative. Do not hide a 4xx/5xx failure by
     // attempting a second transport with the same invalid URL.
     if (Number(error?.status || 0) > 0) throw error;
+    // Walkthroughs can be much larger than photos. Keep file-backed video bytes
+    // in native transports; the outer retry can use native multipart through
+    // the API, but must never read an entire clip into a JavaScript Blob.
+    if (file.role === 'video' || file.fieldname === 'videos' || file.type.startsWith('video/')) throw error;
     console.warn('[DirectR2Upload] Filesystem upload failed, using fetch fallback:', error);
   }
 

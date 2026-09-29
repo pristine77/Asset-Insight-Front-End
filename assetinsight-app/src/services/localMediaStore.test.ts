@@ -52,6 +52,22 @@ it.each([
   expect(FileSystem.copyAsync).not.toHaveBeenCalled();
 });
 
+it.each([
+  'file:///documents/camera-videos/walkthrough.mp4',
+  'file:///data/user/0/com.assetinsight.app/files/camera-videos/walkthrough.mp4',
+  'content://media/external/video/media/720',
+])('repeated offline video saves retain one durable original: %s', async uri => {
+  const info = jest.fn().mockResolvedValue({ exists: true, size: 8_000_000, type: 'video/mp4' });
+  jest.mocked(loadNativeAuctionCamera).mockResolvedValue({ openAuctionCamera: jest.fn(), getContentUriInfo: info });
+  const reference = { ...input(uri), slot: 'video' as const, name: 'walkthrough.mp4', type: 'video/mp4' };
+  for (let save = 0; save < 3; save++) {
+    expect(await LocalMediaStore.importMedia(reference)).toMatchObject({ uri, mediaId: 'media-0', type: 'video/mp4',
+      ownership: uri.startsWith('content:') ? 'gallery' : 'camera' });
+  }
+  expect(FileSystem.copyAsync).not.toHaveBeenCalled();
+  expect(FileSystem.deleteAsync).not.toHaveBeenCalled();
+});
+
 it('reuses the MediaStore reference and closed native descriptor size without opening an Expo content stream', async () => {
   const getContentUriInfo = jest
     .fn()

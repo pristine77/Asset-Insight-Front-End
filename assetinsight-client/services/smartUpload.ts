@@ -12,6 +12,7 @@ import type {
 } from "@/components/forms/smartUpload/storage";
 
 export type SmartUploadEndpoint = "/asset" | "/lot-listing";
+export type SmartUploadGroupingMethod = "black_divider" | "lot_number";
 
 export type SmartUploadTarget = {
   fileId: string;
@@ -22,6 +23,7 @@ export type SmartUploadTarget = {
 };
 
 export type SmartUploadGroup = {
+  lotNumber?: string;
   groupIndex: number;
   imageCount: number;
   fileIds: string[];
@@ -41,6 +43,8 @@ export type SmartUploadServerFile = {
 };
 
 export type SmartUploadMetric = {
+  kind?: "lot_start" | "photo" | "uncertain";
+  lotNumber?: string | null;
   fileId: string;
   meanLuminance: number;
   darkPixelRatio: number;
@@ -50,6 +54,9 @@ export type SmartUploadMetric = {
 };
 
 export type SmartUploadGrouping = {
+  groupingMethod?: SmartUploadGroupingMethod;
+  lotStartFileIds?: string[];
+  unresolvedLotNumberFileIds?: string[];
   sessionId: string;
   smartUpload: true;
   groupingStatus:
@@ -78,6 +85,7 @@ export type SmartUploadGrouping = {
 };
 
 type UploadSession = {
+  groupingMethod?: SmartUploadGroupingMethod;
   sessionId: string;
   reportId?: string;
   jobId: string;
@@ -146,6 +154,9 @@ function normalizeMetrics(value: unknown): SmartUploadMetric[] {
       {
         fileId,
         meanLuminance: Number.isFinite(meanLuminance) ? meanLuminance : 0,
+        kind: ["lot_start", "photo", "uncertain"].includes(String(candidate.kind))
+          ? candidate.kind as SmartUploadMetric["kind"] : undefined,
+        lotNumber: typeof candidate.lotNumber === "string" ? candidate.lotNumber : null,
         darkPixelRatio: Number.isFinite(darkPixelRatio) ? darkPixelRatio : 0,
         variance: Number.isFinite(variance) ? variance : 0,
         isDivider: candidate.isDivider === true,
@@ -161,6 +172,9 @@ function normalizeSmartUploadGrouping(
 ): SmartUploadGrouping {
   if (!isRecord(value)) {
     throw new Error("Smart Upload returned an invalid grouping response.");
+  }
+  if (value.groupingMethod !== undefined && value.groupingMethod !== "black_divider" && value.groupingMethod !== "lot_number") {
+    throw new Error("The server returned an unsupported upload method. Keep this upload and refresh after checking backend compatibility.");
   }
 
   const files = normalizeServerFiles(value.files);
@@ -184,6 +198,7 @@ function normalizeSmartUploadGrouping(
         // indices prevents a stale/duplicate server label from selecting or
         // editing the wrong neighbouring lot.
         groupIndex: fallbackIndex,
+        lotNumber: typeof candidate.lotNumber === "string" ? candidate.lotNumber : undefined,
         imageCount: fileIds.length,
         fileIds,
         coverFileId: fileIds.includes(explicitCoverFileId)
@@ -213,6 +228,9 @@ function normalizeSmartUploadGrouping(
 
   return {
     sessionId: String(value.sessionId || fallbackSessionId),
+    groupingMethod: value.groupingMethod === "lot_number" ? "lot_number" : "black_divider",
+    lotStartFileIds: Array.isArray(value.lotStartFileIds) ? value.lotStartFileIds.filter((id): id is string => typeof id === "string") : [],
+    unresolvedLotNumberFileIds: Array.isArray(value.unresolvedLotNumberFileIds) ? value.unresolvedLotNumberFileIds.filter((id): id is string => typeof id === "string") : [],
     smartUpload: true,
     groupingStatus,
     progressPercent: Number.isFinite(progressPercent)
@@ -328,6 +346,7 @@ export async function createOrResumeSmartUploadSession(
   const { data: envelope } = await API.post<{ data: UploadSession }>(
     `${endpoint}/upload-session`,
     {
+      groupingMethod: draft.details.smart_upload_grouping_method === "lot_number" ? "lot_number" : "black_divider",
       details: {
         ...draft.details,
         smart_upload: true,
@@ -338,6 +357,9 @@ export async function createOrResumeSmartUploadSession(
       files: createManifest(draft.files),
     }
   );
+  if (draft.details.smart_upload_grouping_method === "lot_number" && envelope.data.groupingMethod !== "lot_number") {
+    throw new Error("This server does not support Lot Number Upload yet. Update the backend before uploading; your selected photos are retained.");
+  }
   return envelope.data;
 }
 
@@ -539,6 +561,9 @@ export async function waitForSmartUploadGrouping(args: {
 }) {
   while (!args.signal?.aborted) {
     const grouping = await getSmartUploadGrouping(args.kind, args.sessionId);
+    if (args.signal?.aborted) {
+      throw new DOMException("Smart Upload polling was cancelled.", "AbortError");
+    }
     args.onProgress?.(grouping);
     if (
       grouping.groupingStatus === "review_ready" ||
@@ -548,7 +573,7 @@ export async function waitForSmartUploadGrouping(args: {
     }
     if (grouping.groupingStatus === "failed") {
       throw new Error(
-        grouping.error || "Black-image separator detection failed."
+        grouping.error || "Lot grouping detection failed."
       );
     }
     await waitForNextGroupingPoll(args.signal);
@@ -562,7 +587,8 @@ export async function updateSmartUploadDividers(args: {
   dividerFileIds: string[];
   revision?: number;
   orderedFileIds?: string[];
-  groups?: Array<string[] | { fileIds: string[] }>;
+  groups?: Array<string[] | { fileIds: string[]; lotNumber?: string }>;
+  acknowledgeLotNumberReview?: boolean;
   orderReviewRequired?: boolean;
   unresolvedDividerIds?: string[];
   confirm?: boolean;
@@ -574,6 +600,7 @@ export async function updateSmartUploadDividers(args: {
       ...(args.revision !== undefined ? { revision: args.revision } : {}),
       ...(args.orderedFileIds ? { orderedFileIds: args.orderedFileIds } : {}),
       ...(args.groups ? { groups: args.groups } : {}),
+      ...(args.acknowledgeLotNumberReview === true ? { acknowledgeLotNumberReview: true } : {}),
       ...(args.orderReviewRequired !== undefined
         ? { orderReviewRequired: args.orderReviewRequired }
         : {}),

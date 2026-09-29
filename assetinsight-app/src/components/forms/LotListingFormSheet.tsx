@@ -308,6 +308,7 @@ const LotListingFormSheet = ({
                     type: 'video/mp4' as const,
                   }
                 : {
+                    ...savedLot.videoFiles[0],
                     uri: savedLot.videoFiles[0].uri,
                     name: savedLot.videoFiles[0].name || 'restored-video.mp4',
                     type: savedLot.videoFiles[0].type || 'video/mp4',
@@ -805,7 +806,7 @@ const LotListingFormSheet = ({
     }
 
     const submissionFileCount = lots.reduce(
-      (sum, lot) => sum + lot.files.length + (lot.extraFiles?.length || 0),
+      (sum, lot) => sum + lot.files.length + (lot.extraFiles?.length || 0) + (lot.videoFile ? 1 : 0),
       0
     );
     // Bind the user's explicit action across local preparation and transport.
@@ -817,7 +818,7 @@ const LotListingFormSheet = ({
     setUploadStatus({
       percent: 1,
       stage: 'preparing',
-      message: `Preparing ${submissionFileCount} ${submissionFileCount === 1 ? 'image' : 'images'}...`,
+      message: `Preparing ${submissionFileCount} ${submissionFileCount === 1 ? 'file' : 'files'}...`,
       completedFiles: 0,
       totalFiles: submissionFileCount,
       uploadedBytes: 0,
@@ -855,6 +856,7 @@ const LotListingFormSheet = ({
         ...auctioneerLotSource(auctioneer, index),
         count: lot.files.length,
         extra_count: lot.extraFiles?.length || 0,
+        video_count: lot.videoFile ? 1 : 0,
         cover_index: lot.coverIndex || 0,
         mode: lot.mode || 'single_lot',
       }));
@@ -912,6 +914,12 @@ const LotListingFormSheet = ({
           captureOrder: f.captureOrder,
           originalOrder: f.originalOrder,
         })),
+        videoFile: lot.videoFile ? {
+          uri: lot.videoFile.uri,
+          name: lot.videoFile.name,
+          type: lot.videoFile.type || 'video/mp4',
+          size: lot.videoFile.size,
+        } : undefined,
         lot_number: idx + 1,
         mode: lot.mode,
         coverIndex: lot.coverIndex,

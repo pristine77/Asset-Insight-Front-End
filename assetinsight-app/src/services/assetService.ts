@@ -83,6 +83,7 @@ export interface AssetCreateDetails {
   mixed_lots?: Array<{
     count: number;
     extra_count: number;
+    video_count?: number;
     cover_index: number;
     mode: MixedLotMode;
     source_key?: string;
@@ -225,6 +226,14 @@ class AssetService {
     const uploadDetails = {
       ...details,
       watermark_images: restoreImageWatermarkPreference(details.watermark_images),
+      ...(details.mixed_lots ? {
+        // Multipart has one ordered video array: explicit zeros prevent a clip
+        // from a later lot being attached to the first lot without a video.
+        mixed_lots: details.mixed_lots.map((lot, index) => ({
+          ...lot,
+          video_count: lots[index]?.videoFile ? 1 : 0,
+        })),
+      } : {}),
     };
     try {
       const files: DirectUploadFile[] = [];
@@ -265,6 +274,7 @@ class AssetService {
             size: lot.videoFile.size,
             fieldname: "videos",
             lotIndex,
+            imageIndex: 0,
             role: "video",
           });
         }

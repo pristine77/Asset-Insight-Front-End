@@ -1,5 +1,5 @@
-import API from '@/lib/api';
-import { clearTokens, setTokens } from '@/lib/auth-storage';
+import API, { type RetriableAxiosConfig } from '@/lib/api';
+import { advanceAuthSession, assertAuthSessionCurrent, captureAuthSession, clearTokens, getAccessToken, getRefreshToken, setTokens, type AuthSessionSnapshot } from '@/lib/auth-storage';
 import {
   buildBasicDeviceContext,
   clearStoredDeviceAccess,
@@ -66,6 +66,11 @@ export type AuthUser = {
   isReportApprover?: boolean;
   isReleaseManager?: boolean;
   proposalValuationEnabled?: boolean;
+  isCrmAgent?: boolean;
+  role?: 'user' | 'admin' | 'superadmin';
+  crmAddress?: string;
+  crmQuadrant?: string;
+  crmSpecializations?: string[];
   avatarUrl?: string;
   avatarUploadedAt?: string;
   authProvider?: string;
@@ -88,6 +93,8 @@ function applyAuthResponse(data: AuthResponse) {
   return data;
 }
 
+const authOptions = (session: AuthSessionSnapshot): RetriableAxiosConfig => ({ _retry: true, _authSession: session });
+
 export const AuthService = {
   async signup(payload: SignupPayload): Promise<{ message: string }> {
     const { data } = await API.post<{ message: string }>('/auth/signup', payload);
@@ -95,13 +102,19 @@ export const AuthService = {
   },
 
   async login(payload: LoginPayload): Promise<AuthResponse> {
+    const session = advanceAuthSession();
     try {
+      const body = await deviceAwarePayload(payload);
+      assertAuthSessionCurrent(session);
       const { data } = await API.post<AuthResponse>(
         '/auth/login',
-        await deviceAwarePayload(payload),
+        body,
+        authOptions(session),
       );
+      assertAuthSessionCurrent(session);
       return applyAuthResponse(data);
     } catch (err: any) {
+      assertAuthSessionCurrent(session);
       const restricted = err?.response?.data as RestrictedDeviceAccess | undefined;
       if (restricted?.authState) return applyAuthResponse(restricted);
       const serverMsg = err?.response?.data?.message || err?.message || 'Failed to login';
@@ -110,10 +123,15 @@ export const AuthService = {
   },
 
   async verifyEmail(payload: VerifyEmailPayload): Promise<AuthResponse & { message?: string }> {
+    const session = advanceAuthSession();
+    const body = await deviceAwarePayload(payload);
+    assertAuthSessionCurrent(session);
     const { data } = await API.post<AuthResponse & { message?: string }>(
       '/auth/verify-email',
-      await deviceAwarePayload(payload),
+      body,
+      authOptions(session),
     );
+    assertAuthSessionCurrent(session);
     return applyAuthResponse(data);
   },
 
@@ -131,31 +149,45 @@ export const AuthService = {
   },
 
   async resetPasswordByCode(payload: ResetPasswordCodePayload): Promise<AuthResponse & { message?: string }> {
+    const session = advanceAuthSession();
+    const body = await deviceAwarePayload(payload);
+    assertAuthSessionCurrent(session);
     const { data } = await API.post<AuthResponse & { message?: string }>(
       '/auth/reset-password-code',
-      await deviceAwarePayload(payload),
+      body,
+      authOptions(session),
     );
+    assertAuthSessionCurrent(session);
     return applyAuthResponse(data);
   },
 
   async resetPassword(payload: ResetPasswordPayload): Promise<AuthResponse & { message?: string }> {
+    const session = advanceAuthSession();
+    const body = await deviceAwarePayload({ password: payload.password });
+    assertAuthSessionCurrent(session);
     const { data } = await API.post<AuthResponse & { message?: string }>(
       `/auth/reset-password/${payload.token}`,
-      await deviceAwarePayload({ password: payload.password }),
+      body,
+      authOptions(session),
     );
+    assertAuthSessionCurrent(session);
     return applyAuthResponse(data);
   },
 
   async logout() {
-    try {
-      const { getRefreshToken } = await import('@/lib/auth-storage');
-      const refreshToken = getRefreshToken();
-      if (refreshToken) {
-        await API.post('/auth/logout', { token: refreshToken }).catch(() => {});
-      }
-    } finally {
-      clearTokens();
-      clearStoredDeviceAccess();
+    const refreshToken = getRefreshToken();
+    const accessToken = getAccessToken();
+    clearTokens();
+    clearStoredDeviceAccess();
+    const session = captureAuthSession();
+    if (refreshToken) {
+      // Logout is locally complete immediately; a late receipt cannot clear a later login.
+      await API.post('/auth/logout', { token: refreshToken }, {
+        headers: accessToken ? { Authorization: `Bearer ${accessToken}` } : undefined,
+        timeout: 15_000,
+        _retry: true,
+        _authSession: session,
+      } as RetriableAxiosConfig).catch(() => {});
     }
   },
 };

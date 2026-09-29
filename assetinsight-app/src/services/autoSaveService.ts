@@ -517,6 +517,7 @@ const persistVideoFile = async (
     });
     if (!imported) return { ...videoFile, name: videoFile.name || `video-${index}.mp4`, type: videoFile.type || 'video/mp4', availability: 'missing' };
     return {
+      ...videoFile,
       uri: imported.uri,
       name: imported.name,
       type: imported.type,
@@ -542,6 +543,7 @@ const persistVideoFile = async (
   if (!persistedUri) return null;
 
   return {
+    ...videoFile,
     uri: persistedUri,
     name: videoFile.name || `video-${index}.${ext}`,
     type: videoFile.type || 'video/mp4',

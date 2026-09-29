@@ -1315,6 +1315,8 @@ test("public and authentication route matrix renders cleanly", async ({
     { path: "/login", heading: "Welcome back", level: 2 },
     { path: "/signup", heading: "Build your workspace", level: 2 },
     { path: "/forgot-password", heading: "Reset your password", level: 2 },
+    { path: "/privacy", heading: "Asset Insight privacy notice", level: 1 },
+    { path: "/terms/youtube", heading: "YouTube feature terms", level: 1 },
     {
       path: "/verify-email?email=alex%40example.com",
       heading: "Check your inbox",

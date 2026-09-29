@@ -90,6 +90,14 @@
   display: none;
 }
 
+.workspaceSwitch { display: flex; align-items: center; gap: 12px; min-height: 54px; padding: 9px 10px; margin-bottom: 16px; border: 1px solid var(--app-border); border-radius: 7px; background: var(--app-panel); color: var(--app-text); text-decoration: none; }
+.workspaceSwitch > svg { flex-shrink: 0; color: var(--app-accent); }
+.workspaceSwitch strong, .workspaceSwitch small { display: block; line-height: 1.4; }
+.workspaceSwitch strong { font-size: .84rem; }
+.workspaceSwitch small { font-size: .71rem; font-weight: 400; color: var(--app-text-muted); }
+.workspaceSwitch:hover { border-color: var(--app-accent); }
+.workspaceTitle { color: var(--app-text-muted); font-size: .84rem; margin-left: 14px; margin-right: auto; }
+
 .navGroup + .navGroup {
   margin-top: 12px;
   padding-top: 12px;

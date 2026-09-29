@@ -5,6 +5,7 @@ import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { ArrowRight, Eye, EyeOff } from "lucide-react";
 import { useAuthContext } from "@/context/AuthContext";
+import { safeAppNextPath } from "@/lib/workspace";
 import AuthLightShell, {
   AUTH_INPUT_CLASS,
   AUTH_LABEL_CLASS,
@@ -61,9 +62,9 @@ export default function LoginForm() {
 
       const result = await login({ email, password });
       if (result.authState !== "authenticated") {
-        router.replace("/device-access");
+        router.replace(`/device-access?next=${encodeURIComponent(safeAppNextPath(search.get("next")))}`);
       } else {
-        router.replace(search.get("next") || "/dashboard");
+        router.replace(safeAppNextPath(search.get("next")));
       }
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : "Failed to login");
@@ -174,7 +175,7 @@ export default function LoginForm() {
 
         <button type="submit" disabled={loading} className={`mt-8 w-full ${AUTH_PRIMARY_BUTTON_CLASS}`}>
           {loading ? <AuthSpinner /> : null}
-          <span>{loading ? "Signing in..." : "Open dashboard"}</span>
+          <span>{loading ? "Signing in..." : "Sign in"}</span>
           {loading ? null : <ArrowRight className="h-4 w-4" />}
         </button>
 

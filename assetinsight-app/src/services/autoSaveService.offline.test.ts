@@ -71,6 +71,20 @@ it('preserves stable photo identities when photos are reordered', async () => {
   expect(result.lots[0].mainImages[1]).toMatchObject({ mediaId: `stable-${photo(1).uri}` });
 });
 
+it.each(['asset', 'lotListing'] as const)('retains %s video references and metadata across repeated offline saves', async type => {
+  const clip = { uri: 'content://media/external/video/media/720', name: 'walkthrough.mp4', type: 'video/mp4',
+    mediaId: 'stable-video', captureOrder: 7, originalOrder: 7, width: 1280, height: 720, timestamp: 1700000000 };
+  const input = { ...form(), type, lots: [{ ...form().lots[0], videoFile: clip }] };
+  const first = await AutoSaveService.saveDraft(input);
+  const second = await AutoSaveService.saveDraft(input);
+  expect(first.lots[0].videoFiles).toHaveLength(1);
+  expect(second.lots[0].videoFiles).toEqual(first.lots[0].videoFiles);
+  expect(second.lots[0].videoFiles[0]).toMatchObject({ ...clip, slot: 'video', index: 0, lotId: 'lot' });
+  expect(second.lots[0].mainImages).toHaveLength(2);
+  expect(second.lots[0].extraImages).toHaveLength(0);
+  expect(jest.mocked(LocalMediaStore.importMedia).mock.calls.filter(([args]) => args.slot === 'video')).toHaveLength(1);
+});
+
 it('never drops the legacy Incoming review gate when a generic form is saved', async () => {
   const input = form();
   const initial = await AutoSaveService.saveDraft(input);

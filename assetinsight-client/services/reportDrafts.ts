@@ -50,6 +50,7 @@ export type SmartUploadServerFile = {
 };
 
 export type SmartUploadDraftSummary = {
+  groupingMethod?: "black_divider" | "lot_number";
   sessionId?: string;
   groupingStatus:
     | "uploading"
@@ -60,6 +61,7 @@ export type SmartUploadDraftSummary = {
   progressPercent: number;
   files?: SmartUploadServerFile[];
   groups: Array<{
+    lotNumber?: string;
     groupIndex: number;
     imageCount: number;
     fileIds: string[];
@@ -443,7 +445,8 @@ function restoredFileName(item: ReportDraftMediaDescriptor) {
 
 async function downloadDraftFile(
   draftId: string,
-  item: ReportDraftMediaDescriptor
+  item: ReportDraftMediaDescriptor,
+  signal?: AbortSignal
 ) {
   const contentPath =
     item.contentPath ||
@@ -458,6 +461,7 @@ async function downloadDraftFile(
   const response = await API.get<Blob>(contentPath, {
     responseType: "blob",
     timeout: 10 * 60 * 1000,
+    signal,
   });
   const blob = response.data;
   const file = new File([blob], restoredFileName(item), {
@@ -786,7 +790,11 @@ export const ReportDraftService = {
     };
   },
 
-  async restoreLots<T extends DraftMediaLot>(record: ReportDraftRecord): Promise<T[]> {
+  async restoreLots<T extends DraftMediaLot>(record: ReportDraftRecord, options: {
+    signal?: AbortSignal;
+    onProgress?: (progress: { completed: number; total: number }) => void;
+  } = {}): Promise<T[]> {
+    options.signal?.throwIfAborted();
     const draftId = record.id || record._id;
     if (!draftId) throw new Error("This draft has no server identifier and cannot be restored.");
     const lots = (Array.isArray(record.lots) ? record.lots : []).map(
@@ -821,13 +829,19 @@ export const ReportDraftService = {
       );
     });
     const restored = new Map<string, File>();
+    options.onProgress?.({ completed: 0, total: media.length });
     await mapWithConcurrency(
       media,
       async (item) => {
-        restored.set(item.clientFileId, await downloadDraftFile(draftId, item));
+        const file = await downloadDraftFile(draftId, item, options.signal);
+        options.signal?.throwIfAborted();
+        restored.set(item.clientFileId, file);
+        options.onProgress?.({ completed: restored.size, total: media.length });
       },
-      4
+      4,
+      options.signal
     );
+    options.signal?.throwIfAborted();
     for (const item of media) {
       const lot = lotById.get(String(item.lotId || ""));
       const file = restored.get(item.clientFileId);

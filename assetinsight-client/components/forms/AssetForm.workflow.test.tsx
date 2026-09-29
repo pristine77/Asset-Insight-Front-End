@@ -49,8 +49,8 @@ vi.mock("next/dynamic", async () => {
     default: () => {
       const componentIndex = dynamicIndex++;
       if (componentIndex !== 0) {
-        return function DeferredWorkspace() {
-          return null;
+        return function DeferredWorkspace({ open, groupingMethod }: { open: boolean; groupingMethod?: string }) {
+          return open ? React.createElement("output", { "data-testid": "asset-upload-method" }, groupingMethod) : null;
         };
       }
 
@@ -92,6 +92,21 @@ vi.mock("next/dynamic", async () => {
                   }))),
             },
             "Add test media"
+          ),
+          React.createElement(
+            "button",
+            {
+              type: "button",
+              onClick: () => onChange([0, 2, 0, 1].map((count, index) => ({
+                id: `video-lot-${index}`,
+                mode: "single_lot",
+                files: [new File([`photo-${index}`], `photo-${index}.jpg`, { type: "image/jpeg" })],
+                extraFiles: [],
+                videoFiles: Array.from({ length: count }, (_, videoIndex) => new File([`video-${index}-${videoIndex}`], `video-${index}-${videoIndex}.mp4`, { type: "video/mp4" })),
+                coverIndex: 0,
+              }))),
+            },
+            "Add sparse lot videos"
           ),
           React.createElement(
             "output",
@@ -331,17 +346,27 @@ describe("AssetForm manual save and submission workflow", () => {
     }
   });
 
+  it.each([["Smart Upload", "black_divider"], ["Lot Number Upload", "lot_number"]])("opens %s with its own method", async (label, method) => {
+    render(<AssetForm />);
+    fillRequiredReportFields();
+    fireEvent.change(screen.getByRole("textbox", { name: /inspection location/i }), { target: { value: "Regina" } });
+    fireEvent.click(screen.getByRole("button", { name: label }));
+    expect(await screen.findByTestId("asset-upload-method")).toHaveTextContent(method);
+    expect(mocks.createAsset).not.toHaveBeenCalled();
+  });
+
   it.each(["unknown", "scheduleA"] as const)(
-    "continues an imported %s report once after acceptance and old-draft cleanup",
+    "continues an imported %s report at acceptance without waiting for processing or old-draft cleanup",
     async (kind) => {
       const upload = deferred<Record<string, unknown>>();
       const cleanup = deferred<void>();
       const onAcceptedAndContinue = vi.fn();
       const onSuccess = vi.fn();
+      const onDraftStatusChange = vi.fn();
       const auctioneer = makeAuctioneerSetup(kind);
       mocks.createAsset.mockReturnValueOnce(upload.promise);
       mocks.deleteDraftByClientId.mockReturnValueOnce(cleanup.promise);
-      render(<AssetForm auctioneer={auctioneer} onAcceptedAndContinue={onAcceptedAndContinue} onSuccess={onSuccess} />);
+      render(<AssetForm auctioneer={auctioneer} onAcceptedAndContinue={onAcceptedAndContinue} onSuccess={onSuccess} onDraftStatusChange={onDraftStatusChange} />);
       addTestMedia();
 
       const sources = JSON.parse(screen.getByTestId("asset-source-locks").textContent || "{}");
@@ -349,7 +374,7 @@ describe("AssetForm manual save and submission workflow", () => {
       if (kind === "scheduleA") {
         expect(sources.sources.map((source: { locked: boolean }) => source.locked)).toEqual([true, true]);
       }
-      fireEvent.click(screen.getByRole("button", { name: "Generate files & new lot" }));
+      fireEvent.click(screen.getByRole("button", { name: "Create Lot & Continue" }));
       await waitFor(() => expect(mocks.createAsset).toHaveBeenCalledOnce());
       expect(onAcceptedAndContinue).not.toHaveBeenCalled();
       expect(mocks.deleteDraftByClientId).not.toHaveBeenCalled();
@@ -370,7 +395,7 @@ describe("AssetForm manual save and submission workflow", () => {
 
       await act(async () => upload.resolve({ reportId: "accepted-asset-report", status: "processing" }));
       await waitFor(() => expect(mocks.deleteDraftByClientId).toHaveBeenCalledExactlyOnceWith(auctioneer.clientSubmissionId, "asset"));
-      expect(onAcceptedAndContinue).not.toHaveBeenCalled();
+      expect(onAcceptedAndContinue).toHaveBeenCalledExactlyOnceWith("accepted-asset-report");
       expect(onSuccess).not.toHaveBeenCalled();
       await act(async () => cleanup.resolve());
 
@@ -378,6 +403,7 @@ describe("AssetForm manual save and submission workflow", () => {
       expect(onSuccess).not.toHaveBeenCalled();
       expect(mocks.createAsset).toHaveBeenCalledOnce();
       expect(screen.getByTestId("selected-asset-media")).toHaveTextContent("No media selected");
+      expect(onDraftStatusChange).not.toHaveBeenCalledWith("saved", "Submission accepted");
     }
   );
 
@@ -389,15 +415,15 @@ describe("AssetForm manual save and submission workflow", () => {
       .mockResolvedValueOnce({ reportId: "accepted-after-retry" });
     render(<AssetForm auctioneer={makeAuctioneerSetup()} onAcceptedAndContinue={onAcceptedAndContinue} onSuccess={onSuccess} />);
     addTestMedia();
-    fireEvent.click(screen.getByRole("button", { name: "Generate files & new lot" }));
+    fireEvent.click(screen.getByRole("button", { name: "Create Lot & Continue" }));
 
-    await waitFor(() => expect(screen.getByRole("button", { name: "Generate files & new lot" })).toBeEnabled());
+    await waitFor(() => expect(screen.getByRole("button", { name: "Create Lot & Continue" })).toBeEnabled());
     expect(screen.getByTestId("selected-asset-media")).toHaveTextContent("asset-photo.jpg");
     expect(screen.getByLabelText(/Contract number/i)).toHaveValue("IMPORTED-100");
     expect(mocks.deleteDraftByClientId).not.toHaveBeenCalled();
     expect(onAcceptedAndContinue).not.toHaveBeenCalled();
     const original = mocks.createAsset.mock.calls[0];
-    fireEvent.click(screen.getByRole("button", { name: "Generate files & new lot" }));
+    fireEvent.click(screen.getByRole("button", { name: "Create Lot & Continue" }));
 
     await waitFor(() => expect(onAcceptedAndContinue).toHaveBeenCalledExactlyOnceWith("accepted-after-retry"));
     expect(mocks.createAsset).toHaveBeenCalledTimes(2);
@@ -417,8 +443,8 @@ describe("AssetForm manual save and submission workflow", () => {
       render(<AssetForm auctioneer={makeAuctioneerSetup()} onAcceptedAndContinue={onAcceptedAndContinue} onSuccess={onSuccess} />);
       addTestMedia();
       const actions = {
-        continue: screen.getByRole("button", { name: "Generate files & new lot" }),
-        normal: screen.getByRole("button", { name: "Create report" }),
+        continue: screen.getByRole("button", { name: "Create Lot & Continue" }),
+        normal: screen.getByRole("button", { name: "Create Lot & Close" }),
         save: screen.getByRole("button", { name: /Save draft/i }),
       };
       act(() => {
@@ -456,7 +482,7 @@ describe("AssetForm manual save and submission workflow", () => {
     mocks.deleteScopedDraft.mockRejectedValueOnce(new Error("Local storage unavailable"));
     render(<AssetForm auctioneer={makeAuctioneerSetup()} onAcceptedAndContinue={onAcceptedAndContinue} onSuccess={onSuccess} />);
     addTestMedia();
-    fireEvent.click(screen.getByRole("button", { name: "Generate files & new lot" }));
+    fireEvent.click(screen.getByRole("button", { name: "Create Lot & Continue" }));
 
     await waitFor(() => expect(onAcceptedAndContinue).toHaveBeenCalledExactlyOnceWith("accepted-cleanup-failure"));
     expect(mocks.toastWarning).toHaveBeenCalledWith(expect.stringContaining("Report submitted"));
@@ -466,9 +492,11 @@ describe("AssetForm manual save and submission workflow", () => {
 
   it("shows no new-lot action without both an imported contract and continuation callback", () => {
     const view = render(<AssetForm onAcceptedAndContinue={vi.fn()} />);
-    expect(screen.queryByRole("button", { name: "Generate files & new lot" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Create Lot & Continue" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Create report" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Create Lot & Close" })).not.toBeInTheDocument();
     view.rerender(<AssetForm auctioneer={makeAuctioneerSetup()} />);
-    expect(screen.queryByRole("button", { name: "Generate files & new lot" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Create Lot & Continue" })).not.toBeInTheDocument();
   });
 
   it("saves and resumes a fresh successor under its own work item and submission identity", async () => {
@@ -524,6 +552,20 @@ describe("AssetForm manual save and submission workflow", () => {
     expect(watermark).toBeChecked();
     fireEvent.click(watermark);
     expect(watermark).not.toBeChecked();
+  });
+
+  it("submits sparse per-lot video counts with every selected clip in lot order", async () => {
+    mocks.createAsset.mockResolvedValueOnce({ reportId: "video-report", status: "processing" });
+    render(<AssetForm />);
+    await waitForResolvedAssetLocation();
+    fillRequiredReportFields();
+    fireEvent.click(screen.getByRole("button", { name: "Add sparse lot videos" }));
+    fireEvent.click(screen.getByRole("button", { name: "Create report" }));
+    await waitFor(() => expect(mocks.createAsset).toHaveBeenCalledOnce());
+    const [details, photos, clips] = mocks.createAsset.mock.calls[0];
+    expect(details.mixed_lots.map((lot: any) => lot.video_count)).toEqual([0, 2, 0, 1]);
+    expect(photos.map((file: File) => file.name)).toEqual(["photo-0.jpg", "photo-1.jpg", "photo-2.jpg", "photo-3.jpg"]);
+    expect(clips.map((file: File) => file.name)).toEqual(["video-1-0.mp4", "video-1-1.mp4", "video-3-0.mp4"]);
   });
 
   it.each([undefined, false, true])("restores watermark choice %s without opting missing draft values in", async (watermarkImages) => {

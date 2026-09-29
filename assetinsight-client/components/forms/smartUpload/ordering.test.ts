@@ -15,6 +15,13 @@ function image(name: string, lastModified: number) {
 }
 
 describe("resolveSmartUploadFileOrder", () => {
+  it("does not apply black-divider filename heuristics to lot-number photos", () => {
+    const selected = [image("Black divider.jpg", 3000), image("photo-a.jpg", 1000), image("photo-b.jpg", 2000)];
+    const resolved = resolveSmartUploadFileOrder(selected, { groupingMethod: "lot_number" });
+    expect(resolved.diagnostic).toBe("file-timestamp-needs-review");
+    expect(resolved.files.map((file) => file.name)).toEqual(["photo-a.jpg", "photo-b.jpg", "Black divider.jpg"]);
+    expect(resolved.ambiguous).toBe(true);
+  });
   it("preserves an intentional non-filesystem sequence", () => {
     const selected = [
       image("IMG_0002.jpg", 2_000),

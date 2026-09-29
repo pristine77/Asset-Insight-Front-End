@@ -90,6 +90,8 @@ class LotRepository private constructor(private val context: Context) {
         saveAsync()
     }
 
+    fun isCapturePersisted(): Boolean = captureIdentity != null && journalFailure == null
+
     fun removeFileFromActiveLot(uri: Uri): Boolean {
         return activeBuilder?.removeFile(uri) ?: false
     }

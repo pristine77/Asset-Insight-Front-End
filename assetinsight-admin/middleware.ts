@@ -22,7 +22,7 @@ function nextWithAccessToken(request: NextRequest, accessToken: string) {
     .filter((part) => part && !part.startsWith(`${AUTH_COOKIE}=`));
   existing.push(`${AUTH_COOKIE}=${accessToken}`);
   headers.set("cookie", existing.join("; "));
-  const response = NextResponse.next({ request: { headers } });
+  const response = nextAdminPage(request, headers);
   response.cookies.set(AUTH_COOKIE, accessToken, {
     httpOnly: true,
     secure: process.env.NODE_ENV === "production",
@@ -31,6 +31,20 @@ function nextWithAccessToken(request: NextRequest, accessToken: string) {
     maxAge: 30 * 60,
   });
   return response;
+}
+
+function nextAdminPage(request: NextRequest, headers?: Headers) {
+  const options = headers ? { request: { headers } } : undefined;
+  if (request.nextUrl.pathname === "/youtube/callback" && request.nextUrl.search) {
+    // Keep the browser callback for one-time client consumption, but exclude
+    // provider codes/state from Next's serialized server-component payload.
+    const renderUrl = request.nextUrl.clone();
+    renderUrl.search = "";
+    const response = NextResponse.rewrite(renderUrl, options);
+    response.headers.set("Referrer-Policy", "no-referrer");
+    return response;
+  }
+  return NextResponse.next(options);
 }
 
 function isAuthPath(pathname: string) {
@@ -94,7 +108,7 @@ export async function middleware(request: NextRequest) {
     return NextResponse.redirect(new URL("/reports", request.url));
   }
 
-  return NextResponse.next();
+  return nextAdminPage(request);
 }
 
 export const config = {

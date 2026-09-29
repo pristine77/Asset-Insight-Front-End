@@ -32,6 +32,7 @@ export interface LotListingDetails {
   mixed_lots?: Array<{
     count: number;
     extra_count?: number;
+    video_count?: number;
     cover_index?: number;
     mode: LotListingMode;
     source_key?: string;
@@ -65,6 +66,7 @@ export interface LotListingLot {
   id: string;
   files: LotFile[];
   extraFiles?: LotFile[];
+  videoFile?: LotFile;
   lot_number: string | number;
   mode?: LotListingMode;
   coverIndex?: number;
@@ -161,6 +163,7 @@ class LotListingService {
       } : {}),
       count: lot.files.length,
       extra_count: lot.extraFiles?.length || 0,
+      video_count: lot.videoFile ? 1 : 0,
       cover_index: lot.coverIndex || 0,
       mode: lot.mode || 'single_lot',
     }));
@@ -203,6 +206,18 @@ class LotListingService {
             role: "extra",
           });
         });
+        if (lot.videoFile) {
+          files.push({
+            uri: lot.videoFile.uri,
+            name: lot.videoFile.name || `lot-${lotIndex + 1}-walkthrough.mp4`,
+            type: lot.videoFile.type || 'video/mp4',
+            size: lot.videoFile.size,
+            fieldname: 'videos',
+            lotIndex,
+            imageIndex: 0,
+            role: 'video',
+          });
+        }
       });
 
       const response = await uploadReportFilesDirectToR2({
@@ -253,6 +268,13 @@ class LotListingService {
         } as any;
         formData.append("images", fileObj);
         imageIndex++;
+      }
+      if (lot.videoFile) {
+        formData.append('videos', {
+          uri: lot.videoFile.uri,
+          name: lot.videoFile.name || `video-${lot.id}.mp4`,
+          type: lot.videoFile.type || 'video/mp4',
+        } as any);
       }
     }
 

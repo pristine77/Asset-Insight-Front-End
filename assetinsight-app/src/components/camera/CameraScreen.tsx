@@ -55,6 +55,7 @@ import { loadCameraPhotoWatermark } from './cameraPhotoWatermarkModule';
 import { OfflineCaptureStore } from '../../services/offlineCaptureStore';
 import type { CaptureContext } from '../../services/offlineCaptureTypes';
 import { randomUUID } from 'expo-crypto';
+import { VIDEO_RECORDING_BIT_RATE, VIDEO_RECORDING_FPS, VIDEO_RECORDING_RESOLUTION, supportsRequiredVideoSession } from './videoRecordingPolicy';
 
 interface CameraScreenProps {
   captureContext?: CaptureContext;
@@ -97,12 +98,6 @@ const getPhotoTargetResolution = (mode: CameraPerformanceMode): Size => {
   return CommonResolutions.FHD_4_3;
 };
 
-const getVideoTargetResolution = (mode: CameraPerformanceMode): Size => {
-  if (mode === 'quality') return CommonResolutions.UHD_16_9;
-  if (mode === 'balanced') return CommonResolutions.FHD_16_9;
-  return CommonResolutions.HD_16_9;
-};
-
 const getModeLabel = (mode?: CaptureMode) => {
   if (!mode) return 'Not Set';
   if (mode === 'single_lot') return 'Bundle';
@@ -136,6 +131,7 @@ const CameraScreen: React.FC<CameraScreenProps> = ({
   const capturePolicyRef = useRef({ captureContext, manualSubmissionRequired, visible });
   capturePolicyRef.current = { captureContext, manualSubmissionRequired, visible };
   const captureInFlight = useRef(false);
+  const pendingVideoRequestRef = useRef<{ lotId: string; index: number; context?: CaptureContext } | null>(null);
   const pendingSaveRef = useRef<{ lots: MixedLot[]; index: number; context?: CaptureContext } | null>(null);
   const optimizationControllers = useRef(new Set<AbortController>());
   const sameCaptureOwner = useCallback((context?: CaptureContext) => !context || (
@@ -158,8 +154,10 @@ const CameraScreen: React.FC<CameraScreenProps> = ({
     Alert.alert('Capture not saved to draft', 'Your captured file has been kept on this device. Keep this form open, free device storage if needed, and tap Done to retry saving. Do not clear app data.');
   }, []);
   const onClose = useCallback(() => {
-    if (captureInFlight.current) {
-      Alert.alert('Saving photo', 'Please wait for the photo to finish saving.');
+    if (captureInFlight.current || pendingVideoRequestRef.current) {
+      Alert.alert('Capture in progress', pendingVideoRequestRef.current
+        ? 'Stop recording and wait for the video to finish saving.'
+        : 'Please wait for the photo to finish saving.');
       return;
     }
     const pending = pendingSaveRef.current;
@@ -199,6 +197,7 @@ const CameraScreen: React.FC<CameraScreenProps> = ({
   const [isRecording, setIsRecording] = useState(false);
   const [recordingTime, setRecordingTime] = useState(0);
   const [videoSessionRequested, setVideoSessionRequested] = useState(false);
+  const [videoSessionConfig, setVideoSessionConfig] = useState<{ fps?: number } | null>(null);
   const [cameraConfigured, setCameraConfigured] = useState(false);
   const [cameraStarted, setCameraStarted] = useState(false);
   const [cameraErrorMessage, setCameraErrorMessage] = useState<string | null>(null);
@@ -223,10 +222,6 @@ const CameraScreen: React.FC<CameraScreenProps> = ({
     () => getPhotoTargetResolution(performanceMode),
     [performanceMode]
   );
-  const videoTargetResolution = useMemo(
-    () => getVideoTargetResolution(performanceMode),
-    [performanceMode]
-  );
   const photoOutput = usePhotoOutput({
     targetResolution: photoTargetResolution,
     containerFormat: 'jpeg',
@@ -239,28 +234,26 @@ const CameraScreen: React.FC<CameraScreenProps> = ({
           : 'quality',
   });
   const videoOutput = useVideoOutput({
-    targetResolution: videoTargetResolution,
-    targetBitRate:
-      performanceMode === 'speed'
-        ? 12_000_000
-        : performanceMode === 'balanced'
-          ? 20_000_000
-          : 28_000_000,
+    targetResolution: VIDEO_RECORDING_RESOLUTION,
+    targetBitRate: VIDEO_RECORDING_BIT_RATE,
     enableAudio: hasMicPermission,
+    fileType: 'mp4',
   });
 
-  const enableVideoSession = Platform.OS === 'android' ? videoSessionRequested || isRecording : true;
+  const enableVideoSession = videoSessionRequested || isRecording;
   const outputs = useMemo(
-    () => (enableVideoSession ? [photoOutput, videoOutput] : [photoOutput]),
+    // A high-resolution photo output must not force the video session above HD.
+    () => (enableVideoSession ? [videoOutput] : [photoOutput]),
     [enableVideoSession, photoOutput, videoOutput]
   );
 
   const constraints = useMemo<Constraint[]>(() => {
+    if (enableVideoSession) return [{ fps: VIDEO_RECORDING_FPS }, { resolutionBias: videoOutput }];
     if (lowLightBoost) return [{ fps: 24 }, { binned: true }];
     if (performanceMode === 'quality') return [{ fps: 30 }, { binned: false }];
     if (performanceMode === 'balanced') return [{ fps: 30 }];
     return [{ fps: 30 }, { binned: true }];
-  }, [lowLightBoost, performanceMode]);
+  }, [enableVideoSession, lowLightBoost, performanceMode, videoOutput]);
 
   const neutralZoom = useMemo(() => getNeutralZoom(device?.zoomLensSwitchFactors), [device]);
   const maxZoom = useMemo(() => device?.maxZoom ?? 1, [device]);
@@ -378,6 +371,8 @@ const CameraScreen: React.FC<CameraScreenProps> = ({
     return () => {
       if (recordingIntervalRef.current) clearInterval(recordingIntervalRef.current);
       if (pendingRecordTimeoutRef.current) clearTimeout(pendingRecordTimeoutRef.current);
+      // Stop/finalize; cancellation would delete the recording original.
+      void recorderRef.current?.stopRecording().catch(() => undefined);
     };
   }, []);
 
@@ -513,7 +508,7 @@ const CameraScreen: React.FC<CameraScreenProps> = ({
 
   const setPerformance = useCallback(
     (mode: CameraPerformanceMode) => {
-      if (isRecording) return;
+      if (isRecording || pendingVideoRequestRef.current) return;
       setPerformanceMode(mode);
     },
     [isRecording]
@@ -536,10 +531,11 @@ const CameraScreen: React.FC<CameraScreenProps> = ({
   }, []);
 
   const handleSessionConfigSelected = useCallback((config: CameraSessionConfig) => {
+    if (enableVideoSession) setVideoSessionConfig({ fps: config.selectedFPS });
     console.log(
       `[Camera] Session config selected: fps=${config.selectedFPS ?? 'auto'}, binned=${String(config.isBinned)}, pixelFormat=${config.nativePixelFormat}`
     );
-  }, []);
+  }, [enableVideoSession]);
 
   const handleCameraError = useCallback((error: Error) => {
     console.error('[Camera] Error:', error);
@@ -558,8 +554,10 @@ const CameraScreen: React.FC<CameraScreenProps> = ({
   }, []);
 
   const handlePrevLot = useCallback(() => {
-    if (captureInFlight.current) {
-      Alert.alert('Saving photo', 'Please wait for the photo to finish saving.');
+    if (captureInFlight.current || pendingVideoRequestRef.current) {
+      Alert.alert('Capture in progress', pendingVideoRequestRef.current
+        ? 'Stop recording and wait for the video to finish saving.'
+        : 'Please wait for the photo to finish saving.');
       return;
     }
     const index = structureRef.current.activeLotIdx;
@@ -568,8 +566,10 @@ const CameraScreen: React.FC<CameraScreenProps> = ({
   }, [setActiveLotIdx]);
 
   const handleNextLot = useCallback(() => {
-    if (captureInFlight.current) {
-      Alert.alert('Saving photo', 'Please wait for the photo to finish saving.');
+    if (captureInFlight.current || pendingVideoRequestRef.current) {
+      Alert.alert('Capture in progress', pendingVideoRequestRef.current
+        ? 'Stop recording and wait for the video to finish saving.'
+        : 'Please wait for the photo to finish saving.');
       return;
     }
     const { activeLotIdx: index, lockedStructure: locked } = structureRef.current;
@@ -632,7 +632,7 @@ const CameraScreen: React.FC<CameraScreenProps> = ({
 
   const handleCapture = useCallback(
     async (mode: CaptureMode, isExtra: boolean) => {
-      if (captureInFlight.current) return;
+      if (captureInFlight.current || pendingVideoRequestRef.current) return;
       if (!cameraConfigured || !cameraStarted) return;
       if (!currentLot) return;
 
@@ -751,14 +751,24 @@ const CameraScreen: React.FC<CameraScreenProps> = ({
 
   const clearRecordingState = useCallback(() => {
     captureInFlight.current = false;
+    pendingVideoRequestRef.current = null;
     recorderRef.current = null;
     setIsRecording(false);
     setVideoSessionRequested(false);
+    setVideoSessionConfig(null);
     if (recordingIntervalRef.current) {
       clearInterval(recordingIntervalRef.current);
       recordingIntervalRef.current = null;
     }
   }, []);
+
+  useEffect(() => {
+    const request = pendingVideoRequestRef.current;
+    if (visible && (!request || sameCaptureOwner(request.context))) return;
+    const recorder = recorderRef.current;
+    if (recorder) void recorder.stopRecording().catch(() => undefined);
+    else if (!captureInFlight.current) clearRecordingState();
+  }, [captureContext?.draftId, captureContext?.ownerId, clearRecordingState, sameCaptureOwner, visible]);
 
   const startRecording = useCallback(async () => {
     if (!cameraConfigured || !cameraStarted) return;
@@ -768,24 +778,56 @@ const CameraScreen: React.FC<CameraScreenProps> = ({
     }
     if (isRecording || recorderRef.current || captureInFlight.current) return;
 
-    if (!hasMicPermission) {
-      const granted = await requestMicPermission();
-      if (!granted) {
-        Alert.alert('Microphone Permission Required', 'Allow microphone access to record video.');
-        setVideoSessionRequested(false);
-        return;
-      }
-    }
-
     if (!enableVideoSession) {
-      setVideoSessionRequested(true);
+      if (pendingVideoRequestRef.current) return;
+      const request = { lotId: currentLot.id, index: activeLotIdx, context: captureContext };
+      pendingVideoRequestRef.current = request;
+      try {
+        if (!hasMicPermission && !await requestMicPermission()) {
+          if (pendingVideoRequestRef.current === request) {
+            Alert.alert('Microphone Permission Required', 'Allow microphone access to record video.');
+            clearRecordingState();
+          }
+          return;
+        }
+        if (!sameCaptureOwner(request.context) || !capturePolicyRef.current.visible || pendingVideoRequestRef.current !== request) {
+          if (pendingVideoRequestRef.current === request) clearRecordingState();
+          return;
+        }
+        setCameraConfigured(false);
+        setVideoSessionConfig(null);
+        setVideoSessionRequested(true);
+      } catch {
+        if (pendingVideoRequestRef.current === request) {
+          clearRecordingState();
+          Alert.alert('Recording Failed', 'Unable to prepare the microphone for recording.');
+        }
+      }
       return;
     }
 
+    const request = pendingVideoRequestRef.current;
+    if (!request || !videoSessionConfig) return;
+    if (!supportsRequiredVideoSession(videoOutput.currentResolution, videoSessionConfig.fps)) {
+      clearRecordingState();
+      Alert.alert('720p recording unavailable', 'This camera could not configure 720p at 30 fps. Your photos are unchanged. Try again with another supported camera or device.');
+      return;
+    }
+    if (!sameCaptureOwner(request.context) || !capturePolicyRef.current.visible) {
+      clearRecordingState();
+      return;
+    }
     captureInFlight.current = true;
-    const context = captureContext;
+    const context = request.context;
     try {
-      const recorder = await videoOutput.createRecorder({});
+      if (!FileSystem.documentDirectory) throw new Error('Device storage is unavailable.');
+      // Record directly to durable device storage. No second full-size offline copy.
+      const destination = `${FileSystem.documentDirectory}camera-videos/${randomUUID()}.mp4`;
+      const recorder = await videoOutput.createRecorder({ filePath: destination.replace(/^file:\/\//, '') });
+      if (!sameCaptureOwner(context) || !capturePolicyRef.current.visible || pendingVideoRequestRef.current !== request) {
+        clearRecordingState();
+        return;
+      }
       recorderRef.current = recorder;
       setIsRecording(true);
       setRecordingTime(0);
@@ -815,13 +857,16 @@ const CameraScreen: React.FC<CameraScreenProps> = ({
           const videoFile: PhotoFile = {
             mediaId: randomUUID(),
             captureTimestamp: Date.now(),
+            captureOrigin: 'camera',
+            slot: 'video',
             ownership: FileSystem.documentDirectory && uri.startsWith(FileSystem.documentDirectory) ? 'camera' : undefined,
             uri,
-            name: `lot-${activeLotIdx + 1}-video-${Date.now()}.mp4`,
+            name: `lot-${request.index + 1}-video-${Date.now()}.mp4`,
             type: 'video/mp4',
           };
+          const savedIndex = lotsRef.current.findIndex((lot) => lot.id === request.lotId);
           const nextLots = lotsRef.current.map((lot, index) =>
-            index === activeLotIdx
+            index === savedIndex
               ? {
                 ...lot,
                 videoFile,
@@ -830,8 +875,9 @@ const CameraScreen: React.FC<CameraScreenProps> = ({
           );
           try {
             if (!sameCaptureOwner(context)) throw new Error('The capture belongs to the original draft owner.');
+            if (savedIndex < 0) throw new Error('Reopen the original lot to recover this recording.');
             void saveToGallery(uri);
-            await persistCapturedLots(nextLots, activeLotIdx, context);
+            await persistCapturedLots(nextLots, savedIndex, context);
           } catch {
             warnSaveFailure();
           } finally {
@@ -845,6 +891,7 @@ const CameraScreen: React.FC<CameraScreenProps> = ({
         (error: Error) => {
           console.error('[Camera] Recording failed:', error);
           clearRecordingState();
+          Alert.alert('Recording Failed', 'The video could not be completed. Check device storage and record it again. Your existing lot photos are unchanged.');
         }
       );
     } catch (error) {
@@ -859,6 +906,7 @@ const CameraScreen: React.FC<CameraScreenProps> = ({
     captureContext,
     clearRecordingState,
     currentLot?.mode,
+    currentLot?.id,
     enableVideoSession,
     hasMicPermission,
     isRecording,
@@ -869,16 +917,27 @@ const CameraScreen: React.FC<CameraScreenProps> = ({
     saveToGallery,
     setLots,
     videoOutput,
+    videoSessionConfig,
   ]);
 
   useEffect(() => {
-    if (!visible || !videoSessionRequested || !enableVideoSession || isRecording) return;
+    if (!visible || !videoSessionRequested || !enableVideoSession || isRecording || !cameraConfigured || !cameraStarted || !videoSessionConfig) return;
     const timer = setTimeout(() => {
       void startRecording();
     }, 250);
     pendingRecordTimeoutRef.current = timer;
     return () => clearTimeout(timer);
-  }, [enableVideoSession, isRecording, startRecording, videoSessionRequested, visible]);
+  }, [cameraConfigured, cameraStarted, enableVideoSession, isRecording, startRecording, videoSessionConfig, videoSessionRequested, visible]);
+
+  useEffect(() => {
+    if (!videoSessionRequested || isRecording) return;
+    const timer = setTimeout(() => {
+      if (captureInFlight.current) return;
+      clearRecordingState();
+      Alert.alert('720p recording unavailable', 'The camera did not finish preparing 720p at 30 fps. Your photos are unchanged. Try recording again.');
+    }, 10_000);
+    return () => clearTimeout(timer);
+  }, [clearRecordingState, isRecording, videoSessionRequested]);
 
   const stopRecording = useCallback(async () => {
     if (!recorderRef.current) return;
@@ -1053,9 +1112,9 @@ const CameraScreen: React.FC<CameraScreenProps> = ({
       zoom={cameraConfigured && cameraStarted ? zoom : undefined}
       enableNativeZoomGesture={false}
       torchMode={flash === 'on' ? 'on' : 'off'}
-      enableLowLightBoost={lowLightBoost && Boolean(device.supportsLowLightBoost)}
+      enableLowLightBoost={!enableVideoSession && lowLightBoost && Boolean(device.supportsLowLightBoost)}
       enableDistortionCorrection={
-        performanceMode === 'quality' && Boolean(device.supportsDistortionCorrection)
+        !enableVideoSession && performanceMode === 'quality' && Boolean(device.supportsDistortionCorrection)
       }
     />
   );
@@ -1137,6 +1196,10 @@ const CameraScreen: React.FC<CameraScreenProps> = ({
     <>
       {device.supportsLowLightBoost && (
         <TouchableOpacity
+          accessibilityRole="button"
+          accessibilityLabel="Low-light photo mode"
+          accessibilityState={{ selected: lowLightBoost, disabled: enableVideoSession }}
+          disabled={enableVideoSession}
           style={[styles.modeToggle, lowLightBoost && styles.modeToggleActive]}
           onPress={() => setLowLightBoost((previous) => !previous)}>
           <Feather name="moon" size={16} color={lowLightBoost ? '#FCD34D' : '#fff'} />

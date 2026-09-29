@@ -6,7 +6,10 @@ import {
   isSmartUploadCompletionPending,
   recoverSmartUploadCompletion,
   updateSmartUploadDividers,
+  createOrResumeSmartUploadSession,
+  waitForSmartUploadGrouping,
 } from "./smartUpload";
+import type { SmartUploadDraft } from "@/components/forms/smartUpload/storage";
 
 const api = vi.hoisted(() => ({ post: vi.fn(), get: vi.fn(), patch: vi.fn() }));
 vi.mock("@/lib/api", () => ({ default: api }));
@@ -126,6 +129,20 @@ describe("Smart Upload completion recovery", () => {
     expect(api.post).not.toHaveBeenCalled();
   });
 
+  it("ignores a late grouping response when the review window closes during a read", async () => {
+    let resolve!: (value: unknown) => void;
+    api.get.mockImplementation(() => new Promise((done) => { resolve = done; }));
+    const controller = new AbortController();
+    const onProgress = vi.fn();
+    const result = waitForSmartUploadGrouping({ kind: "asset", sessionId: "session-1", signal: controller.signal, onProgress }).catch((error: unknown) => error);
+    controller.abort();
+    resolve(envelope({ groupingMethod: "lot_number", groupingStatus: "review_ready" }));
+    expect(await result).toMatchObject({ name: "AbortError" });
+    expect(onProgress).not.toHaveBeenCalled();
+    expect(api.get).toHaveBeenCalledOnce();
+    expect(api.post).not.toHaveBeenCalled();
+  });
+
   it("uses scoped timeouts for grouping review reads and revision-checked confirmation", async () => {
     api.get.mockResolvedValue(envelope({}));
     api.patch.mockResolvedValue(envelope({}));
@@ -133,5 +150,35 @@ describe("Smart Upload completion recovery", () => {
     await updateSmartUploadDividers({ kind: "asset", sessionId: "session-1", revision: 7, dividerFileIds: ["divider-1"], groups: [["photo-1"], ["photo-2"]], confirm: true });
     expect(api.get).toHaveBeenCalledWith("/asset/upload-session/session-1/smart-grouping", { timeout: 20_000 });
     expect(api.patch).toHaveBeenCalledWith("/asset/upload-session/session-1/smart-grouping", expect.objectContaining({ revision: 7, confirm: true, groups: [["photo-1"], ["photo-2"]] }), { timeout: 45_000 });
+  });
+
+  it.each(["asset", "lot-listing"] as const)("creates %s numbered uploads with the persisted method and original order", async (kind) => {
+    api.post.mockResolvedValue(envelope({ sessionId: "numbered", groupingMethod: "lot_number" }));
+    const draft: SmartUploadDraft = { version: 1, scope: "owner:asset:stable", userId: "owner", stage: "selected", savedAt: "2026-09-27T12:00:00Z", kind, details: { smart_upload_grouping_method: "lot_number" }, clientSubmissionId: "stable", files: [{ fileId: "sign", originalOrder: 0, name: "2500.jpg", type: "image/jpeg", size: 20, lastModified: 0, uploaded: false }] };
+    await createOrResumeSmartUploadSession(draft);
+    expect(api.post).toHaveBeenCalledWith(`/${kind}/upload-session`, expect.objectContaining({ groupingMethod: "lot_number", details: expect.objectContaining({ client_submission_id: "stable" }), files: [expect.objectContaining({ fileId: "sign", originalOrder: 0, role: "main" })] }));
+  });
+
+  it("fails closed when an older backend does not confirm numbered support", async () => {
+    api.post.mockResolvedValue(envelope({ sessionId: "legacy" }));
+    await expect(createOrResumeSmartUploadSession({ kind: "asset", details: { smart_upload_grouping_method: "lot_number" }, files: [] } as unknown as SmartUploadDraft)).rejects.toThrow("does not support Lot Number Upload");
+  });
+
+  it("preserves numbered evidence and sends acknowledgement only when explicit", async () => {
+    const data = { groupingMethod: "lot_number", groups: [{ fileIds: ["sign", "photo"], lotNumber: "02500A" }], lotStartFileIds: ["sign"], unresolvedLotNumberFileIds: ["photo"], metrics: [{ fileId: "sign", kind: "lot_start", lotNumber: "02500A" }] };
+    api.get.mockResolvedValue(envelope(data));
+    api.patch.mockResolvedValue(envelope(data));
+    const value = await getSmartUploadGrouping("asset", "session-1");
+    expect(value).toMatchObject(data);
+    const args = { kind: "asset" as const, sessionId: "session-1", dividerFileIds: [], groups: data.groups, revision: 3 };
+    await updateSmartUploadDividers(args);
+    expect(api.patch.mock.calls[0][1]).not.toHaveProperty("acknowledgeLotNumberReview");
+    await updateSmartUploadDividers({ ...args, confirm: true, acknowledgeLotNumberReview: true });
+    expect(api.patch.mock.calls[1][1]).toMatchObject({ groups: data.groups, dividerFileIds: [], acknowledgeLotNumberReview: true, confirm: true });
+  });
+
+  it.each(["other_method", "", null, 12])("rejects an unknown grouping method %s instead of downgrading", async (groupingMethod) => {
+    api.get.mockResolvedValue(envelope({ groupingMethod }));
+    await expect(getSmartUploadGrouping("asset", "session-1")).rejects.toThrow("unsupported upload method");
   });
 });

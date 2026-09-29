@@ -47,6 +47,8 @@ vi.mock("swr", () => ({
   default: mocks.swr,
 }));
 
+vi.mock("./ListingActivitySync", () => ({ ListingActivitySync: ({ ownerId }: { ownerId: string }) => <span data-testid="report-sync">{ownerId}</span> }));
+
 vi.mock("@/context/AuthContext", () => ({
   useAuthContext: vi.fn(),
 }));
@@ -59,6 +61,7 @@ function authValue(
   roles: {
     isReportApprover?: boolean;
     isReleaseManager?: boolean;
+    isCrmAgent?: boolean;
   } = {}
 ): AuthContextType {
   return {
@@ -91,6 +94,7 @@ describe("AppShell", () => {
     toggleMode.mockReset();
     setMode.mockReset();
     window.localStorage.clear();
+    window.sessionStorage.clear();
     Object.defineProperty(document, "visibilityState", {
       configurable: true,
       value: "visible",
@@ -129,18 +133,15 @@ describe("AppShell", () => {
     expect(screen.queryByRole("link", { name: "Releases" })).not.toBeInTheDocument();
   });
 
-  it("starts the summary request while a stored session identity resolves", () => {
+  it("does not start workspace reads until a stored session identity resolves", () => {
     const resolvingSession = authValue();
     resolvingSession.user = null;
     vi.mocked(useAuthContext).mockReturnValue(resolvingSession);
 
     render(<AppShell>Queue content</AppShell>);
 
-    expect(mocks.swr).toHaveBeenCalledWith(
-      ["auctioneer/navigation-summary", "pending-session"],
-      expect.any(Function),
-      expect.objectContaining({ keepPreviousData: false })
-    );
+    expect(mocks.swr).not.toHaveBeenCalled();
+    expect(screen.queryByText("Queue content")).not.toBeInTheDocument();
   });
 
   it("pauses the summary request when no session is present", () => {
@@ -151,11 +152,7 @@ describe("AppShell", () => {
 
     render(<AppShell>Signed out queue</AppShell>);
 
-    expect(mocks.swr).toHaveBeenCalledWith(
-      null,
-      expect.any(Function),
-      expect.objectContaining({ keepPreviousData: false })
-    );
+    expect(mocks.swr).not.toHaveBeenCalled();
   });
 
   it("switches the navigation summary cache key with the authenticated user", () => {
@@ -397,5 +394,69 @@ describe("AppShell", () => {
       screen.getByRole("button", { name: /^Use dark theme$/ })
     );
     expect(toggleMode).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps the chooser neutral without sidebar, report sync or API reads", () => {
+    mocks.pathname.mockReturnValue("/workspaces");
+    vi.mocked(useAuthContext).mockReturnValue(authValue({ isCrmAgent: true }));
+    render(<AppShell>Choose content</AppShell>);
+    expect(screen.getByText("Choose content")).toBeVisible();
+    expect(screen.queryByRole("complementary")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("report-sync")).not.toBeInTheDocument();
+    expect(mocks.swr).not.toHaveBeenCalled();
+  });
+
+  it("shows only CRM navigation and never starts report reads or sync in CRM", () => {
+    mocks.pathname.mockReturnValue("/crm/tasks");
+    vi.mocked(useAuthContext).mockReturnValue(authValue({ isCrmAgent: true, isReportApprover: true }));
+    render(<AppShell>Task content</AppShell>);
+    for (const name of ["Tasks", "Transfers", "Coverage", "Outlook Calendar"]) expect(screen.getByRole("link", { name })).toBeVisible();
+    expect(screen.getByRole("link", { name: "Tasks" })).toHaveAttribute("aria-current", "page");
+    expect(screen.getByRole("link", { name: "Dashboard" })).not.toHaveAttribute("aria-current");
+    expect(screen.queryByRole("button", { name: "Drafts" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: /Incoming|My Reports|Approvals/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole("search")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("report-sync")).not.toBeInTheDocument();
+    expect(mocks.swr.mock.calls.some(([key]) => Array.isArray(key) && key[0] === "auctioneer/navigation-summary")).toBe(false);
+    expect(mocks.swr.mock.calls.some(([key]) => key === "/notifications?page=1&limit=10&cacheOwner=user-1")).toBe(true);
+    expect(screen.getByRole("link", { name: "Switch workspace, current CRM" })).toHaveAttribute("href", "/workspaces");
+  });
+
+  it("rejects CRM even for other roles and hides the denied page before reads", () => {
+    mocks.pathname.mockReturnValue("/crm/tasks");
+    vi.mocked(useAuthContext).mockReturnValue(authValue({ isReportApprover: true, isReleaseManager: true }));
+    render(<AppShell>Private CRM</AppShell>);
+    expect(screen.getByRole("heading", { name: "CRM access required" })).toBeVisible();
+    expect(screen.queryByText("Private CRM")).not.toBeInTheDocument();
+    expect(mocks.swr).not.toHaveBeenCalled();
+  });
+
+  it("restores only this owner's shared-screen preference without a report request flash", () => {
+    sessionStorage.setItem("cv-workspace:user-1", "crm");
+    mocks.pathname.mockReturnValue("/settings");
+    vi.mocked(useAuthContext).mockReturnValue(authValue({ isCrmAgent: true }));
+    const view = render(<AppShell>Account content</AppShell>);
+    expect(screen.getByRole("link", { name: "Tasks" })).toBeVisible();
+    expect(mocks.swr.mock.calls.some(([key]) => Array.isArray(key))).toBe(false);
+    const other = authValue({ isCrmAgent: true }); other.user!._id = "user-2";
+    vi.mocked(useAuthContext).mockReturnValue(other);
+    view.rerender(<AppShell>Other account</AppShell>);
+    expect(screen.queryByRole("link", { name: "Tasks" })).not.toBeInTheDocument();
+    expect(screen.getByRole("link", { name: /Incoming/ })).toBeVisible();
+    expect(mocks.swr.mock.calls.some(([key]) => key === "/notifications?page=1&limit=10&cacheOwner=user-2")).toBe(true);
+  });
+
+  it("lets an explicit listing link override the CRM hint and revoked access cannot preserve it", () => {
+    sessionStorage.setItem("cv-workspace:user-1", "crm");
+    vi.mocked(useAuthContext).mockReturnValue(authValue({ isCrmAgent: true }));
+    const view = render(<AppShell>Listing content</AppShell>);
+    expect(screen.getByTestId("report-sync")).toHaveTextContent("user-1");
+    expect(sessionStorage.getItem("cv-workspace:user-1")).toBe("listings");
+    sessionStorage.setItem("cv-workspace:user-1", "crm");
+    mocks.pathname.mockReturnValue("/settings");
+    vi.mocked(useAuthContext).mockReturnValue(authValue({ isCrmAgent: false }));
+    view.rerender(<AppShell>Account</AppShell>);
+    expect(screen.queryByRole("link", { name: /Switch workspace/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: "Tasks" })).not.toBeInTheDocument();
   });
 });

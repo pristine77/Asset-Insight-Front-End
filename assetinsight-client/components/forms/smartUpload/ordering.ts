@@ -176,7 +176,8 @@ function result(
  * a reusable marker was inserted between lots.
  */
 export function resolveSmartUploadFileOrder(
-  selectedFiles: readonly File[]
+  selectedFiles: readonly File[],
+  options: { groupingMethod?: "black_divider" | "lot_number" } = {}
 ): SmartUploadOrderingResult {
   const original = selectedFiles.map((file, selectionIndex) => ({
     file,
@@ -203,7 +204,7 @@ export function resolveSmartUploadFileOrder(
   }
 
   const dividerEntries = original.filter(({ file }) =>
-    isLikelySmartUploadDividerName(file.name)
+    options.groupingMethod !== "lot_number" && isLikelySmartUploadDividerName(file.name)
   );
   if (dividerEntries.length) {
     const reportPhotos = original.filter(

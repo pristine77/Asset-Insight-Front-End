@@ -12,7 +12,7 @@ import {
 import type { AuthResponse, AuthUser, LoginPayload } from "@/services/auth";
 import { AuthService } from "@/services/auth";
 import { UserService } from "@/services/user";
-import { clearTokens, hasStoredTokens } from "@/lib/auth-storage";
+import { AuthSessionChangedError, captureAuthSession, clearTokens, hasStoredTokens, isAuthSessionCurrent } from "@/lib/auth-storage";
 import {
   clearStoredDeviceAccess,
   getStoredDeviceAccess,
@@ -20,7 +20,6 @@ import {
   type RestrictedDeviceAccess,
 } from "@/lib/device-access";
 import { DeviceAccessService } from "@/services/device-access";
-import { startReportActivitySync } from "@/services/reportActivitySync";
 
 export type AuthContextType = {
   user: AuthUser | null;
@@ -48,12 +47,23 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [loggingOut, setLoggingOut] = useState(false);
   const [deviceAccess, setDeviceAccess] = useState<RestrictedDeviceAccess | null>(null);
   const statusRequest = useRef<Promise<void> | null>(null);
+  const operation = useRef(0);
+  const identityPending = useRef(false);
+  const mounted = useRef(true);
+  const beginOperation = useCallback((pendingIdentity = false) => {
+    statusRequest.current = null;
+    identityPending.current = pendingIdentity;
+    return ++operation.current;
+  }, []);
+  const isCurrent = useCallback((request: number) => mounted.current && operation.current === request, []);
+
   useEffect(() => {
-    if (!user?._id || loggingOut || deviceAccess) return;
-    return startReportActivitySync(user._id);
-  }, [user?._id, loggingOut, deviceAccess]);
+    mounted.current = true;
+    return () => { mounted.current = false; operation.current += 1; };
+  }, []);
 
   const applyResponse = useCallback((data: AuthResponse) => {
+    beginOperation();
     if (data.authState === "authenticated") {
       setUser(data.user);
       setSessionPresent(true);
@@ -66,16 +76,22 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       storeDeviceAccess(data);
     }
     return data;
-  }, []);
+  }, [beginOperation]);
 
   const refresh = useCallback(async () => {
+    // A background read must not supersede the identity a login/exchange is about to commit.
+    if (identityPending.current) return;
+    const request = beginOperation();
+    const session = captureAuthSession();
     setError(null);
     try {
       const me = await UserService.getMe();
+      if (!isCurrent(request) || !isAuthSessionCurrent(session)) return;
       setUser(me);
       setSessionPresent(true);
       setLoggingOut(false);
     } catch (err: any) {
+      if (!isCurrent(request) || !isAuthSessionCurrent(session)) return;
       setUser(null);
       setSessionPresent(false);
       const restricted = err?.response?.data as RestrictedDeviceAccess | undefined;
@@ -90,66 +106,98 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         clearTokens();
       }
     }
-  }, []);
+  }, [beginOperation, isCurrent]);
 
   const login = useCallback(
     async (payload: LoginPayload) => {
+      const request = beginOperation(true);
       setError(null);
       setLoggingOut(false);
-      const data = await AuthService.login(payload);
-      return applyResponse(data);
+      try {
+        const data = await AuthService.login(payload);
+        if (!isCurrent(request)) throw new AuthSessionChangedError();
+        return applyResponse(data);
+      } finally {
+        if (isCurrent(request)) identityPending.current = false;
+      }
     },
-    [applyResponse]
+    [applyResponse, beginOperation, isCurrent]
   );
 
-  const exchangeIfApproved = useCallback(async () => {
-    const authenticated = await DeviceAccessService.exchange();
-    setUser(authenticated.user);
-    setSessionPresent(true);
-    setDeviceAccess(null);
-    setError(null);
-  }, []);
+  const exchangeIfApproved = useCallback(async (request: number) => {
+    identityPending.current = true;
+    try {
+      const authenticated = await DeviceAccessService.exchange();
+      if (!isCurrent(request)) throw new AuthSessionChangedError();
+      setUser(authenticated.user);
+      setSessionPresent(true);
+      setDeviceAccess(null);
+      setError(null);
+    } finally {
+      if (isCurrent(request)) identityPending.current = false;
+    }
+  }, [isCurrent]);
 
   const registerDevice = useCallback(async () => {
-    const next = await DeviceAccessService.register();
-    if ((next as unknown as { authState?: string }).authState === "approved") {
-      await exchangeIfApproved();
-      return;
+    const request = beginOperation(true);
+    try {
+      const next = await DeviceAccessService.register();
+      if (!isCurrent(request)) throw new AuthSessionChangedError();
+      if ((next as unknown as { authState?: string }).authState === "approved") {
+        await exchangeIfApproved(request);
+        return;
+      }
+      setDeviceAccess(next);
+    } finally {
+      if (isCurrent(request)) identityPending.current = false;
     }
-    setDeviceAccess(next);
-  }, [exchangeIfApproved]);
+  }, [beginOperation, exchangeIfApproved, isCurrent]);
 
   const refreshDeviceStatus = useCallback(() => {
     if (statusRequest.current) return statusRequest.current;
-    const request = (async () => {
+    if (identityPending.current) return Promise.resolve();
+    const request = beginOperation();
+    const promise = (async () => {
       const result = await DeviceAccessService.status();
+      if (!isCurrent(request)) throw new AuthSessionChangedError();
       const status = result.status || result.authState;
       if (status === "approved") {
-        await exchangeIfApproved();
+        await exchangeIfApproved(request);
         return;
       }
       const next = { ...result, authState: status } as RestrictedDeviceAccess;
       setDeviceAccess(next);
       storeDeviceAccess(next);
     })().finally(() => {
-      statusRequest.current = null;
+      if (statusRequest.current === promise) statusRequest.current = null;
     });
-    statusRequest.current = request;
-    return request;
-  }, [exchangeIfApproved]);
+    statusRequest.current = promise;
+    return promise;
+  }, [beginOperation, exchangeIfApproved, isCurrent]);
 
   const rerequestDevice = useCallback(async () => {
-    const next = await DeviceAccessService.rerequest();
-    setDeviceAccess(next);
-  }, []);
+    const request = beginOperation(true);
+    try {
+      const next = await DeviceAccessService.rerequest();
+      if (!isCurrent(request)) throw new AuthSessionChangedError();
+      setDeviceAccess(next);
+    } finally {
+      if (isCurrent(request)) identityPending.current = false;
+    }
+  }, [beginOperation, isCurrent]);
 
   const logout = useCallback(async () => {
+    const request = beginOperation(true);
     setLoggingOut(true);
-    await AuthService.logout();
     setUser(null);
     setSessionPresent(false);
     setDeviceAccess(null);
-  }, []);
+    try {
+      await AuthService.logout();
+    } finally {
+      if (isCurrent(request)) { identityPending.current = false; setLoggingOut(false); }
+    }
+  }, [beginOperation, isCurrent]);
 
   useEffect(() => {
     const storedDeviceAccess = getStoredDeviceAccess();
@@ -175,18 +223,21 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     const onRestricted = (event: Event) => {
       const detail = (event as CustomEvent<RestrictedDeviceAccess>).detail;
       if (!detail?.authState) return;
+      beginOperation();
       clearTokens();
       setUser(null);
+      setLoggingOut(false);
       setSessionPresent(false);
       setDeviceAccess(detail);
       storeDeviceAccess(detail);
     };
     window.addEventListener("device-access-restricted", onRestricted);
     return () => window.removeEventListener("device-access-restricted", onRestricted);
-  }, []);
+  }, [beginOperation]);
 
   useEffect(() => {
     const onSessionInvalidated = () => {
+      beginOperation();
       clearTokens();
       clearStoredDeviceAccess();
       setUser(null);
@@ -197,7 +248,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     };
     window.addEventListener("auth-session-invalidated", onSessionInvalidated);
     return () => window.removeEventListener("auth-session-invalidated", onSessionInvalidated);
-  }, []);
+  }, [beginOperation]);
 
   const value = useMemo<AuthContextType>(
     () => ({

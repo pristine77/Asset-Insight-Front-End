@@ -9,6 +9,10 @@ import {
   LifeBuoy,
   Settings,
   ShieldCheck,
+  CalendarDays,
+  ListTodo,
+  ArrowLeftRight,
+  MapPin,
 } from "lucide-react";
 import type { AuthUser } from "@/services/auth";
 
@@ -63,6 +67,14 @@ export const PRIMARY_NAVIGATION: readonly NavItem[] = [
   },
 ] as const;
 
+export const CRM_NAVIGATION: readonly NavItem[] = [
+  { label: "Dashboard", href: "/crm", icon: LayoutDashboard, match: (path) => path === "/crm" },
+  { label: "Tasks", href: "/crm/tasks", icon: ListTodo },
+  { label: "Transfers", href: "/crm/transfers", icon: ArrowLeftRight },
+  { label: "Outlook Calendar", href: "/crm/outlook", icon: CalendarDays },
+  { label: "Coverage", href: "/crm/coverage", icon: MapPin },
+];
+
 export const SECONDARY_NAVIGATION: readonly NavItem[] = [
   {
     label: "Support",
@@ -85,6 +97,11 @@ export function isNavItemActive(item: NavItem, pathname: string) {
 export const PAGE_TITLES: Record<string, string> = {
   "/dashboard": "Dashboard",
   "/incoming": "Incoming",
+  "/crm": "CRM dashboard",
+  "/crm/tasks": "CRM tasks",
+  "/crm/transfers": "CRM transfers",
+  "/crm/outlook": "Outlook Calendar",
+  "/crm/coverage": "CRM coverage",
   "/reports": "My Reports",
   "/proposal-valuations": "Proposal Valuation",
   "/previews": "Previews",
@@ -98,3 +115,9 @@ export const PAGE_TITLES: Record<string, string> = {
   "/salvage/status": "Salvage progress",
   "/salvage/preview": "Salvage preview",
 };
+
+export function pageTitle(pathname: string) {
+  return Object.entries(PAGE_TITLES)
+    .filter(([prefix]) => pathname === prefix || pathname.startsWith(`${prefix}/`))
+    .sort(([a], [b]) => b.length - a.length)[0]?.[1] ?? "Workspace";
+}

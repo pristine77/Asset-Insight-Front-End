@@ -672,7 +672,7 @@ export default function ReportsPage() {
       if (type === "asset") await resubmitReport(group.key);
       else if (type.includes("lot")) await resubmitLotListing(group.key);
       else throw new Error("Open the report preview to retry this report type.");
-      toast.success("File generation queued again.");
+      toast.success("Report processing queued again.");
       await loadReports();
     } catch (retryError: any) {
       toast.error(retryError?.response?.data?.message || retryError?.message || "Retry failed");

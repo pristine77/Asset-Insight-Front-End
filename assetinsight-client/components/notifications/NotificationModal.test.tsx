@@ -9,6 +9,7 @@ import NotificationsPage from "@/app/(main)/notifications/page";
 const mocks = vi.hoisted(() => ({ swr: vi.fn(), push: vi.fn() }));
 vi.mock("swr", () => ({ default: mocks.swr, mutate: vi.fn().mockResolvedValue(undefined) }));
 vi.mock("next/navigation", () => ({ useRouter: () => ({ push: mocks.push }) }));
+vi.mock("@/context/AuthContext", () => ({ useAuthContext: () => ({ user: { _id: "owner-1" } }) }));
 vi.mock("next/link", () => ({ default: ({ children, prefetch: _prefetch, ...props }: React.AnchorHTMLAttributes<HTMLAnchorElement> & { prefetch?: boolean }) => <a {...props}>{children}</a> }));
 vi.mock("@/services/notifications", () => ({
   notificationCacheKey: () => "/notifications?page=1&limit=10",
@@ -71,6 +72,26 @@ describe("full saved preview notification messages", () => {
     fireEvent.click(screen.getByRole("link", { name: /CRM task/ }));
     expect(onClose).toHaveBeenCalledOnce();
     expect(screen.queryByLabelText("Report notification details")).toBeNull();
+  });
+
+  it("links canonical CRM task and transfer notices to the new workspace", () => {
+    mocks.swr.mockReturnValue({ data: { items: [
+      { ...reminder, id: "crm-task", type: "crm_due", title: "Call prospect", data: { taskId: reportId, route: "/incoming" } },
+      { ...reminder, id: "crm-transfer", type: "crm_transfer_request", title: "Transfer request", data: { leadId: reportId } },
+    ] } });
+    render(<NotificationModal onClose={vi.fn()} />);
+    expect(screen.getByRole("link", { name: /Call prospect/ })).toHaveAttribute("href", `/crm/tasks?task=${reportId}`);
+    expect(screen.getByRole("link", { name: /Transfer request/ })).toHaveAttribute("href", "/crm/transfers");
+    expect(NotificationsService.markRead).not.toHaveBeenCalled();
+  });
+
+  it("offers the same CRM task link in the full notification center", () => {
+    mocks.swr.mockReturnValue({ data: { items: [{ ...reminder, type: "crm_due", title: "Call prospect", data: { taskId: reportId } }], total: 1, unreadCount: 1 } });
+    render(<NotificationsPage />);
+    expect(screen.getByRole("link", { name: "Open CRM" })).toHaveAttribute("href", `/crm/tasks?task=${reportId}`);
+    expect(NotificationsService.markRead).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("link", { name: "Open CRM" }));
+    expect(NotificationsService.markRead).toHaveBeenCalledWith("notice-1");
   });
 
   it.each(["javascript:alert(1)", "../../account", "report-1", ""])("does not create a preview link from invalid id %s", (id) => {

@@ -124,6 +124,25 @@ describe.each(['asset', 'lotListing'] as const)('%s offline save then review', t
         { uri: 'content://photos/first', originalUri: 'content://photos/first', name: 'first.jpg', type: 'image/jpeg', mediaId: 'photo-a' },
       ], extraImages: [{ uri: 'content://photos/report', name: 'report.jpg', type: 'image/jpeg', mediaId: 'report-only' }] }] };
   }
+  it.each(['local', 'paused'])('restores a camera video in %s work and submits its original reference with the correct lot', async state => {
+    const saved = savedDraft(state);
+    const clip = { uri: 'content://media/external/video/media/720', name: 'walkthrough.mp4', type: 'video/mp4', size: 8_000_000,
+      mediaId: 'stable-video', ownership: 'gallery' as const, captureOrder: 7, originalOrder: 7 };
+    (saved.lots[0].videoFiles as any[]) = [clip];
+    jest.mocked(AutoSaveService.getDraft).mockResolvedValue(saved as any);
+    await render(<Form visible draftIdToLoad="local-parent" onClose={jest.fn()} />);
+    await waitFor(() => expect(screen.getByTestId('mock-photo-count').props.children).toBe(2));
+    expect(JSON.parse(screen.getByTestId('mock-restored-lots').props.children)[0].videoFile).toMatchObject(clip);
+    expect(upload).not.toHaveBeenCalled();
+    await fireEvent.press(screen.getByRole('button', { name: state === 'paused' ? 'Resume upload' : type === 'asset' ? 'Submit asset report' : 'Submit lot listing' }));
+    await waitFor(() => expect(upload).toHaveBeenCalledTimes(1));
+    const [details, serviceLots] = jest.mocked(upload).mock.calls[0];
+    expect(details.client_submission_id).toBe('submission-parent');
+    expect(details.mixed_lots).toEqual([expect.objectContaining({ count: 2, extra_count: 1, video_count: 1, cover_index: 1 })]);
+    expect(serviceLots[0]).toMatchObject({ id: saved.lots[0].id, videoFile: { uri: clip.uri, name: clip.name, type: clip.type, size: clip.size } });
+    expect(serviceLots[0].files).toHaveLength(2);
+    expect(serviceLots[0].extraFiles).toHaveLength(1);
+  });
   it('shows Save for new offline work, accepts incomplete details and never uploads', async () => {
     const closed = jest.fn();
     await render(<Form visible onClose={closed} />);

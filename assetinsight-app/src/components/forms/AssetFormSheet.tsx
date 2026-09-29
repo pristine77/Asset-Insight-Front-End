@@ -369,6 +369,7 @@ const AssetFormSheet = ({
                     type: 'video/mp4' as const,
                   }
                 : {
+                    ...savedLot.videoFiles[0],
                     uri: savedLot.videoFiles[0].uri,
                     name: savedLot.videoFiles[0].name || 'restored-video.mp4',
                     type: savedLot.videoFiles[0].type || 'video/mp4',
@@ -1136,6 +1137,7 @@ const AssetFormSheet = ({
         ...auctioneerLotSource(auctioneer, index),
         count: lot.files.length,
         extra_count: lot.extraFiles.length,
+        video_count: lot.videoFile ? 1 : 0,
         cover_index: lot.coverIndex || 0,
         mode: lot.mode || 'single_lot',
       }));

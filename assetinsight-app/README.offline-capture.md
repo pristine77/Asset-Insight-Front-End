@@ -146,6 +146,30 @@ this does not delete device files or report records. See
 
 ## Verification and rollout
 
+### Video references (2026-09-24)
+
+Asset and Lot Listing camera clips remain separate from main/report-only photo counts.
+Each capture lot retains its optional video URI, stable identity, MIME, size and ordering
+metadata during save/reopen/manual Submit or Resume. Native MediaStore video references
+and durable `files/camera-videos` fallbacks are reused, not imported as new originals on
+each save. Removing an attachment does not delete the gallery/original file.
+
+Android finalization journals the durable clip first, then journals the gallery URI
+before removing its own intermediate. If gallery or journal saving fails, the durable
+file is retained. The fallback camera records directly to document storage and keeps
+its existing gallery-copy behavior; offline saves add no copies. A process killed before
+a recording completes may still leave an incomplete MP4 without a completed handoff;
+this is not a successfully saved capture and is not claimed as recovered work.
+
+Reconnection still sends metadata only. The existing upload session owns accepted media
+and retries; explicit submission carries videos to R2 and the media ZIP, with sparse
+per-lot counts to prevent a later lot's video being assigned to an earlier lot.
+See `README.android.md` for recording policy, backend-first rollout and device limits.
+
+Current native gate: all 73 suites / 587 tests, TypeScript, both Hermes exports,
+debug/test APK builds and isolated Android video/gallery/journal/streaming
+instrumentation pass. Physical iOS and long-video endurance remain unverified.
+
 2026-09-18 Save/review gate: TypeScript and all 69 Jest suites / 547 tests pass,
 including real form Save/reopen/Submit, incomplete saves, local failure/retry,
 Incoming continuation suppression, restored appraiser values, explicit Resume,

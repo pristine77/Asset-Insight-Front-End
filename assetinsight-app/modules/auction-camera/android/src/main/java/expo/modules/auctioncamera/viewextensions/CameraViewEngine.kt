@@ -34,10 +34,7 @@ import androidx.camera.core.Preview
 import androidx.camera.core.resolutionselector.ResolutionSelector
 import androidx.camera.core.resolutionselector.ResolutionStrategy
 import androidx.camera.lifecycle.ProcessCameraProvider
-import androidx.camera.video.FallbackStrategy
 import androidx.camera.video.FileOutputOptions
-import androidx.camera.video.Quality
-import androidx.camera.video.QualitySelector
 import androidx.camera.video.Recorder
 import androidx.camera.video.Recording
 import androidx.camera.video.VideoCapture
@@ -55,6 +52,7 @@ import expo.modules.auctioncamera.utils.Camera2Helper
 import expo.modules.auctioncamera.utils.CameraProfiler
 import expo.modules.auctioncamera.utils.ManualControls
 import expo.modules.auctioncamera.utils.CameraPhotoWatermark
+import expo.modules.auctioncamera.utils.CameraVideoStorage
 import expo.modules.auctioncamera.utils.PhotoWatermarkReceipt
 import java.io.File
 import java.io.FileInputStream
@@ -84,7 +82,8 @@ class CameraViewEngine(private val context: Context, private val lifecycleOwner:
     var onPhotoCaptured: ((Uri) -> Unit)? = null
     var onPhotoProcessed: ((Uri, Uri, Int, Int) -> Unit)? = null
     var onVideoRecordingStarted: (() -> Unit)? = null
-    var onVideoRecorded: ((Uri) -> Unit)? = null
+    var onVideoFinalizing: ((Uri) -> Unit)? = null
+    var onVideoRecorded: ((Uri) -> Boolean)? = null
     var onRecordingError: ((String) -> Unit)? = null
     var onVideoReady: (() -> Unit)? = null
     var onEVChanged: ((Float) -> Unit)? = null
@@ -120,6 +119,8 @@ class CameraViewEngine(private val context: Context, private val lifecycleOwner:
     private var currentCameraId: String? = null
     private var cachedProvider: ProcessCameraProvider? = null
     private var isVideoReady = false
+    private var isVideoMode = false
+    private var videoBindingRevision = 0L
     private var firstFrameConfirmed = false
     private var recordingStartMs = 0L
     private var currentZoomRatio = 1f
@@ -139,9 +140,6 @@ class CameraViewEngine(private val context: Context, private val lifecycleOwner:
     private var autoFlashEnabled = false
     private val lotPhotosDir: File by lazy {
         File(context.cacheDir, "lot_photos").apply { mkdirs() }
-    }
-    private val lotVideosDir: File by lazy {
-        File(context.cacheDir, "lot_videos").apply { mkdirs() }
     }
 
     @Volatile
@@ -234,7 +232,7 @@ class CameraViewEngine(private val context: Context, private val lifecycleOwner:
             }
 
             val builder = CaptureRequestOptions.Builder()
-            ManualControls.applyToBuilder(builder, manualConfig)
+            ManualControls.applyToBuilder(builder, effectiveManualConfig())
 
             val flashReq = when {
                 torchEnabled -> CameraMetadata.FLASH_MODE_TORCH
@@ -329,6 +327,9 @@ class CameraViewEngine(private val context: Context, private val lifecycleOwner:
     fun startPhoto(previewView: PreviewView) = startPhotoWithExtension(previewView)
 
     private fun startPhotoWithExtension(previewView: PreviewView) {
+        isVideoMode = false
+        isVideoReady = false
+        videoBindingRevision++
         ensureExecutorAlive()
         isCameraBinding = true
 
@@ -414,14 +415,14 @@ class CameraViewEngine(private val context: Context, private val lifecycleOwner:
 
     fun startVideo(previewView: PreviewView) {
         ensureExecutorAlive()
+        isVideoMode = true
         isVideoReady = false
         firstFrameConfirmed = false
+        val bindingRevision = ++videoBindingRevision
         withProvider { provider ->
+            if (bindingRevision != videoBindingRevision || !isVideoMode) return@withProvider
             preview = buildPreview(true).also { it.setSurfaceProvider(previewView.surfaceProvider) }
-
-            val vcb = VideoCapture.Builder(buildRecorder())
-                .setTargetRotation(currentRotation)
-            videoCapture = vcb.build()
+            videoCapture = ListingVideoProfile.buildCapture(currentRotation)
 
             rebindSafely(provider) {
                 try {
@@ -431,11 +432,13 @@ class CameraViewEngine(private val context: Context, private val lifecycleOwner:
                         preview,
                         videoCapture,
                     )
+                    ListingVideoProfile.requireSupported(camera.cameraInfo)
+                    ListingVideoProfile.requireBoundProfile(videoCapture)
                     currentLensLabel = "Wide"
                     camera.cameraControl.setZoomRatio(1f)
                     observeCamera()
                     mainHandler.postDelayed({
-                        if (::videoCapture.isInitialized) {
+                        if (bindingRevision == videoBindingRevision && isVideoMode && ::videoCapture.isInitialized) {
                             isVideoReady = true
                             mainHandler.post { onVideoReady?.invoke() }
                         }
@@ -443,6 +446,7 @@ class CameraViewEngine(private val context: Context, private val lifecycleOwner:
                 } catch (e: Exception) {
                     Log.e(TAG, "startVideo failed: ${e.message}")
                     isVideoReady = false
+                    mainHandler.post { onRecordingError?.invoke(ListingVideoProfile.UNSUPPORTED_MESSAGE) }
                 }
             }
         }
@@ -1167,7 +1171,7 @@ class CameraViewEngine(private val context: Context, private val lifecycleOwner:
     }
 
     // ─────────────────────────────────────────────────────────────────────────
-    // Video recording — saves to cache/lot_videos/, copies to gallery
+    // Video recording — durable original, journalled before gallery publication/handoff.
     // ─────────────────────────────────────────────────────────────────────────
 
     fun startRecording() {
@@ -1175,12 +1179,20 @@ class CameraViewEngine(private val context: Context, private val lifecycleOwner:
             onRecordingError?.invoke("Camera not ready")
             return
         }
-        if (isStopping) return
+        if (isRecording()) return
         CameraProfiler.beginSection("video_recording")
         CameraProfiler.logMemory("video_start")
-        val outputFile = File(lotVideosDir, "VID_${System.currentTimeMillis()}.mp4")
+        val outputFile = try {
+            ListingVideoProfile.requireSupported(camera.cameraInfo)
+            ListingVideoProfile.requireBoundProfile(videoCapture)
+            CameraVideoStorage.createOutputFile(context)
+        } catch (error: Exception) {
+            onRecordingError?.invoke(error.message ?: "Unable to prepare video recording.")
+            return
+        }
         recordingStartMs = System.currentTimeMillis()
-        recording = videoCapture.output
+        try {
+            recording = videoCapture.output
             .prepareRecording(context, FileOutputOptions.Builder(outputFile).build())
             .apply {
                 if (ContextCompat.checkSelfPermission(
@@ -1197,16 +1209,34 @@ class CameraViewEngine(private val context: Context, private val lifecycleOwner:
                         firstFrameConfirmed = true
 
                     is VideoRecordEvent.Finalize -> {
-                        isStopping = false
+                        // Done/Next Lot stay locked until the durable original and final URI
+                        // have both been handed to the current lot's metadata journal.
+                        isStopping = true
                         recording = null
                         if (!event.hasError()) {
-                            val uri = event.outputResults.outputUri
-                            Log.d(TAG, "Video saved to cache: ${outputFile.absolutePath}")
+                            try {
+                                onVideoFinalizing?.invoke(Uri.fromFile(outputFile))
+                            } catch (error: Exception) {
+                                isStopping = false
+                                onRecordingError?.invoke("Video retained on this device. Tap Done again to save its lot details.")
+                                return@start
+                            }
+                            ensureExecutorAlive()
                             cameraExecutor.execute {
-                                copyVideoToGallery(outputFile)
-                                mainHandler.post { onVideoRecorded?.invoke(uri) }
+                                val uri = CameraVideoStorage.publish(context, outputFile)
+                                mainHandler.post {
+                                    try {
+                                        val journalSaved = onVideoRecorded?.invoke(uri) == true
+                                        CameraVideoStorage.acknowledgeGalleryHandoff(context, outputFile, uri, journalSaved)
+                                    } catch (error: Exception) {
+                                        onRecordingError?.invoke("Video retained on this device. Tap Done again to save its lot details.")
+                                    } finally {
+                                        isStopping = false
+                                    }
+                                }
                             }
                         } else {
+                            isStopping = false
                             suppressGalleryCopy = false
                             val reason = when (event.error) {
                                 VideoRecordEvent.Finalize.ERROR_NO_VALID_DATA -> "Recording stopped too quickly."
@@ -1220,6 +1250,12 @@ class CameraViewEngine(private val context: Context, private val lifecycleOwner:
                     }
                 }
             }
+        } catch (error: Exception) {
+            isStopping = false
+            recording = null
+            outputFile.delete()
+            onRecordingError?.invoke("Unable to start video recording. Check camera and microphone permissions.")
+        }
     }
 
     fun stopRecording() {
@@ -1236,26 +1272,6 @@ class CameraViewEngine(private val context: Context, private val lifecycleOwner:
             return
         }
         pending.stop()
-    }
-
-    private fun copyVideoToGallery(file: File) {
-        try {
-            val values = ContentValues().apply {
-                put(MediaStore.Video.Media.DISPLAY_NAME, file.name)
-                put(MediaStore.Video.Media.MIME_TYPE, "video/mp4")
-                put(MediaStore.Video.Media.RELATIVE_PATH, "Movies/Auctioneer")
-            }
-            val uri = context.contentResolver.insert(
-                MediaStore.Video.Media.EXTERNAL_CONTENT_URI, values
-            )
-            uri?.let {
-                context.contentResolver.openOutputStream(it)?.use { out ->
-                    file.inputStream().use { it.copyTo(out) }
-                }
-            }
-        } catch (e: Exception) {
-            Log.e(TAG, "copyVideoToGallery failed: ${e.message}")
-        }
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -1532,7 +1548,7 @@ class CameraViewEngine(private val context: Context, private val lifecycleOwner:
             return
         }
         manualConfig = result.safeConfig
-        if (::camera.isInitialized) ManualControls.applyDirect(camera, manualConfig)
+        if (::camera.isInitialized) ManualControls.applyDirect(camera, effectiveManualConfig())
     }
 
     fun setShutterSpeed(shutterNs: Long?, previewView: PreviewView, isPhotoMode: Boolean) {
@@ -1552,7 +1568,7 @@ class CameraViewEngine(private val context: Context, private val lifecycleOwner:
             return
         }
         manualConfig = result.safeConfig
-        if (::camera.isInitialized) ManualControls.applyDirect(camera, manualConfig)
+        if (::camera.isInitialized) ManualControls.applyDirect(camera, effectiveManualConfig())
     }
 
     fun setFPSRange(min: Int, max: Int, previewView: PreviewView, isPhotoMode: Boolean) {
@@ -1565,7 +1581,7 @@ class CameraViewEngine(private val context: Context, private val lifecycleOwner:
             return
         }
         manualConfig = result.safeConfig
-        if (::camera.isInitialized) ManualControls.applyDirect(camera, manualConfig)
+        if (::camera.isInitialized) ManualControls.applyDirect(camera, effectiveManualConfig())
     }
 
     @OptIn(ExperimentalCamera2Interop::class)
@@ -1665,7 +1681,7 @@ class CameraViewEngine(private val context: Context, private val lifecycleOwner:
         if (hasNonDefaultManualConfig()) {
             mainHandler.postDelayed({
                 if (::camera.isInitialized) {
-                    ManualControls.applyDirect(camera, manualConfig)
+                    ManualControls.applyDirect(camera, effectiveManualConfig())
                     applyWBDirect(manualConfig.whiteBalance)
                     Log.d(TAG, "Restored manualConfig after rebind: $manualConfig")
                 }
@@ -1701,19 +1717,31 @@ class CameraViewEngine(private val context: Context, private val lifecycleOwner:
                 manualConfig.aeFpsMax != 30
     }
 
+    private fun effectiveManualConfig(): ManualConfig = if (isVideoMode) {
+        manualConfig.copy(
+            aeMode = CaptureRequest.CONTROL_AE_MODE_ON,
+            iso = null,
+            shutterSpeedNs = null,
+            aeFpsMin = ListingVideoProfile.FRAMES_PER_SECOND,
+            aeFpsMax = ListingVideoProfile.FRAMES_PER_SECOND,
+        )
+    } else manualConfig
+
     fun pause() {
+        videoBindingRevision++
+        isVideoReady = false
         isPreviewBound = false
         probeActive = false
         trueMinZoomReady = false
         currentCameraId = null
         currentLensLabel = "Wide"
-        isStopping = false
         cachedProvider?.let { runCatching { it.unbindAll() } }
     }
 
     fun shutdown() {
+        videoBindingRevision++
+        isVideoReady = false
         probeActive = false
-        isStopping = false
         if (::orientationListener.isInitialized) orientationListener.disable()
         recording?.stop()
         recording = null
@@ -1732,10 +1760,11 @@ class CameraViewEngine(private val context: Context, private val lifecycleOwner:
         val builder = Preview.Builder()
             .setTargetRotation(currentRotation)
             // REMOVED the hardcoded ManualControls from Preview as well
-            .also { pendingResSelector?.let { sel -> it.setResolutionSelector(sel) } }
+            .also { if (!isVideo) pendingResSelector?.let { sel -> it.setResolutionSelector(sel) } }
 
         // Only apply Video Stabilization if we are actually recording video!
         if (isVideo) {
+            builder.setTargetFrameRate(ListingVideoProfile.frameRate)
             try {
                 Camera2Interop.Extender(builder).setCaptureRequestOption(
                     CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE,
@@ -1864,17 +1893,6 @@ class CameraViewEngine(private val context: Context, private val lifecycleOwner:
 //        return builder.build()
 //    }
 
-    private fun buildRecorder() = Recorder.Builder()
-        .setQualitySelector(
-            QualitySelector.from(
-                Quality.FHD,
-                FallbackStrategy.higherQualityOrLowerThan(Quality.SD)
-            )
-        )
-        .setTargetVideoEncodingBitRate(10_000_000)
-        .build()
-
-
     private fun rebindSafely(provider: ProcessCameraProvider, block: () -> Unit) {
         provider.unbindAll()
         block()
@@ -1926,11 +1944,14 @@ class CameraViewEngine(private val context: Context, private val lifecycleOwner:
         zoom: Float,
         isPhotoMode: Boolean,
     ) {
+        if (isRecording()) return
+        isVideoMode = !isPhotoMode
         activeCropRect = null
         if (currentCameraId == targetId) {
             camera.cameraControl.setZoomRatio(zoom)
             return
         }
+        val bindingRevision = ++videoBindingRevision
         currentCameraId = targetId
         currentLensLabel = label
         ensureExecutorAlive()
@@ -1951,16 +1972,18 @@ class CameraViewEngine(private val context: Context, private val lifecycleOwner:
                     reapplyTorch()
                     observeCamera()
                 } else {
-                    videoCapture = VideoCapture.withOutput(buildRecorder())
+                    videoCapture = ListingVideoProfile.buildCapture(currentRotation)
                     isVideoReady = false
                     firstFrameConfirmed = false
                     camera = provider.bindToLifecycle(
                         lifecycleOwner, selectorForId(targetId), preview, videoCapture
                     )
+                    ListingVideoProfile.requireSupported(camera.cameraInfo)
+                    ListingVideoProfile.requireBoundProfile(videoCapture)
                     camera.cameraControl.setZoomRatio(zoom)
                     observeCamera()
                     mainHandler.postDelayed({
-                        if (::videoCapture.isInitialized) {
+                        if (bindingRevision == videoBindingRevision && isVideoMode && ::videoCapture.isInitialized) {
                             isVideoReady = true
                             mainHandler.post { onVideoReady?.invoke() }
                         }
@@ -1975,14 +1998,18 @@ class CameraViewEngine(private val context: Context, private val lifecycleOwner:
                             lifecycleOwner, backOrFrontSelector(), preview, imageCapture
                         )
                     } else {
-                        videoCapture = VideoCapture.withOutput(buildRecorder())
+                        videoCapture = ListingVideoProfile.buildCapture(currentRotation)
                         isVideoReady = false
                         camera = provider.bindToLifecycle(
                             lifecycleOwner, backOrFrontSelector(), preview, videoCapture
                         )
+                        ListingVideoProfile.requireSupported(camera.cameraInfo)
+                        ListingVideoProfile.requireBoundProfile(videoCapture)
                         mainHandler.postDelayed({
-                            isVideoReady = true
-                            onVideoReady?.invoke()
+                            if (bindingRevision == videoBindingRevision && isVideoMode) {
+                                isVideoReady = true
+                                onVideoReady?.invoke()
+                            }
                         }, SURFACE_WARMUP)
                     }
                     currentLensLabel = "Wide"
@@ -1991,6 +2018,10 @@ class CameraViewEngine(private val context: Context, private val lifecycleOwner:
                     observeCamera()
                 } catch (ex: Exception) {
                     Log.e(TAG, "Fallback also failed: ${ex.message}")
+                    if (!isPhotoMode) {
+                        isVideoReady = false
+                        mainHandler.post { onRecordingError?.invoke(ListingVideoProfile.UNSUPPORTED_MESSAGE) }
+                    }
                 }
             }
         }
@@ -2132,7 +2163,7 @@ class CameraViewEngine(private val context: Context, private val lifecycleOwner:
                     arrayOf(sensorRect)
                 )
 
-            ManualControls.applyToBuilder(builder, manualConfig)
+            ManualControls.applyToBuilder(builder, effectiveManualConfig())
             c2.captureRequestOptions = builder.build()
 
             activeCropRect = normalizedRect
@@ -2167,7 +2198,7 @@ class CameraViewEngine(private val context: Context, private val lifecycleOwner:
                     arrayOf<android.hardware.camera2.params.MeteringRectangle>()
                 )
 
-            ManualControls.applyToBuilder(builder, manualConfig)
+            ManualControls.applyToBuilder(builder, effectiveManualConfig())
             c2.captureRequestOptions = builder.build()
             activeCropRect = null
         } catch (e: Exception) {
@@ -2221,7 +2252,7 @@ class CameraViewEngine(private val context: Context, private val lifecycleOwner:
         manualConfig = result.safeConfig
 
         if (::camera.isInitialized) {
-            ManualControls.applyDirect(camera, manualConfig)
+            ManualControls.applyDirect(camera, effectiveManualConfig())
             applyWBDirect(wb)   // ← single clean call using awbMode from enum
             Log.d(
                 TAG, "applyProSettingsBatch: iso=$iso shutter=$shutterNs " +

@@ -4,6 +4,8 @@ import {
   isNavItemActive,
   PRIMARY_NAVIGATION,
   SECONDARY_NAVIGATION,
+  CRM_NAVIGATION,
+  pageTitle,
 } from "./navigation";
 
 function visibleLabels(user: AuthUser | null) {
@@ -76,6 +78,22 @@ describe("centralized app navigation", () => {
     expect(
       visibleLabels({ ...basicUser, proposalValuationEnabled: true })
     ).toContain("Proposal Valuations");
+  });
+
+  it("keeps CRM separate from Listings and matches exact dashboard and nested screens", () => {
+    expect(visibleLabels(null)).not.toContain("CRM");
+    expect(visibleLabels(basicUser)).not.toContain("CRM");
+    expect(visibleLabels({ ...basicUser, isCrmAgent: false })).not.toContain("CRM");
+    expect(visibleLabels({ ...basicUser, isReportApprover: true, isReleaseManager: true })).not.toContain("CRM");
+    expect(visibleLabels({ ...basicUser, isCrmAgent: true })).not.toContain("CRM");
+    expect(visibleLabels({ ...basicUser, isCrmAgent: "true" } as unknown as AuthUser)).not.toContain("CRM");
+    const crm = CRM_NAVIGATION.find((item) => item.href === "/crm")!;
+    expect(isNavItemActive(crm, "/crm/tasks/task-1")).toBe(false);
+    expect(isNavItemActive(crm, "/crm")).toBe(true);
+    expect(isNavItemActive(CRM_NAVIGATION[1], "/crm/tasks/task-1")).toBe(true);
+    expect(isNavItemActive(crm, "/crm-archive")).toBe(false);
+    expect(pageTitle("/crm/transfers")).toBe("CRM transfers");
+    expect(pageTitle("/crm-archive")).toBe("Workspace");
   });
 
   it("matches nested routes without activating similarly named routes", () => {

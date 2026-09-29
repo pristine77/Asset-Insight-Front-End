@@ -1,4 +1,4 @@
-import API from "@/lib/api";
+import API, { type RetriableAxiosConfig } from "@/lib/api";
 import {
   clearStoredDeviceAccess,
   collectVerifiedDeviceContext,
@@ -7,7 +7,7 @@ import {
   storeDeviceAccess,
   type RestrictedDeviceAccess,
 } from "@/lib/device-access";
-import { setTokens } from "@/lib/auth-storage";
+import { advanceAuthSession, assertAuthSessionCurrent, captureAuthSession, setTokens, type AuthSessionSnapshot } from "@/lib/auth-storage";
 import type { AuthenticatedResponse } from "./auth";
 
 function challengeHeaders() {
@@ -27,9 +27,13 @@ function persistRestricted(state: RestrictedDeviceAccess) {
   return state;
 }
 
+const challengeOptions = (session: AuthSessionSnapshot): RetriableAxiosConfig => ({ headers: challengeHeaders(), _retry: true, _authSession: session });
+
 export const DeviceAccessService = {
   async register(): Promise<RestrictedDeviceAccess> {
+    const session = advanceAuthSession();
     const context = await collectVerifiedDeviceContext();
+    assertAuthSessionCurrent(session);
     const { data } = await API.post<RestrictedDeviceAccess>(
       "/auth/device-requests/register",
       {
@@ -38,17 +42,20 @@ export const DeviceAccessService = {
         displayName: context.displayName,
         metadata: context.metadata,
       },
-      { headers: challengeHeaders() }
+      challengeOptions(session)
     );
+    assertAuthSessionCurrent(session);
     return persistRestricted(data);
   },
 
   async status(): Promise<RestrictedDeviceAccess & { status?: string }> {
+    const session = captureAuthSession();
     const current = getStoredDeviceAccess();
     const { data } = await API.get<RestrictedDeviceAccess & { status?: string }>(
       "/auth/device-requests/status",
-      { headers: challengeHeaders() }
+      challengeOptions(session)
     );
+    assertAuthSessionCurrent(session);
     const authState = data.status || data.authState;
     if (authState && authState !== "approved") {
       const next = {
@@ -65,22 +72,26 @@ export const DeviceAccessService = {
   },
 
   async exchange(): Promise<AuthenticatedResponse> {
+    const session = advanceAuthSession();
     const { data } = await API.post<AuthenticatedResponse>(
       "/auth/device-requests/exchange",
       {},
-      { headers: challengeHeaders() }
+      challengeOptions(session)
     );
+    assertAuthSessionCurrent(session);
     setTokens({ accessToken: data.accessToken, refreshToken: data.refreshToken });
     clearStoredDeviceAccess();
     return data;
   },
 
   async rerequest(): Promise<RestrictedDeviceAccess> {
+    const session = advanceAuthSession();
     const { data } = await API.post<RestrictedDeviceAccess>(
       "/auth/device-requests/rerequest",
       {},
-      { headers: challengeHeaders() }
+      challengeOptions(session)
     );
+    assertAuthSessionCurrent(session);
     return persistRestricted(data);
   },
 };

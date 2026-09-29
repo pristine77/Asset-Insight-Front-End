@@ -432,6 +432,7 @@ const AssetForm = forwardRef<AssetFormHandle, Props>(function AssetForm(
     string | null
   >(null);
   const [smartUploadOpen, setSmartUploadOpen] = useState(false);
+  const [smartGroupingMethod, setSmartGroupingMethod] = useState<"black_divider" | "lot_number">("black_divider");
   const [discardOpen, setDiscardOpen] = useState(false);
   const [discarding, setDiscarding] = useState(false);
   const [moreAnchor, setMoreAnchor] = useState<HTMLElement | null>(null);
@@ -1752,7 +1753,7 @@ const AssetForm = forwardRef<AssetFormHandle, Props>(function AssetForm(
     ]
   );
 
-  const openSmartUploadWorkspace = () => {
+  const openSmartUploadWorkspace = (method: "black_divider" | "lot_number" = "black_divider") => {
     if (mixedLots.length > 0) {
       toast.info(
         "Smart Upload starts with an empty media form. Clear the manually created lots first."
@@ -1768,6 +1769,7 @@ const AssetForm = forwardRef<AssetFormHandle, Props>(function AssetForm(
       return;
     }
     setError(null);
+    setSmartGroupingMethod(method);
     setSmartUploadOpen(true);
   };
 
@@ -1903,6 +1905,7 @@ const AssetForm = forwardRef<AssetFormHandle, Props>(function AssetForm(
         mixed_lots: mixedLots.map((lot) => ({
           count: lot.files.length,
           extra_count: lot.extraFiles.length,
+          video_count: (lot.videoFiles || []).length,
           cover_index: Math.max(
             0,
             Math.min(lot.files.length - 1, lot.coverIndex || 0)
@@ -1957,6 +1960,13 @@ const AssetForm = forwardRef<AssetFormHandle, Props>(function AssetForm(
       setAcceptedMessage(accepted);
       toast.success(accepted);
       saveRevisionRef.current += 1;
+      const continuing = Boolean(continueWithNewLot && auctioneer && onAcceptedAndContinue);
+      if (continuing) {
+        // Acceptance, not old-draft cleanup or background analysis, authorizes
+        // the next-work-item request. The parent hides this accepted form now.
+        dispatchReportCreated();
+        onAcceptedAndContinue?.(acceptedAuctioneerReportId(response));
+      }
       const cleanupError = await clearDraftStorage()
         .then(() => null)
         .catch((draftError) => draftError);
@@ -1966,7 +1976,8 @@ const AssetForm = forwardRef<AssetFormHandle, Props>(function AssetForm(
       setAcceptedMessage(null);
       forceNewSubmissionRef.current = false;
       supersededSubmissionIdRef.current = null;
-      publishDraftStatus("saved", "Submission accepted");
+      // Late cleanup must not overwrite the successor form's draft status.
+      if (!continuing) publishDraftStatus("saved", "Submission accepted");
       if (cleanupError) {
         toast.warning(
           "Report submitted, but its local draft could not be removed. You can discard the old local copy later."
@@ -1979,9 +1990,7 @@ const AssetForm = forwardRef<AssetFormHandle, Props>(function AssetForm(
         autoSaveBlockedRef.current = false;
         setDraftHydrated(true);
       }, 0);
-      if (continueWithNewLot && auctioneer && onAcceptedAndContinue) {
-        onAcceptedAndContinue(acceptedAuctioneerReportId(response));
-      } else {
+      if (!continuing) {
         onSuccess?.(accepted);
       }
     } catch (submitError: any) {
@@ -2548,7 +2557,7 @@ const AssetForm = forwardRef<AssetFormHandle, Props>(function AssetForm(
                   </div>
                   <button
                     type="button"
-                    onClick={openSmartUploadWorkspace}
+                    onClick={() => openSmartUploadWorkspace()}
                     disabled={submitting || mixedLots.length > 0}
                     className={formClassNames(
                       secondaryButtonClass,
@@ -2562,6 +2571,12 @@ const AssetForm = forwardRef<AssetFormHandle, Props>(function AssetForm(
                   >
                     <ScanLine className="h-4 w-4" aria-hidden="true" />
                     Smart Upload
+                  </button>
+                  <button type="button" onClick={() => openSmartUploadWorkspace("lot_number")}
+                    disabled={submitting || mixedLots.length > 0}
+                    className={formClassNames(secondaryButtonClass, "shrink-0 justify-center")}>
+                    <ScanLine className="h-4 w-4" aria-hidden="true" />
+                    Lot Number Upload
                   </button>
                 </div>
                 <MixedSection
@@ -2616,9 +2631,11 @@ const AssetForm = forwardRef<AssetFormHandle, Props>(function AssetForm(
               Cancel
             </button>
           </span>
-          <button type="submit" className={primaryButtonClass} disabled={submitting || draftSaving}>
-            {submitting ? "Uploading…" : "Create report"}
-          </button>
+          {!(auctioneer && onAcceptedAndContinue) ? (
+            <button type="submit" className={primaryButtonClass} disabled={submitting || draftSaving}>
+              {submitting ? "Uploading…" : "Create report"}
+            </button>
+          ) : null}
         </div>
         {auctioneer && onAcceptedAndContinue ? (
           <AuctioneerContinueAction
@@ -2725,6 +2742,7 @@ const AssetForm = forwardRef<AssetFormHandle, Props>(function AssetForm(
       />
 
       <SmartUploadWorkspace
+        groupingMethod={smartGroupingMethod}
         open={smartUploadOpen}
         kind="asset"
         userId={userId}

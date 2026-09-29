@@ -317,6 +317,23 @@ const LotManager = ({
     });
   };
 
+  const removeVideo = (lot: MixedLot, label: string) => {
+    const uri = lot.videoFile?.uri;
+    if (!uri) return;
+    Alert.alert('Remove video?', `Remove this video from ${label}? The original stays on this device.`, [
+      { text: 'Cancel', style: 'cancel' },
+      { text: 'Remove', style: 'destructive', onPress: () => {
+        // Resolve the stable lot after confirmation: reordering or replacing a
+        // clip while the dialog is open must not remove a different attachment.
+        setLots(previous => previous.map(candidate =>
+          candidate.id === lot.id && candidate.videoFile?.uri === uri
+            ? { ...candidate, videoFile: undefined }
+            : candidate
+        ));
+      } },
+    ]);
+  };
+
   const pickImages = async (lotIdx: number) => {
     const lot = lots[lotIdx];
     if (!lot.mode) {
@@ -426,6 +443,7 @@ const LotManager = ({
     const isExpanded = expandedLot === idx;
     const isActive = activeLotIdx === idx;
     const modeInfo = lot.mode ? MODE_INFO[lot.mode] : null;
+    const lotLabel = sourceLabels?.[idx] || `Lot ${lot.lotNumber || idx + 1}`;
 
     return (
       <View key={lot.id} style={[styles.lotCard, isActive && styles.lotCardActive]}>
@@ -443,9 +461,10 @@ const LotManager = ({
               </Text>
             </View>
             <View>
-              <Text style={styles.lotTitle}>{sourceLabels?.[idx] || `Lot ${idx + 1}`}</Text>
+              <Text style={styles.lotTitle}>{lotLabel}</Text>
               <Text style={styles.lotSubtitle}>
                 {lot.files.length} image{lot.files.length !== 1 ? 's' : ''}
+                {lot.videoFile ? ' • 1 video' : ''}
                 {modeInfo && ` • ${modeInfo.label}`}
               </Text>
             </View>
@@ -515,6 +534,25 @@ const LotManager = ({
                 <Text style={styles.actionBtnText}>Gallery</Text>
               </TouchableOpacity>
             </View>
+
+            {lot.videoFile ? (
+              <View style={styles.videoAttachment} accessibilityRole="summary" accessibilityLabel={`${lotLabel}, 1 video attached: ${lot.videoFile.name}`}>
+                <Feather name="video" size={20} color="#374151" />
+                <View style={styles.videoDetails}>
+                  <Text style={styles.videoName} numberOfLines={2}>{lot.videoFile.name}</Text>
+                  <Text style={styles.videoNote}>
+                    {lot.videoFile.size ? `${formatFileSize(lot.videoFile.size)} · ` : ''}Included in media ZIP
+                  </Text>
+                </View>
+                <TouchableOpacity
+                  accessibilityRole="button"
+                  accessibilityLabel={`Remove video from ${lotLabel}`}
+                  style={styles.videoRemove}
+                  onPress={() => removeVideo(lot, lotLabel)}>
+                  <Feather name="trash-2" size={20} color="#DC2626" />
+                </TouchableOpacity>
+              </View>
+            ) : null}
 
             {/* Image Grid */}
             {lot.files.length > 0 && (
@@ -1037,6 +1075,23 @@ const styles = StyleSheet.create({
     fontWeight: '600',
     marginLeft: 8,
   },
+  videoAttachment: {
+    marginTop: 12,
+    paddingLeft: 12,
+    paddingVertical: 8,
+    paddingRight: 4,
+    borderWidth: 1,
+    borderColor: '#D1D5DB',
+    borderRadius: 8,
+    backgroundColor: '#F9FAFB',
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  videoDetails: { flex: 1, minWidth: 0 },
+  videoName: { color: '#111827', fontSize: 13, fontWeight: '600' },
+  videoNote: { color: '#4B5563', fontSize: 12, marginTop: 3 },
+  videoRemove: { minWidth: 44, minHeight: 44, alignItems: 'center', justifyContent: 'center' },
   imageGrid: {
     flexDirection: 'row',
     flexWrap: 'wrap',

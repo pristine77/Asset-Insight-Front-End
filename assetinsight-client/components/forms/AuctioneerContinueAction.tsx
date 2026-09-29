@@ -1,4 +1,4 @@
-import { secondaryButtonClass } from "./ui/FormUI";
+import { formClassNames, primaryButtonClass, secondaryButtonClass } from "./ui/FormUI";
 
 export default function AuctioneerContinueAction({
   disabled,
@@ -8,18 +8,26 @@ export default function AuctioneerContinueAction({
   onClick: () => void;
 }) {
   return (
-    <div className="flex w-full flex-wrap items-center justify-end gap-x-3 gap-y-2 border-t border-[var(--app-border)] pt-3">
+    <div className="flex w-full flex-wrap items-center justify-end gap-2 border-t border-[var(--app-border)] pt-3">
       <p className="text-xs leading-5 text-[var(--app-text-muted)]">
-        Review the preview before file generation.
+        Continue opens a fresh lot after upload acceptance. Review each preview before generating files.
       </p>
       <button
+        type="submit"
+        className={formClassNames(primaryButtonClass, "w-full sm:w-auto")}
+        disabled={disabled}
+        title="Create this lot and close this form; the auction contract stays open"
+      >
+        Create Lot &amp; Close
+      </button>
+      <button
         type="button"
-        className={secondaryButtonClass}
+        className={formClassNames(secondaryButtonClass, "w-full sm:w-auto")}
         disabled={disabled}
         onClick={onClick}
-        title="Submit for processing, then open a fresh lot for this contract"
+        title="Create this lot, then open a fresh form for the same contract while processing continues"
       >
-        Generate files &amp; new lot
+        Create Lot &amp; Continue
       </button>
     </div>
   );

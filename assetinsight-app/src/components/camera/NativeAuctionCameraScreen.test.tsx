@@ -72,6 +72,40 @@ it('keeps the recovery journal when draft persistence fails', async () => {
   expect(acknowledgeCapture).not.toHaveBeenCalled();
 });
 
+it('hands a recorded video back on its original lot with size, MIME and stable photo order', async () => {
+  const input = props();
+  const clip = { uri: 'content://media/external/video/media/720', name: 'walkthrough.mp4', type: 'video/mp4',
+    mediaId: 'stable-video', size: 8_000_000, width: 1280, height: 720 };
+  openAuctionCamera.mockResolvedValue(JSON.stringify([
+    { ...lot, files: [photo] },
+    { ...lot, id: 'second-lot', files: [{ ...photo, name: 'second.jpg' }], videoFile: clip },
+  ]));
+  await render(<NativeAuctionCameraScreen {...input} />);
+  await waitFor(() => expect(input.onClose).toHaveBeenCalled());
+  const received = input.setLots.mock.calls[0][0];
+  expect(received).toHaveLength(2);
+  expect(received[0].videoFile).toBeUndefined();
+  expect(received[1].videoFile).toMatchObject(clip);
+  expect(received.map((item: MixedLot) => item.files.length)).toEqual([1, 1]);
+  expect(input.onAutoSave).toHaveBeenCalledWith(received, 0);
+});
+
+it('recovers an interrupted video-only camera handoff without claiming it is a photo', async () => {
+  const alert = jest.spyOn(Alert, 'alert').mockImplementation(() => {});
+  const acknowledgeCapture = jest.fn().mockResolvedValue(true);
+  const clip = { uri: 'file:///documents/camera-videos/video.mp4', name: 'video.mp4', type: 'video/mp4', size: 8_000_000 };
+  const context = { ownerId: 'owner', draftId: 'draft', sessionId: 'new' };
+  const journal = { ...context, sessionId: 'interrupted', revision: 5, lots: [{ ...lot, videoFile: clip }] };
+  const getPendingCapture = jest.fn().mockResolvedValue(JSON.stringify(journal));
+  const input = { ...props(), visible: false, captureContext: context };
+  jest.mocked(loadNativeAuctionCamera).mockResolvedValue({ openAuctionCamera, getPendingCapture, acknowledgeCapture });
+  await render(<NativeAuctionCameraScreen {...input} />);
+  await waitFor(() => expect(alert).toHaveBeenCalledWith('Recover camera media?', expect.stringContaining('0 photos and 1 video'), expect.any(Array)));
+  await act(async () => { alert.mock.calls[0][2]?.find(button => button.text === 'Recover media')?.onPress?.(); });
+  await waitFor(() => expect(acknowledgeCapture).toHaveBeenCalledWith('owner', 'draft', 'interrupted', 5));
+  expect(input.onAutoSave).toHaveBeenCalledWith([expect.objectContaining({ id: lot.id, files: [], videoFile: expect.objectContaining(clip) })], 0);
+});
+
 it('never imports or acknowledges another account journal', async () => {
   jest.spyOn(Alert, 'alert').mockImplementation(() => {});
   const acknowledgeCapture = jest.fn();
