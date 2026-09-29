@@ -151,6 +151,7 @@ export default function IncomingPage() {
     }
   );
   const items = data?.items ?? [];
+  const [queueTab, setQueueTab] = useState<"outstanding" | "completed">("outstanding");
 
   const isMine = useCallback(
     (item: AuctioneerIncomingItem) => {
@@ -170,6 +171,24 @@ export default function IncomingPage() {
     (item) => item.status === "available"
   ).length;
   const mineCount = items.filter(isMine).length;
+
+  /*
+     WORK STILL TO DO, AND WORK ALREADY SENT BACK.
+
+     Everything assigned to an account stayed in one list, so a contract whose
+     report had gone back to Auctioneer sat among the ones still waiting and had
+     to be recognised by its status badge. On a queue of nine that is merely
+     untidy; the queue is what somebody works down each morning, and the two
+     kinds of row want different things from them.
+
+     "sent" is the only finished state — the report has gone back to Auctioneer
+     and there is nothing further to do here. Everything else is outstanding,
+     including "abandoned": work given up on is not work completed, and leaving
+     it in front of somebody is the point.
+  */
+  const completedItems = items.filter((item) => item.status === "sent");
+  const outstandingItems = items.filter((item) => item.status !== "sent");
+  const visibleItems = queueTab === "completed" ? completedItems : outstandingItems;
 
   useEffect(() => {
     if (selectedKey && !selected) setSelectedKey(null);
@@ -392,12 +411,45 @@ export default function IncomingPage() {
             <div>
               <h2 className={styles.tableTitle}>Assigned contract queue</h2>
               <p className={styles.tableSubtitle}>
-                Each row contains only the lots assigned to your account.
+                {queueTab === "completed"
+                  ? "Reports already sent back to Auctioneer. Nothing further is needed here."
+                  : "Each row contains only the lots assigned to your account."}
               </p>
+            </div>
+            {/*
+              Counts on the tabs rather than only in the summary above, so the
+              number of rows on screen is always explained by the tab you are
+              standing on.
+            */}
+            <div className={styles.tabs} role="tablist" aria-label="Queue">
+              <button
+                type="button"
+                role="tab"
+                aria-selected={queueTab === "outstanding"}
+                onClick={() => {
+                  setQueueTab("outstanding");
+                  setSelectedKey(null);
+                }}
+                className={`${styles.tab} ${queueTab === "outstanding" ? styles.tabActive : ""}`}
+              >
+                Outstanding <span className={styles.tabCount}>{outstandingItems.length}</span>
+              </button>
+              <button
+                type="button"
+                role="tab"
+                aria-selected={queueTab === "completed"}
+                onClick={() => {
+                  setQueueTab("completed");
+                  setSelectedKey(null);
+                }}
+                className={`${styles.tab} ${queueTab === "completed" ? styles.tabActive : ""}`}
+              >
+                Completed <span className={styles.tabCount}>{completedItems.length}</span>
+              </button>
             </div>
           </div>
 
-          {!items.length ? (
+          {!visibleItems.length ? (
             <div className={styles.emptyTable}>
               <div>
                 <span className={styles.emptyIcon}>
@@ -406,12 +458,20 @@ export default function IncomingPage() {
                 <h2 className={styles.emptyTitle}>
                   {data?.integrationAvailable === false
                     ? "Incoming is not configured"
-                    : "No assigned lots"}
+                    : queueTab === "completed"
+                      ? "Nothing sent back yet"
+                      : items.length
+                        ? "Everything assigned is done"
+                        : "No assigned lots"}
                 </h2>
                 <p className={styles.emptyCopy}>
                   {data?.integrationAvailable === false
                     ? "Connect or enable Auctioneer in the server configuration to load this queue."
-                    : "No Auctioneer lots are currently assigned to your account."}
+                    : queueTab === "completed"
+                      ? "Reports you send back to Auctioneer will be listed here."
+                      : items.length
+                        ? "Every contract assigned to you has been sent back to Auctioneer. They are on the Completed tab."
+                        : "No Auctioneer lots are currently assigned to your account."}
                 </p>
                 <button
                   className="app-button app-button--secondary"
@@ -436,7 +496,7 @@ export default function IncomingPage() {
                   </tr>
                 </thead>
                 <tbody>
-                  {items.map((item) => {
+                  {visibleItems.map((item) => {
                     const mine = isMine(item);
                     const status = statusLabel(item, mine);
                     const blocked = item.status !== "available" && !mine;

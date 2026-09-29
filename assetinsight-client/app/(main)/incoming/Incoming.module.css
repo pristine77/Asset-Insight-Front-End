@@ -84,6 +84,42 @@
   font-size: 0.78rem;
 }
 
+.tabs {
+  display: flex;
+  gap: 4px;
+  padding: 3px;
+  border-radius: 9px;
+  background: var(--app-surface-muted, rgba(15, 23, 42, 0.05));
+}
+
+.tab {
+  padding: 6px 12px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--app-text-muted);
+  font-size: 0.8rem;
+  font-weight: 620;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.tab:hover {
+  color: var(--app-text-strong);
+}
+
+.tabActive {
+  background: var(--app-surface, #fff);
+  color: var(--app-text-strong);
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.12);
+}
+
+.tabCount {
+  margin-left: 6px;
+  font-variant-numeric: tabular-nums;
+  opacity: 0.7;
+}
+
 .row {
   cursor: pointer;
 }

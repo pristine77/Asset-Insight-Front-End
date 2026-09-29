@@ -229,6 +229,88 @@ describe("Incoming", () => {
     expect(mocks.getStatus).not.toHaveBeenCalled();
   });
 
+  /*
+   * OWNER, 2026-09-29: "fix this screen so that it only leaves the contract that
+   * has not been sent back to Auctioneer 2.0. Any contract completed moves to
+   * completed tab."
+   *
+   * Everything assigned sat in one list, so a contract whose report had already
+   * gone back was mixed in with the ones still waiting and had to be told apart
+   * by its status badge. The queue is what somebody works down each morning.
+   */
+  describe("outstanding and completed", () => {
+    const sentItem: AuctioneerIncomingItem = {
+      ...claimedItem,
+      cycleKey: "cycle-sent",
+      workItemId: "work-sent",
+      contractNo: "CV-300",
+      status: "sent",
+    };
+
+    it("leaves only the unsent contracts in the queue", async () => {
+      mocks.getIncoming.mockResolvedValue([claimedItem, sentItem]);
+      renderIncoming();
+
+      expect(await screen.findByText("CV-200")).toBeVisible();
+      expect(screen.queryByText("CV-300")).toBeNull();
+    });
+
+    it("moves a sent contract to the completed tab", async () => {
+      mocks.getIncoming.mockResolvedValue([claimedItem, sentItem]);
+      renderIncoming();
+
+      await screen.findByText("CV-200");
+      fireEvent.click(screen.getByRole("tab", { name: /Completed/ }));
+
+      expect(await screen.findByText("CV-300")).toBeVisible();
+      expect(screen.queryByText("CV-200")).toBeNull();
+    });
+
+    it("counts each tab, so the rows on screen are explained", async () => {
+      mocks.getIncoming.mockResolvedValue([claimedItem, sentItem]);
+      renderIncoming();
+
+      expect(await screen.findByRole("tab", { name: /Outstanding 1/ })).toBeVisible();
+      expect(screen.getByRole("tab", { name: /Completed 1/ })).toBeVisible();
+    });
+
+    it("keeps work that was abandoned rather than finished in the queue", async () => {
+      /*
+       * "sent" is the only finished state. Work given up on is not work
+       * completed, and putting it out of sight is the opposite of what somebody
+       * needs — it is the row that most wants attention.
+       */
+      mocks.getIncoming.mockResolvedValue([
+        { ...claimedItem, cycleKey: "cycle-abandoned", contractNo: "CV-400", status: "abandoned" },
+      ]);
+      renderIncoming();
+
+      expect(await screen.findByText("CV-400")).toBeVisible();
+    });
+
+    it("says which emptiness it means when everything is done", async () => {
+      // Not "no assigned lots" — there are lots, they are simply all finished,
+      // and saying so points at the tab that has them.
+      mocks.getIncoming.mockResolvedValue([sentItem]);
+      renderIncoming();
+
+      expect(await screen.findByText("Everything assigned is done")).toBeVisible();
+      expect(
+        screen.getByText(/They are on the Completed tab/)
+      ).toBeVisible();
+    });
+
+    it("says something different when nothing has been sent back yet", async () => {
+      mocks.getIncoming.mockResolvedValue([claimedItem]);
+      renderIncoming();
+
+      await screen.findByText("CV-200");
+      fireEvent.click(screen.getByRole("tab", { name: /Completed/ }));
+
+      expect(await screen.findByText("Nothing sent back yet")).toBeVisible();
+    });
+  });
+
   it("renders every proposal row returned by the incoming items contract", async () => {
     mocks.getIncoming.mockResolvedValue([
       {
