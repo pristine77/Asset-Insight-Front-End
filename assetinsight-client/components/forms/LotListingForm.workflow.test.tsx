@@ -46,12 +46,46 @@ vi.mock("next/dynamic", async () => {
         return function MockMixedSection({
           value,
           onChange,
-          lockLotStructure,
+          sourceMappedLots,
+          addLotRef,
         }: {
           value: MixedLot[];
           onChange: (lots: MixedLot[]) => void;
-          lockLotStructure?: boolean;
+          sourceMappedLots?: boolean;
+          addLotRef?: { current: (() => void) | null };
         }) {
+          /*
+             Mirrors the real createLot closely enough to be worth asserting on:
+             a lot is appended, and on a source-mapped form it inherits the
+             parent's identity with its own key. Without this the ref Continue
+             calls would be null and the test would prove nothing.
+          */
+          if (addLotRef) {
+            addLotRef.current = () => {
+              const parent = sourceMappedLots
+                ? value[value.length - 1]?.source
+                : undefined;
+              const parentKey = parent?.parentKey || parent?.key;
+              onChange([
+                ...value,
+                {
+                  id: `test-lot-${value.length + 1}`,
+                  ...(parentKey
+                    ? {
+                        source: {
+                          key: `${parentKey}:split:${value.length + 1}`,
+                          parentKey,
+                          locked: false,
+                        },
+                      }
+                    : {}),
+                  files: [],
+                  extraFiles: [],
+                  coverIndex: 0,
+                },
+              ]);
+            };
+          }
           return React.createElement(
             React.Fragment,
             null,
@@ -69,7 +103,7 @@ vi.mock("next/dynamic", async () => {
               "output",
               { "data-testid": "listing-source-locks" },
               JSON.stringify({
-                lockLotStructure: Boolean(lockLotStructure),
+                sourceMappedLots: Boolean(sourceMappedLots),
                 sources: value.map((lot) => lot.source),
               })
             ),
@@ -389,83 +423,129 @@ describe("LotListingForm explicit save and upload workflow", () => {
   });
 
   it.each(["unknown", "scheduleA"] as const)(
-    "continues an imported %s listing at acceptance without waiting for processing or old-draft cleanup",
+    "adds a lot to an imported %s contract without sending anything",
     async (kind) => {
-      const upload = deferred<Record<string, unknown>>();
-      const cleanup = deferred<void>();
-      const onAcceptedAndContinue = vi.fn();
+      /*
+         OWNER, 2026-09-29: "its should Save it should Add Second Lot to the
+         Same Contract and click save and continue again, add the thrid lot
+         until I clicked 'Save Lot and Closed' then the contract is finished
+         and sent for processing."
+
+         Continue used to submit the report and ask Auctioneer for a successor
+         work item, so every lot became its own report — which is why every row
+         in My Reports read "Lots: 1". Nothing is sent here now.
+      */
       const onSuccess = vi.fn();
       const auctioneer = makeAuctioneerSetup(kind);
-      mocks.uploadReportFilesDirectToR2.mockReturnValueOnce(upload.promise);
-      mocks.deleteByClientId.mockReturnValueOnce(cleanup.promise);
-      render(<LotListingForm auctioneer={auctioneer} onAcceptedAndContinue={onAcceptedAndContinue} onSuccess={onSuccess} />);
+      render(<LotListingForm auctioneer={auctioneer} onSuccess={onSuccess} />);
       fireEvent.click(screen.getByRole("button", { name: "Add test media" }));
 
+      const before = Number(screen.getByTestId("test-lot-count").textContent);
       const sources = JSON.parse(screen.getByTestId("listing-source-locks").textContent || "{}");
-      expect(sources.lockLotStructure).toBe(kind === "scheduleA");
-      if (kind === "scheduleA") {
-        expect(sources.sources.map((source: { locked: boolean }) => source.locked)).toEqual([true, true]);
-      }
+      expect(sources.sourceMappedLots).toBe(kind === "scheduleA");
+
       fireEvent.click(screen.getByRole("button", { name: "Create Lot & Continue" }));
-      await waitFor(() => expect(mocks.uploadReportFilesDirectToR2).toHaveBeenCalledOnce());
-      expect(onAcceptedAndContinue).not.toHaveBeenCalled();
-      expect(mocks.deleteByClientId).not.toHaveBeenCalled();
-      const details = mocks.uploadReportFilesDirectToR2.mock.calls[0][0].details;
-      expect(details).toMatchObject({
-        auctioneer_work_item_id: auctioneer.workItemId,
-        client_submission_id: auctioneer.clientSubmissionId,
-        contract_no: auctioneer.contract.contractNo,
-      });
+
+      await waitFor(() =>
+        expect(Number(screen.getByTestId("test-lot-count").textContent)).toBe(before + 1)
+      );
+      // The whole point: no upload, no submission, no report created.
+      expect(mocks.uploadReportFilesDirectToR2).not.toHaveBeenCalled();
+      expect(onSuccess).not.toHaveBeenCalled();
+      // And the work so far is not lost if the browser closes.
+      await waitFor(() => expect(mocks.upsertWithMedia).toHaveBeenCalled());
+
       if (kind === "scheduleA") {
-        expect(details.mixed_lots).toEqual(auctioneer.lots.map((lot) => expect.objectContaining({
-          source_key: lot.sourceKey,
-          source_lot_id: lot.lotId,
-          source_submission_id: lot.submissionId,
-          mode: "single_lot",
-        })));
+        /*
+           A lot added beneath a Schedule A line must name the line it came
+           from. Auctioneer creates a Schedule A lot for it and copies that
+           line's commission across, so the consignor is charged the rate they
+           signed for; an unattributed extra cannot be placed against anything.
+        */
+        const after = JSON.parse(screen.getByTestId("listing-source-locks").textContent || "{}");
+        const added = after.sources[after.sources.length - 1];
+        expect(added.parentKey).toBe(auctioneer.lots[auctioneer.lots.length - 1].sourceKey);
+        expect(added.key).not.toBe(added.parentKey);
+        expect(added.locked).toBe(false);
       }
-
-      await act(async () => upload.resolve({ reportId: "accepted-listing-report", status: "processing" }));
-      await waitFor(() => expect(mocks.deleteByClientId).toHaveBeenCalledExactlyOnceWith(auctioneer.clientSubmissionId, "lot-listing"));
-      expect(onAcceptedAndContinue).toHaveBeenCalledExactlyOnceWith("accepted-listing-report");
-      expect(onSuccess).not.toHaveBeenCalled();
-      await act(async () => cleanup.resolve());
-
-      await waitFor(() => expect(onAcceptedAndContinue).toHaveBeenCalledExactlyOnceWith("accepted-listing-report"));
-      expect(onSuccess).not.toHaveBeenCalled();
-      expect(mocks.uploadReportFilesDirectToR2).toHaveBeenCalledOnce();
-      expect(screen.getByTestId("selected-listing-media")).toHaveTextContent("No media selected");
     }
   );
 
-  it("preserves imported media and submission identity when the new-lot upload fails and is retried", async () => {
-    const onAcceptedAndContinue = vi.fn();
+  it("sends every lot together when the contract is closed", async () => {
+    // Close is the only control that submits, and it submits the lots the
+    // Continue presses accumulated — one report for the contract, not one per
+    // lot.
+    const auctioneer = makeAuctioneerSetup("scheduleA");
+    mocks.uploadReportFilesDirectToR2.mockResolvedValueOnce({ reportId: "accepted-listing-report" });
+    render(<LotListingForm auctioneer={auctioneer} onSuccess={vi.fn()} />);
+    fireEvent.click(screen.getByRole("button", { name: "Add test media" }));
+    const seeded = Number(screen.getByTestId("test-lot-count").textContent);
+    fireEvent.click(screen.getByRole("button", { name: "Create Lot & Continue" }));
+    await waitFor(() =>
+      expect(Number(screen.getByTestId("test-lot-count").textContent)).toBe(seeded + 1)
+    );
+    /*
+       The added lot starts empty, and a lot with no media is refused at
+       submission — correctly, and it is why this has to photograph the new lot
+       before closing. That is the real sequence too: fill a lot, Continue, fill
+       the next, Close.
+    */
+    fireEvent.click(screen.getByRole("button", { name: "Add test media" }));
+
+    fireEvent.click(screen.getByRole("button", { name: "Create Lot & Close" }));
+
+    await waitFor(() => expect(mocks.uploadReportFilesDirectToR2).toHaveBeenCalledOnce());
+    const details = mocks.uploadReportFilesDirectToR2.mock.calls[0][0].details;
+    expect(details).toMatchObject({
+      auctioneer_work_item_id: auctioneer.workItemId,
+      contract_no: auctioneer.contract.contractNo,
+    });
+    expect(details.mixed_lots).toHaveLength(seeded + 1);
+    // The added lot carries its parent to Auctioneer.
+    expect(details.mixed_lots[details.mixed_lots.length - 1]).toMatchObject({
+      source_parent_key: auctioneer.lots[auctioneer.lots.length - 1].sourceKey,
+    });
+  });
+
+  it("preserves imported media and submission identity when the upload fails and is retried", async () => {
+    /*
+       Retargeted from Continue to Close: Close is the control that uploads now,
+       so it is the one whose failure can strand a submission identity. The
+       property is unchanged and is the important one — a retry must reuse the
+       SAME client_submission_id, or the second attempt creates a second report
+       for work that may already have landed.
+    */
     const onSuccess = vi.fn();
     mocks.uploadReportFilesDirectToR2
       .mockRejectedValueOnce(new Error("Connection interrupted"))
       .mockResolvedValueOnce({ reportId: "accepted-after-retry" });
-    render(<LotListingForm auctioneer={makeAuctioneerSetup()} onAcceptedAndContinue={onAcceptedAndContinue} onSuccess={onSuccess} />);
+    render(<LotListingForm auctioneer={makeAuctioneerSetup()} onSuccess={onSuccess} />);
     fireEvent.click(screen.getByRole("button", { name: "Add test media" }));
-    fireEvent.click(screen.getByRole("button", { name: "Create Lot & Continue" }));
+    fireEvent.click(screen.getByRole("button", { name: "Create Lot & Close" }));
 
-    await waitFor(() => expect(screen.getByRole("button", { name: "Create Lot & Continue" })).toBeEnabled());
+    await waitFor(() => expect(screen.getByRole("button", { name: "Create Lot & Close" })).toBeEnabled());
     expect(screen.getByTestId("selected-listing-media")).toHaveTextContent("lot-photo.jpg");
     expect(screen.getByRole("textbox", { name: /contract number/i })).toHaveValue("IMPORTED-100");
     expect(mocks.deleteByClientId).not.toHaveBeenCalled();
-    expect(onAcceptedAndContinue).not.toHaveBeenCalled();
+    expect(onSuccess).not.toHaveBeenCalled();
     const original = mocks.uploadReportFilesDirectToR2.mock.calls[0][0];
-    fireEvent.click(screen.getByRole("button", { name: "Create Lot & Continue" }));
+    fireEvent.click(screen.getByRole("button", { name: "Create Lot & Close" }));
 
-    await waitFor(() => expect(onAcceptedAndContinue).toHaveBeenCalledExactlyOnceWith("accepted-after-retry"));
-    expect(mocks.uploadReportFilesDirectToR2).toHaveBeenCalledTimes(2);
+    await waitFor(() => expect(mocks.uploadReportFilesDirectToR2).toHaveBeenCalledTimes(2));
     expect(mocks.uploadReportFilesDirectToR2.mock.calls[1][0].details.client_submission_id).toBe(original.details.client_submission_id);
     expect(mocks.uploadReportFilesDirectToR2.mock.calls[1][0].files).toEqual(original.files);
-    expect(onSuccess).not.toHaveBeenCalled();
     expect(mocks.apiPost).not.toHaveBeenCalled();
   });
 
-  it.each(["continue", "normal", "save"] as const)(
-    "keeps rapid new-lot, normal-submit, and save clicks in the first %s intent",
+  /*
+     "continue" is gone from this list. It named a SUBMISSION intent — Continue
+     used to upload — and the whole point of the test is that whichever
+     submission is asked for first wins and the rest are ignored. Continue adds
+     a lot now and sends nothing, so it is not something the single-flight guard
+     arbitrates between; the case below covers it racing a real submission.
+  */
+  it.each(["normal", "save"] as const)(
+    "keeps rapid submit and save clicks in the first %s intent",
     async (first) => {
       const pending = deferred<Record<string, unknown>>();
       const onAcceptedAndContinue = vi.fn();
@@ -475,13 +555,11 @@ describe("LotListingForm explicit save and upload workflow", () => {
       render(<LotListingForm auctioneer={makeAuctioneerSetup()} onAcceptedAndContinue={onAcceptedAndContinue} onSuccess={onSuccess} />);
       fireEvent.click(screen.getByRole("button", { name: "Add test media" }));
       const actions = {
-        continue: screen.getByRole("button", { name: "Create Lot & Continue" }),
         normal: screen.getByRole("button", { name: "Create Lot & Close" }),
         save: screen.getAllByRole("button", { name: "Save Draft" })[0],
       };
       act(() => {
         actions[first].click();
-        actions.continue.click();
         actions.normal.click();
         actions.save.click();
       });
@@ -494,10 +572,7 @@ describe("LotListingForm explicit save and upload workflow", () => {
         expect(mocks.upsertWithMedia).not.toHaveBeenCalled();
       }
       await act(async () => pending.resolve({ _id: "saved-draft", media: [], reportId: "accepted-single-flight" }));
-      if (first === "continue") {
-        await waitFor(() => expect(onAcceptedAndContinue).toHaveBeenCalledExactlyOnceWith("accepted-single-flight"));
-        expect(onSuccess).not.toHaveBeenCalled();
-      } else if (first === "normal") {
+      if (first === "normal") {
         await waitFor(() => expect(onSuccess).toHaveBeenCalledOnce());
         expect(onAcceptedAndContinue).not.toHaveBeenCalled();
       } else {
@@ -507,28 +582,42 @@ describe("LotListingForm explicit save and upload workflow", () => {
     }
   );
 
-  it("continues accepted imported work even when old-draft cleanup fails", async () => {
-    const onAcceptedAndContinue = vi.fn();
+  it("accepts imported work even when old-draft cleanup fails", async () => {
+    /*
+       Retargeted from Continue to Close, which is the control that submits now.
+       The property is the one that matters and is unchanged: a submission that
+       Auctioneer ACCEPTED must not be reported as failed because a local draft
+       could not be swept afterwards. The work is delivered; the leftover is a
+       housekeeping nuisance and is said so in a warning.
+    */
     const onSuccess = vi.fn();
     mocks.uploadReportFilesDirectToR2.mockResolvedValueOnce({ reportId: "accepted-cleanup-failure" });
     mocks.deleteScopedDraft.mockRejectedValueOnce(new Error("Local storage unavailable"));
-    render(<LotListingForm auctioneer={makeAuctioneerSetup()} onAcceptedAndContinue={onAcceptedAndContinue} onSuccess={onSuccess} />);
+    render(<LotListingForm auctioneer={makeAuctioneerSetup()} onSuccess={onSuccess} />);
     fireEvent.click(screen.getByRole("button", { name: "Add test media" }));
-    fireEvent.click(screen.getByRole("button", { name: "Create Lot & Continue" }));
+    fireEvent.click(screen.getByRole("button", { name: "Create Lot & Close" }));
 
-    await waitFor(() => expect(onAcceptedAndContinue).toHaveBeenCalledExactlyOnceWith("accepted-cleanup-failure"));
+    await waitFor(() => expect(onSuccess).toHaveBeenCalledOnce());
     expect(mocks.toastWarning).toHaveBeenCalledWith(expect.stringContaining("Report submitted"));
-    expect(onSuccess).not.toHaveBeenCalled();
     expect(mocks.uploadReportFilesDirectToR2).toHaveBeenCalledOnce();
   });
 
-  it("shows no new-lot action without both an imported contract and continuation callback", () => {
-    const view = render(<LotListingForm onAcceptedAndContinue={vi.fn()} />);
+  it("shows the new-lot action for an imported contract and not otherwise", () => {
+    /*
+       The gate used to require onAcceptedAndContinue as well, because
+       Continue's whole job was handing a successor report back through it. It
+       adds a lot to this form now and calls nothing, so requiring that callback
+       would hide the button from every caller that does not supply one — which
+       is the state the owner reported as the button doing nothing.
+    */
+    const view = render(<LotListingForm />);
     expect(screen.queryByRole("button", { name: "Create Lot & Continue" })).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Create Lot Listing" })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Create Lot & Close" })).not.toBeInTheDocument();
+
     view.rerender(<LotListingForm auctioneer={makeAuctioneerSetup()} />);
-    expect(screen.queryByRole("button", { name: "Create Lot & Continue" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Create Lot & Continue" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Create Lot & Close" })).toBeInTheDocument();
   });
 
   it("saves and resumes a fresh successor under its own work item and submission identity", async () => {

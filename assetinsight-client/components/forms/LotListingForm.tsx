@@ -629,6 +629,14 @@ export default function LotListingForm({
     [userId]
   );
 
+  /*
+     MixedSection publishes its createLot here so Create Lot & Continue, which
+     sits in the action bar, adds a lot exactly the way the New lot button does
+     — including inheriting the Schedule A parent, which needs the active lot
+     index that section owns.
+  */
+  const addLotRef = useRef<(() => void) | null>(null);
+
   const flushDraft = useCallback(async (signal?: AbortSignal): Promise<boolean> => {
     if (!draftKey || !userId || autosaveBlockedRef.current || restoreBlockedRef.current) return false;
     if (saveFlightRef.current) return saveFlightRef.current;
@@ -1514,6 +1522,13 @@ export default function LotListingForm({
           mode: lot.mode,
           ...(lot.source && {
             source_key: lot.source.key,
+            /*
+               The Schedule A line this lot was split out of, present only on a
+               lot the appraiser added. Auctioneer named one line and receives
+               several lots for it; without the parent they arrive as extras it
+               cannot place, which is the mismatch needs_reconciliation catches.
+            */
+            ...(lot.source.parentKey && { source_parent_key: lot.source.parentKey }),
             source_lot_id: lot.source.lotId,
             source_submission_id: lot.source.submissionId,
           }),
@@ -1606,13 +1621,12 @@ export default function LotListingForm({
         updateUploadProgress(1);
         const acceptedMessage =
           "Submission accepted — processing continues in My Reports.";
-        const continuing = Boolean(continueWithNewLot && auctioneer && onAcceptedAndContinue);
-        if (continuing) {
-          // Open the successor at upload acceptance; cleanup remains scoped to
-          // the old draft and does not delay or authorize another upload.
-          dispatchReportCreated();
-          onAcceptedAndContinue?.(acceptedAuctioneerReportId(responseData));
-        }
+        /*
+           The successor branch is gone. Continue no longer submits — it adds a
+           lot — so nothing asks this function to continue, and there is no
+           successor work item to open. Lots accumulate in one report and Close
+           sends them together.
+        */
         const cleanupError = await clearAcceptedDraft();
         forceNewSubmissionRef.current = false;
         supersededSubmissionIdRef.current = null;
@@ -1623,9 +1637,10 @@ export default function LotListingForm({
             "Report submitted, but its local draft could not be removed. You can discard the old local copy later."
           );
         }
-        if (!continuing) {
-          onSuccess?.(acceptedMessage);
-        }
+        // Unconditional now: every submission is a Close, and a Close always
+        // finishes. The guard existed only to stay silent while a successor
+        // form was being opened behind the acceptance.
+        onSuccess?.(acceptedMessage);
       } catch (submitError: any) {
         const isConflict =
           submitError?.response?.status === 409 &&
@@ -2170,7 +2185,8 @@ export default function LotListingForm({
                 downloadPrefix={contractNo || "lot-listing"}
                 allowVideo
                 analysisImageLimit={50}
-                lockLotStructure={auctioneer?.kind === "scheduleA"}
+                sourceMappedLots={auctioneer?.kind === "scheduleA"}
+                addLotRef={addLotRef}
               />
             </div>
           </FormSection>
@@ -2242,10 +2258,25 @@ export default function LotListingForm({
             {submitting ? "Uploading..." : "Create Lot Listing"}
           </button>
         </span> : null}
-        {auctioneer && onAcceptedAndContinue ? (
+        {/*
+          Gated on the imported contract alone. It used to require
+          onAcceptedAndContinue too, because Continue's whole job was to hand a
+          successor report back through it. Continue now adds a lot to this
+          form and calls nothing, so tying the button to that callback would
+          hide it from every caller that does not supply one.
+        */}
+        {auctioneer ? (
           <AuctioneerContinueAction
             disabled={submitting || restoreBlocked || draftSaving}
-            onClick={() => void onSubmit(undefined, true)}
+            onClick={() => {
+              /*
+                 Adds a lot and saves. It used to submit the report and open a
+                 successor form, which is why each lot became its own report.
+                 Nothing is sent here now — Create Lot & Close sends them all.
+              */
+              addLotRef.current?.();
+              void flushDraft();
+            }}
           />
         ) : null}
         </FormActionBar>

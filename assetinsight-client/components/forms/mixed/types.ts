@@ -14,6 +14,16 @@ export type MixedLot = {
   /** Opaque upstream identity used to preserve an integration lot mapping. */
   source?: {
     key: string;
+    /**
+     * The Schedule A line this lot was split out of.
+     *
+     * Set only on a lot the appraiser ADDED beneath an upstream lot. Auctioneer
+     * listed one line; the appraiser sends several lots back for it, and
+     * without this they arrive as extras that cannot be placed against anything
+     * — the mismatch needs_reconciliation exists to catch. The lot keeps its own
+     * unique `key` so nothing downstream collides; parentKey is the attribution.
+     */
+    parentKey?: string;
     lotId?: string;
     submissionId?: string;
     lotNumber?: string;

@@ -1913,6 +1913,13 @@ const AssetForm = forwardRef<AssetFormHandle, Props>(function AssetForm(
           mode: lot.mode!,
           ...(lot.source && {
             source_key: lot.source.key,
+            /*
+               The Schedule A line this lot was split out of, present only on a
+               lot the appraiser added. Auctioneer named one line and receives
+               several lots for it; without the parent they arrive as extras it
+               cannot place, which is the mismatch needs_reconciliation catches.
+            */
+            ...(lot.source.parentKey && { source_parent_key: lot.source.parentKey }),
             source_lot_id: lot.source.lotId,
             source_submission_id: lot.source.submissionId,
           }),
@@ -2590,7 +2597,7 @@ const AssetForm = forwardRef<AssetFormHandle, Props>(function AssetForm(
                   maxExtraImagesPerLot={MAX_ASSET_LOT_PHOTOS}
                   maxTotalImages={MAX_ASSET_LOT_PHOTOS}
                   analysisImageLimit={50}
-                  lockLotStructure={auctioneer?.kind === "scheduleA"}
+                  sourceMappedLots={auctioneer?.kind === "scheduleA"}
                   downloadPrefix={(contractNo || "asset").replace(/[^a-zA-Z0-9_-]/g, "-")}
                 />
               </div>
