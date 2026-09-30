@@ -475,6 +475,12 @@ export default function ReportsPage() {
   >("date-desc");
   const [typeFilter, setTypeFilter] = useState("");
   const [filtersOpen, setFiltersOpen] = useState(false);
+  /*
+     Delivered work leaves the working list. A report that reached Auctioneer
+     needs nothing further, and leaving it here means the rows that DO need a
+     Send or a Retry are scattered among rows that are simply done.
+  */
+  const [deliveryTab, setDeliveryTab] = useState<"active" | "sent">("active");
   const [assetReports, setAssetReports] = useState<AssetReport[]>([]);
   const [realEstateReports, setRealEstateReports] = useState<RealEstateReport[]>([]);
   const [lotListingReports, setLotListingReports] = useState<LotListing[]>([]);
@@ -1169,8 +1175,27 @@ export default function ReportsPage() {
     return Array.from(values);
   }, [groups]);
 
+  /*
+     Counted from every group rather than from the filtered output, so the tab
+     counts do not move when someone types in the search box. A count that
+     changes as you search cannot be used to answer "how much is left to send".
+  */
+  const sentCount = useMemo(
+    () => groups.filter((group) => group.auctioneerDelivery?.state === "sent").length,
+    [groups]
+  );
+  const activeCount = groups.length - sentCount;
+
   const filteredGroups = useMemo(() => {
-    let output = [...groups];
+    /*
+       The tab narrows FIRST, so the search and type filters below apply within
+       the tab you are standing on rather than across both.
+    */
+    let output = groups.filter((group) =>
+      deliveryTab === "sent"
+        ? group.auctioneerDelivery?.state === "sent"
+        : group.auctioneerDelivery?.state !== "sent"
+    );
     const q = query.trim().toLowerCase();
     if (q) {
       output = output.filter((group) =>
@@ -1212,7 +1237,7 @@ export default function ReportsPage() {
     });
 
     return output;
-  }, [groups, query, sortBy, typeFilter]);
+  }, [groups, deliveryTab, query, sortBy, typeFilter]);
 
   const totalItems = filteredGroups.length;
   const totalPages = Math.max(1, Math.ceil(totalItems / pageSize));
@@ -1223,7 +1248,7 @@ export default function ReportsPage() {
 
   useEffect(() => {
     setPage(1);
-  }, [query, pageSize, sortBy, typeFilter]);
+  }, [deliveryTab, query, pageSize, sortBy, typeFilter]);
 
   async function handleDownload(reportId: string) {
     try {
@@ -1656,6 +1681,40 @@ export default function ReportsPage() {
         </button>
       </header>
 
+      {/*
+        Counts live on the tabs rather than only in the header, so the number of
+        rows on screen is always explained by the tab you are standing on — the
+        same treatment the Incoming queue uses.
+      */}
+      <div
+        className="inline-flex gap-1 self-start rounded-lg bg-[var(--app-panel-alt)] p-1"
+        role="tablist"
+        aria-label="Delivery state"
+      >
+        {([
+          { id: "active" as const, label: "Active", count: activeCount },
+          { id: "sent" as const, label: "Sent", count: sentCount },
+        ]).map((tab) => (
+          <button
+            key={tab.id}
+            type="button"
+            role="tab"
+            aria-selected={deliveryTab === tab.id}
+            onClick={() => setDeliveryTab(tab.id)}
+            className={`inline-flex min-h-8 items-center gap-2 rounded-md px-3 text-sm font-semibold transition-colors ${
+              deliveryTab === tab.id
+                ? "bg-[var(--app-panel)] text-[var(--app-text)] shadow-[var(--app-shadow-control)]"
+                : "text-[var(--app-text-muted)] hover:text-[var(--app-text)]"
+            }`}
+          >
+            {tab.label}
+            <span className="rounded-full bg-[var(--app-panel-soft)] px-1.5 text-xs font-semibold tabular-nums text-[var(--app-text-muted)]">
+              {tab.count}
+            </span>
+          </button>
+        ))}
+      </div>
+
       <button
         type="button"
         aria-expanded={filtersOpen}
@@ -1768,12 +1827,21 @@ export default function ReportsPage() {
             <FileText className="size-5" />
           </span>
           <h2 className="mt-3 font-semibold text-[var(--app-text)]">
-            No reports found
+            {deliveryTab === "sent" ? "Nothing sent yet" : "No reports found"}
           </h2>
+          {/*
+            An empty tab says why it is empty. "No reports match the current
+            search and filters" on a tab with no filters applied reads as a
+            fault rather than as an empty state.
+          */}
           <p className="mx-auto mt-1 max-w-md text-sm text-[var(--app-text-muted)]">
             {groups.length === 0
               ? "Create a report from the dashboard to populate this page."
-              : "No reports match the current search and filters."}
+              : deliveryTab === "sent"
+                ? "Reports appear here once they have been sent to Auctioneer."
+                : activeCount === 0
+                  ? "Every report has been sent. See the Sent tab."
+                  : "No reports match the current search and filters."}
           </p>
         </section>
       ) : (

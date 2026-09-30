@@ -659,4 +659,165 @@ describe("My Reports thumbnails", () => {
     expect(mocks.downloadCr).not.toHaveBeenCalled();
     expect(mocks.downloadCrDocx).not.toHaveBeenCalled();
   });
+
+  /*
+     ── THE SENT TAB ──────────────────────────────────────────────────────────
+     OWNER, 2026-09-29: "Add a 'Sent' Tab here so that any report that is
+     successfully sent to Asset Insight is moved to the Tab."
+
+     A report that has reached Auctioneer needs nothing further, but it stayed
+     in the list competing with the rows that still need a Send or a Retry —
+     and the list sorts newest-first, so the two were interleaved.
+
+     What counts as sent is delivery.state === "sent", the same value the green
+     "Sent" badge already renders from. Nothing new decides it, so the badge and
+     the tab cannot disagree.
+  */
+  async function renderWithTwoDeliveries() {
+    mocks.getAssetReports.mockResolvedValue({
+      data: [reportWithThumbnail, reportWithoutThumbnail],
+    });
+    mocks.getDeliveries.mockResolvedValue([
+      {
+        workItemId: "wi-sent",
+        reportId: reportWithThumbnail._id,
+        reportModel: "AssetReport",
+        reportType: "asset",
+        contractNo: reportWithThumbnail.contract_no,
+        state: "sent",
+        canSend: false,
+      },
+      {
+        workItemId: "wi-ready",
+        reportId: reportWithoutThumbnail._id,
+        reportModel: "AssetReport",
+        reportType: "asset",
+        contractNo: reportWithoutThumbnail.contract_no,
+        state: "ready",
+        canSend: true,
+      },
+    ]);
+    render(<ReportsPage />);
+    return screen.findByRole("tablist", { name: "Delivery state" });
+  }
+
+  it("moves a sent report out of the working list and onto the Sent tab", async () => {
+    const tabs = await renderWithTwoDeliveries();
+
+    // Scoped to the desktop table: the page also renders a mobile list, so an
+    // unscoped query matches every contract twice.
+    const table = () => screen.getByRole("table", { name: "Generated reports" });
+
+    // Active is where you land: the row still needing a Send is here, the
+    // delivered one is not.
+    await waitFor(() => {
+      expect(within(table()).getByText(/CV-NO-IMAGE/i)).toBeInTheDocument();
+    });
+    expect(within(table()).queryByText(/CV-THUMB-100/i)).not.toBeInTheDocument();
+
+    fireEvent.click(within(tabs).getByRole("tab", { name: /Sent/i }));
+
+    await waitFor(() => {
+      expect(within(table()).getByText(/CV-THUMB-100/i)).toBeInTheDocument();
+    });
+    expect(within(table()).queryByText(/CV-NO-IMAGE/i)).not.toBeInTheDocument();
+  });
+
+  it("counts each tab so the rows on screen are explained", async () => {
+    const tabs = await renderWithTwoDeliveries();
+    await waitFor(() => {
+      expect(within(tabs).getByRole("tab", { name: /Active/i })).toHaveTextContent("1");
+    });
+    expect(within(tabs).getByRole("tab", { name: /Sent/i })).toHaveTextContent("1");
+  });
+
+  it("keeps the counts still while the search box is used", async () => {
+    /*
+       The counts come from every group, not from the filtered output. A count
+       that moved as you typed could not answer "how much is left to send",
+       which is the only question the tab exists to answer.
+    */
+    const tabs = await renderWithTwoDeliveries();
+    await waitFor(() => {
+      expect(within(tabs).getByRole("tab", { name: /Sent/i })).toHaveTextContent("1");
+    });
+
+    fireEvent.change(screen.getByPlaceholderText(/Search reports/i), {
+      target: { value: "nothing will match this" },
+    });
+
+    await waitFor(() => {
+      expect(screen.getByText(/No reports found/i)).toBeInTheDocument();
+    });
+    expect(within(tabs).getByRole("tab", { name: /Sent/i })).toHaveTextContent("1");
+    expect(within(tabs).getByRole("tab", { name: /Active/i })).toHaveTextContent("1");
+  });
+
+  it("marks the tab in force for assistive technology", async () => {
+    const tabs = await renderWithTwoDeliveries();
+    expect(within(tabs).getByRole("tab", { name: /Active/i })).toHaveAttribute(
+      "aria-selected",
+      "true"
+    );
+
+    fireEvent.click(within(tabs).getByRole("tab", { name: /Sent/i }));
+
+    await waitFor(() => {
+      expect(within(tabs).getByRole("tab", { name: /Sent/i })).toHaveAttribute(
+        "aria-selected",
+        "true"
+      );
+    });
+    expect(within(tabs).getByRole("tab", { name: /Active/i })).toHaveAttribute(
+      "aria-selected",
+      "false"
+    );
+  });
+
+  it("says why the Sent tab is empty rather than blaming the filters", async () => {
+    // "No reports match the current search and filters" on a tab with no
+    // filters applied reads as a fault rather than as an empty state.
+    mocks.getAssetReports.mockResolvedValue({ data: [reportWithThumbnail] });
+    mocks.getDeliveries.mockResolvedValue([
+      {
+        workItemId: "wi-ready-only",
+        reportId: reportWithThumbnail._id,
+        reportModel: "AssetReport",
+        reportType: "asset",
+        contractNo: reportWithThumbnail.contract_no,
+        state: "ready",
+        canSend: true,
+      },
+    ]);
+    render(<ReportsPage />);
+
+    const tabs = await screen.findByRole("tablist", { name: "Delivery state" });
+    fireEvent.click(within(tabs).getByRole("tab", { name: /Sent/i }));
+
+    await waitFor(() => {
+      expect(screen.getByText(/Nothing sent yet/i)).toBeInTheDocument();
+    });
+    expect(
+      screen.getByText(/Reports appear here once they have been sent to Auctioneer/i)
+    ).toBeInTheDocument();
+  });
+
+  it("keeps a report with no delivery record on the Active tab", async () => {
+    /*
+       Most reports have no delivery row at all — they were never eligible, or
+       nothing has been attempted yet. Undefined must read as "not sent", not
+       fall through a strict equality into the Sent tab.
+    */
+    mocks.getAssetReports.mockResolvedValue({ data: [reportWithThumbnail] });
+    mocks.getDeliveries.mockResolvedValue([]);
+    render(<ReportsPage />);
+
+    const tabs = await screen.findByRole("tablist", { name: "Delivery state" });
+    await waitFor(() => {
+      expect(within(tabs).getByRole("tab", { name: /Active/i })).toHaveTextContent("1");
+    });
+    expect(within(tabs).getByRole("tab", { name: /Sent/i })).toHaveTextContent("0");
+    const table = screen.getByRole("table", { name: "Generated reports" });
+    expect(within(table).getByText(/CV-THUMB-100/i)).toBeInTheDocument();
+  });
 });
