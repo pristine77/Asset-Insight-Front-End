@@ -311,7 +311,20 @@ export default function IncomingPage() {
       mine &&
       (selected.status === "report_created" || selected.status === "sent")
     ) {
-      router.push("/reports");
+      /*
+         Name the contract, so My Reports can narrow to it. This used to push
+         the bare list and leave the reader to find one row among dozens, which
+         is indistinguishable from the button doing nothing at all.
+
+         Falling back to the bare list when the number is missing: a queue row
+         can render as "Number unavailable", and a link to ?contract= with
+         nothing after it would narrow the list to no rows, which is worse than
+         showing all of them.
+      */
+      const contractNo = (selected.contractNo ?? "").trim();
+      router.push(
+        contractNo ? `/reports?search=${encodeURIComponent(contractNo)}` : "/reports"
+      );
       return;
     }
     if (mine && selected.workItemId) {

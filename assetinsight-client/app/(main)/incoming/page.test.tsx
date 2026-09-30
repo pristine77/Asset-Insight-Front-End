@@ -512,6 +512,12 @@ describe("Incoming", () => {
   });
 
   it("opens an existing report rather than recreating it", async () => {
+    /*
+       The link NAMES the contract. It used to push the bare list, so the reader
+       arrived at 36 rows with nothing selected and nothing opened — which the
+       owner reported, reasonably, as the button not working (2026-09-29).
+       My Reports seeds its search from ?contract= and picks the tab holding it.
+    */
     mocks.getIncoming.mockResolvedValue([
       {
         ...claimedItem,
@@ -525,7 +531,54 @@ describe("Incoming", () => {
       within(panel).getByRole("button", { name: "Open report" })
     );
 
-    expect(mocks.routerPush).toHaveBeenCalledWith("/reports");
+    expect(mocks.routerPush).toHaveBeenCalledWith("/reports?search=CV-200");
     expect(mocks.claim).not.toHaveBeenCalled();
+  });
+
+  it("falls back to the whole list when the contract has no number", async () => {
+    /*
+       A queue row can render as "Number unavailable". Linking to ?contract=
+       with nothing after it would narrow My Reports to no rows at all, which is
+       worse than showing everything.
+    */
+    mocks.getIncoming.mockResolvedValue([
+      {
+        ...claimedItem,
+        contractNo: "",
+        status: "report_created",
+      },
+    ]);
+    renderIncoming();
+    // The row DISPLAYS "Number unavailable", but its aria-label falls back to
+    // "Review contract" — the label and the visible text differ here.
+    const panel = await selectContract("contract");
+
+    fireEvent.click(
+      within(panel).getByRole("button", { name: "Open report" })
+    );
+
+    expect(mocks.routerPush).toHaveBeenCalledWith("/reports");
+  });
+
+  it("escapes a contract number that would otherwise break the link", async () => {
+    // Contract numbers are free text upstream; one with & or # in it would
+    // silently truncate the query string.
+    mocks.getIncoming.mockResolvedValue([
+      {
+        ...claimedItem,
+        contractNo: "CV/200 & 300",
+        status: "report_created",
+      },
+    ]);
+    renderIncoming();
+    const panel = await selectContract("CV/200 & 300");
+
+    fireEvent.click(
+      within(panel).getByRole("button", { name: "Open report" })
+    );
+
+    expect(mocks.routerPush).toHaveBeenCalledWith(
+      "/reports?search=CV%2F200%20%26%20300"
+    );
   });
 });
