@@ -661,9 +661,10 @@ describe("My Reports thumbnails", () => {
   });
 
   /*
-     ── THE SENT TAB ──────────────────────────────────────────────────────────
-     OWNER, 2026-09-29: "Add a 'Sent' Tab here so that any report that is
-     successfully sent to Asset Insight is moved to the Tab."
+     ── THE OUTSTANDING / COMPLETED TABS ──────────────────────────────────────────────────────────
+     OWNER, 2026-09-29: "Add Outstanding and Completed Tab here too. Any
+     task sent to Auctioneer 2.0 goes to Completed." The same words the Incoming
+     queue uses, so the two screens describe one idea in one vocabulary.
 
      A report that has reached Auctioneer needs nothing further, but it stayed
      in the list competing with the rows that still need a Send or a Retry —
@@ -698,24 +699,24 @@ describe("My Reports thumbnails", () => {
       },
     ]);
     render(<ReportsPage />);
-    return screen.findByRole("tablist", { name: "Delivery state" });
+    return screen.findByRole("tablist", { name: "Queue" });
   }
 
-  it("moves a sent report out of the working list and onto the Sent tab", async () => {
+  it("moves a sent report out of the working list and onto the Completed tab", async () => {
     const tabs = await renderWithTwoDeliveries();
 
     // Scoped to the desktop table: the page also renders a mobile list, so an
     // unscoped query matches every contract twice.
     const table = () => screen.getByRole("table", { name: "Generated reports" });
 
-    // Active is where you land: the row still needing a Send is here, the
-    // delivered one is not.
+    // Outstanding is where you land: the row still needing a Send is here,
+    // the delivered one is not.
     await waitFor(() => {
       expect(within(table()).getByText(/CV-NO-IMAGE/i)).toBeInTheDocument();
     });
     expect(within(table()).queryByText(/CV-THUMB-100/i)).not.toBeInTheDocument();
 
-    fireEvent.click(within(tabs).getByRole("tab", { name: /Sent/i }));
+    fireEvent.click(within(tabs).getByRole("tab", { name: /Completed/i }));
 
     await waitFor(() => {
       expect(within(table()).getByText(/CV-THUMB-100/i)).toBeInTheDocument();
@@ -726,9 +727,9 @@ describe("My Reports thumbnails", () => {
   it("counts each tab so the rows on screen are explained", async () => {
     const tabs = await renderWithTwoDeliveries();
     await waitFor(() => {
-      expect(within(tabs).getByRole("tab", { name: /Active/i })).toHaveTextContent("1");
+      expect(within(tabs).getByRole("tab", { name: /Outstanding/i })).toHaveTextContent("1");
     });
-    expect(within(tabs).getByRole("tab", { name: /Sent/i })).toHaveTextContent("1");
+    expect(within(tabs).getByRole("tab", { name: /Completed/i })).toHaveTextContent("1");
   });
 
   it("keeps the counts still while the search box is used", async () => {
@@ -739,7 +740,7 @@ describe("My Reports thumbnails", () => {
     */
     const tabs = await renderWithTwoDeliveries();
     await waitFor(() => {
-      expect(within(tabs).getByRole("tab", { name: /Sent/i })).toHaveTextContent("1");
+      expect(within(tabs).getByRole("tab", { name: /Completed/i })).toHaveTextContent("1");
     });
 
     fireEvent.change(screen.getByPlaceholderText(/Search reports/i), {
@@ -749,32 +750,32 @@ describe("My Reports thumbnails", () => {
     await waitFor(() => {
       expect(screen.getByText(/No reports found/i)).toBeInTheDocument();
     });
-    expect(within(tabs).getByRole("tab", { name: /Sent/i })).toHaveTextContent("1");
-    expect(within(tabs).getByRole("tab", { name: /Active/i })).toHaveTextContent("1");
+    expect(within(tabs).getByRole("tab", { name: /Completed/i })).toHaveTextContent("1");
+    expect(within(tabs).getByRole("tab", { name: /Outstanding/i })).toHaveTextContent("1");
   });
 
   it("marks the tab in force for assistive technology", async () => {
     const tabs = await renderWithTwoDeliveries();
-    expect(within(tabs).getByRole("tab", { name: /Active/i })).toHaveAttribute(
+    expect(within(tabs).getByRole("tab", { name: /Outstanding/i })).toHaveAttribute(
       "aria-selected",
       "true"
     );
 
-    fireEvent.click(within(tabs).getByRole("tab", { name: /Sent/i }));
+    fireEvent.click(within(tabs).getByRole("tab", { name: /Completed/i }));
 
     await waitFor(() => {
-      expect(within(tabs).getByRole("tab", { name: /Sent/i })).toHaveAttribute(
+      expect(within(tabs).getByRole("tab", { name: /Completed/i })).toHaveAttribute(
         "aria-selected",
         "true"
       );
     });
-    expect(within(tabs).getByRole("tab", { name: /Active/i })).toHaveAttribute(
+    expect(within(tabs).getByRole("tab", { name: /Outstanding/i })).toHaveAttribute(
       "aria-selected",
       "false"
     );
   });
 
-  it("says why the Sent tab is empty rather than blaming the filters", async () => {
+  it("says why the Completed tab is empty rather than blaming the filters", async () => {
     // "No reports match the current search and filters" on a tab with no
     // filters applied reads as a fault rather than as an empty state.
     mocks.getAssetReports.mockResolvedValue({ data: [reportWithThumbnail] });
@@ -791,18 +792,18 @@ describe("My Reports thumbnails", () => {
     ]);
     render(<ReportsPage />);
 
-    const tabs = await screen.findByRole("tablist", { name: "Delivery state" });
-    fireEvent.click(within(tabs).getByRole("tab", { name: /Sent/i }));
+    const tabs = await screen.findByRole("tablist", { name: "Queue" });
+    fireEvent.click(within(tabs).getByRole("tab", { name: /Completed/i }));
 
     await waitFor(() => {
-      expect(screen.getByText(/Nothing sent yet/i)).toBeInTheDocument();
+      expect(screen.getByText(/Nothing completed yet/i)).toBeInTheDocument();
     });
     expect(
       screen.getByText(/Reports appear here once they have been sent to Auctioneer/i)
     ).toBeInTheDocument();
   });
 
-  it("keeps a report with no delivery record on the Active tab", async () => {
+  it("keeps a report with no delivery record on the Outstanding tab", async () => {
     /*
        Most reports have no delivery row at all — they were never eligible, or
        nothing has been attempted yet. Undefined must read as "not sent", not
@@ -812,12 +813,139 @@ describe("My Reports thumbnails", () => {
     mocks.getDeliveries.mockResolvedValue([]);
     render(<ReportsPage />);
 
-    const tabs = await screen.findByRole("tablist", { name: "Delivery state" });
+    const tabs = await screen.findByRole("tablist", { name: "Queue" });
     await waitFor(() => {
-      expect(within(tabs).getByRole("tab", { name: /Active/i })).toHaveTextContent("1");
+      expect(within(tabs).getByRole("tab", { name: /Outstanding/i })).toHaveTextContent("1");
     });
-    expect(within(tabs).getByRole("tab", { name: /Sent/i })).toHaveTextContent("0");
+    expect(within(tabs).getByRole("tab", { name: /Completed/i })).toHaveTextContent("0");
     const table = screen.getByRole("table", { name: "Generated reports" });
     expect(within(table).getByText(/CV-THUMB-100/i)).toBeInTheDocument();
+  });
+
+  /*
+     ── ?contract=, THE DEEP LINK FROM INCOMING ───────────────────────────────
+     OWNER, 2026-09-29, of Open report on the Incoming screen: "A bug here, when
+     i clicked marked area, it is not opening."
+
+     It pushed /reports — the whole list — so the reader arrived at dozens of
+     rows with nothing selected. Nothing opened because nothing had been named.
+
+     The link now carries the contract number and this page seeds its search box
+     from it, reusing the narrowing that already existed rather than adding a
+     second filter to keep in step with the first.
+  */
+  /*
+     history.replaceState, not a redefined window.location: jsdom serves
+     location as non-configurable, so Object.defineProperty throws
+     "Cannot redefine property: location". Pushing a real URL changes
+     location.search the way the browser would, which is what the page reads.
+  */
+  function withSearchParam(value: string) {
+    const original = `${window.location.pathname}${window.location.search}`;
+    window.history.replaceState({}, "", `/reports?search=${encodeURIComponent(value)}`);
+    return () => window.history.replaceState({}, "", original);
+  }
+
+  it("narrows to the contract named in the link", async () => {
+    mocks.getAssetReports.mockResolvedValue({
+      data: [reportWithThumbnail, reportWithoutThumbnail],
+    });
+    mocks.getDeliveries.mockResolvedValue([]);
+    const restore = withSearchParam("CV-THUMB-100");
+    try {
+      render(<ReportsPage />);
+      const table = await screen.findByRole("table", { name: "Generated reports" });
+      /*
+         Wait on the EXCLUSION, not the inclusion. Both rows render on the first
+         paint; the seeding effect runs after it, so asserting the wanted row is
+         present passes immediately and proves nothing about the narrowing.
+      */
+      await waitFor(() => {
+        expect(within(table).queryByText(/CV-NO-IMAGE/i)).not.toBeInTheDocument();
+      });
+      expect(within(table).getByText(/CV-THUMB-100/i)).toBeInTheDocument();
+      expect(screen.getByPlaceholderText(/Search reports/i)).toHaveValue("CV-THUMB-100");
+    } finally {
+      restore();
+    }
+  });
+
+  it("opens on the Completed tab when the named report was already sent", async () => {
+    /*
+       Without this the link lands on Outstanding, which by definition cannot
+       contain a sent report — the same "nothing happened" from the other
+       direction, and the more likely case, since Open report only appears once
+       a report exists.
+    */
+    mocks.getAssetReports.mockResolvedValue({ data: [reportWithThumbnail] });
+    mocks.getDeliveries.mockResolvedValue([
+      {
+        workItemId: "wi-deep-sent",
+        reportId: reportWithThumbnail._id,
+        reportModel: "AssetReport",
+        reportType: "asset",
+        contractNo: reportWithThumbnail.contract_no,
+        state: "sent",
+        canSend: false,
+      },
+    ]);
+    const restore = withSearchParam("CV-THUMB-100");
+    try {
+      render(<ReportsPage />);
+      const tabs = await screen.findByRole("tablist", { name: "Queue" });
+      await waitFor(() => {
+        expect(within(tabs).getByRole("tab", { name: /Completed/i })).toHaveAttribute(
+          "aria-selected",
+          "true"
+        );
+      });
+      const table = screen.getByRole("table", { name: "Generated reports" });
+      expect(within(table).getByText(/CV-THUMB-100/i)).toBeInTheDocument();
+    } finally {
+      restore();
+    }
+  });
+
+  it("stays on Outstanding for a report that has not been sent", async () => {
+    mocks.getAssetReports.mockResolvedValue({ data: [reportWithThumbnail] });
+    mocks.getDeliveries.mockResolvedValue([
+      {
+        workItemId: "wi-deep-ready",
+        reportId: reportWithThumbnail._id,
+        reportModel: "AssetReport",
+        reportType: "asset",
+        contractNo: reportWithThumbnail.contract_no,
+        state: "ready",
+        canSend: true,
+      },
+    ]);
+    const restore = withSearchParam("CV-THUMB-100");
+    try {
+      render(<ReportsPage />);
+      const tabs = await screen.findByRole("tablist", { name: "Queue" });
+      await waitFor(() => {
+        expect(within(tabs).getByRole("tab", { name: /Outstanding/i })).toHaveAttribute(
+          "aria-selected",
+          "true"
+        );
+      });
+    } finally {
+      restore();
+    }
+  });
+
+  it("shows the whole list when no contract is named", async () => {
+    // The fallback Incoming uses when a queue row has no contract number.
+    mocks.getAssetReports.mockResolvedValue({
+      data: [reportWithThumbnail, reportWithoutThumbnail],
+    });
+    mocks.getDeliveries.mockResolvedValue([]);
+    render(<ReportsPage />);
+    const table = await screen.findByRole("table", { name: "Generated reports" });
+    await waitFor(() => {
+      expect(within(table).getByText(/CV-THUMB-100/i)).toBeInTheDocument();
+    });
+    expect(within(table).getByText(/CV-NO-IMAGE/i)).toBeInTheDocument();
+    expect(screen.getByPlaceholderText(/Search reports/i)).toHaveValue("");
   });
 });

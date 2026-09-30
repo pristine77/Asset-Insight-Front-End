@@ -480,7 +480,16 @@ export default function ReportsPage() {
      needs nothing further, and leaving it here means the rows that DO need a
      Send or a Retry are scattered among rows that are simply done.
   */
-  const [deliveryTab, setDeliveryTab] = useState<"active" | "sent">("active");
+  const [queueTab, setQueueTab] = useState<"outstanding" | "completed">("outstanding");
+  /*
+     Open report on Incoming links here with ?search=<contract number>. That
+     parameter already existed and is already read below, seeding the search
+     box — and the list already searches contract_no, so the narrowing needs no
+     new code at all. Only the TAB has to be chosen, which is what this ref is
+     for.
+  */
+  const deepLinkTabResolved = useRef(false);
+
   const [assetReports, setAssetReports] = useState<AssetReport[]>([]);
   const [realEstateReports, setRealEstateReports] = useState<RealEstateReport[]>([]);
   const [lotListingReports, setLotListingReports] = useState<LotListing[]>([]);
@@ -1180,11 +1189,28 @@ export default function ReportsPage() {
      counts do not move when someone types in the search box. A count that
      changes as you search cannot be used to answer "how much is left to send".
   */
-  const sentCount = useMemo(
+  const completedCount = useMemo(
     () => groups.filter((group) => group.auctioneerDelivery?.state === "sent").length,
     [groups]
   );
-  const activeCount = groups.length - sentCount;
+  const outstandingCount = groups.length - completedCount;
+  useEffect(() => {
+    /*
+       Choose the tab ONCE, after the data arrives. A sent report lives on
+       Completed while the page opens on Outstanding, so without this the deep
+       link lands on a tab that cannot hold what was asked for. Once only, so a
+       later refetch cannot yank the reader back after they have changed tabs
+       themselves.
+    */
+    if (deepLinkTabResolved.current) return;
+    const wanted = new URLSearchParams(window.location.search).get("search")?.trim() || "";
+    if (!wanted || groups.length === 0) return;
+    deepLinkTabResolved.current = true;
+    const match = groups.find(
+      (group) => (group.contract_no ?? "").toLowerCase() === wanted.toLowerCase()
+    );
+    if (match?.auctioneerDelivery?.state === "sent") setQueueTab("completed");
+  }, [groups]);
 
   const filteredGroups = useMemo(() => {
     /*
@@ -1192,7 +1218,7 @@ export default function ReportsPage() {
        the tab you are standing on rather than across both.
     */
     let output = groups.filter((group) =>
-      deliveryTab === "sent"
+      queueTab === "completed"
         ? group.auctioneerDelivery?.state === "sent"
         : group.auctioneerDelivery?.state !== "sent"
     );
@@ -1237,7 +1263,7 @@ export default function ReportsPage() {
     });
 
     return output;
-  }, [groups, deliveryTab, query, sortBy, typeFilter]);
+  }, [groups, queueTab, query, sortBy, typeFilter]);
 
   const totalItems = filteredGroups.length;
   const totalPages = Math.max(1, Math.ceil(totalItems / pageSize));
@@ -1248,7 +1274,7 @@ export default function ReportsPage() {
 
   useEffect(() => {
     setPage(1);
-  }, [deliveryTab, query, pageSize, sortBy, typeFilter]);
+  }, [queueTab, query, pageSize, sortBy, typeFilter]);
 
   async function handleDownload(reportId: string) {
     try {
@@ -1689,20 +1715,20 @@ export default function ReportsPage() {
       <div
         className="inline-flex gap-1 self-start rounded-lg bg-[var(--app-panel-alt)] p-1"
         role="tablist"
-        aria-label="Delivery state"
+        aria-label="Queue"
       >
         {([
-          { id: "active" as const, label: "Active", count: activeCount },
-          { id: "sent" as const, label: "Sent", count: sentCount },
+          { id: "outstanding" as const, label: "Outstanding", count: outstandingCount },
+          { id: "completed" as const, label: "Completed", count: completedCount },
         ]).map((tab) => (
           <button
             key={tab.id}
             type="button"
             role="tab"
-            aria-selected={deliveryTab === tab.id}
-            onClick={() => setDeliveryTab(tab.id)}
+            aria-selected={queueTab === tab.id}
+            onClick={() => setQueueTab(tab.id)}
             className={`inline-flex min-h-8 items-center gap-2 rounded-md px-3 text-sm font-semibold transition-colors ${
-              deliveryTab === tab.id
+              queueTab === tab.id
                 ? "bg-[var(--app-panel)] text-[var(--app-text)] shadow-[var(--app-shadow-control)]"
                 : "text-[var(--app-text-muted)] hover:text-[var(--app-text)]"
             }`}
@@ -1827,7 +1853,7 @@ export default function ReportsPage() {
             <FileText className="size-5" />
           </span>
           <h2 className="mt-3 font-semibold text-[var(--app-text)]">
-            {deliveryTab === "sent" ? "Nothing sent yet" : "No reports found"}
+            {queueTab === "completed" ? "Nothing completed yet" : "No reports found"}
           </h2>
           {/*
             An empty tab says why it is empty. "No reports match the current
@@ -1837,10 +1863,10 @@ export default function ReportsPage() {
           <p className="mx-auto mt-1 max-w-md text-sm text-[var(--app-text-muted)]">
             {groups.length === 0
               ? "Create a report from the dashboard to populate this page."
-              : deliveryTab === "sent"
+              : queueTab === "completed"
                 ? "Reports appear here once they have been sent to Auctioneer."
-                : activeCount === 0
-                  ? "Every report has been sent. See the Sent tab."
+                : outstandingCount === 0
+                  ? "Every report has been sent. See the Completed tab."
                   : "No reports match the current search and filters."}
           </p>
         </section>
