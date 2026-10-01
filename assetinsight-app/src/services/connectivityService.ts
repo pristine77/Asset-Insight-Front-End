@@ -136,13 +136,6 @@ export function getSubmissionError(error: any, retryAction = 'Resume upload'): {
     };
   }
 
-  if (['UPLOAD_STALLED', 'E_UPLOAD_STALLED'].includes(String(error?.code || ''))) {
-    return {
-      title: 'Upload Interrupted',
-      message: 'The upload stopped making progress. Your draft and photos are saved. Check the connection, then tap Resume upload. The same submission will be checked before it is completed.',
-    };
-  }
-
   if (status === 401 || status === 403) {
     return {
       title: 'Sign In Required',
