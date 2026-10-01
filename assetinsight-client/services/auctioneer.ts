@@ -25,6 +25,8 @@ export type AuctioneerIncomingItem = {
   customerName: string;
   consignorName?: string;
   salespersonName?: string;
+  /** What the office wrote on the contract, e.g. "Farm equipment". */
+  description?: string;
   eventId?: string;
   eventTitle: string;
   eventDate?: string;
@@ -70,6 +72,7 @@ export type AuctioneerWorkItemSetup = {
     customerName: string;
     consignorName?: string;
     salespersonName?: string;
+    description?: string;
     eventId?: string;
     eventTitle: string;
     eventDate?: string;

@@ -6,6 +6,7 @@ import {
   Building2,
   CalendarDays,
   FileCheck2,
+  FileText,
   Inbox,
   ListTree,
   LockKeyhole,
@@ -501,6 +502,7 @@ export default function IncomingPage() {
                 <thead>
                   <tr>
                     <th>Contract</th>
+                    <th>Description</th>
                     <th>Customer</th>
                     <th>Consignor</th>
                     <th>Salesperson</th>
@@ -529,6 +531,13 @@ export default function IncomingPage() {
                           <div className={styles.contractMeta}>
                             {item.location || "Location not supplied"}
                           </div>
+                        </td>
+                        <td
+                          className={styles.descriptionCell}
+                          data-label="Description"
+                          title={item.description || undefined}
+                        >
+                          {item.description || "Not supplied"}
                         </td>
                         <td className={styles.contactCell} data-label="Customer">
                           {item.customerName || "Not supplied"}
@@ -639,6 +648,15 @@ export default function IncomingPage() {
                     </dt>
                     <dd className={styles.detailValue}>
                       {selected.salespersonName || "Not supplied"}
+                    </dd>
+                  </div>
+                  <div className={styles.detailItem}>
+                    <dt className={styles.detailLabel}>
+                      <FileText className={styles.detailIcon} size={17} aria-hidden />
+                      <span>Description</span>
+                    </dt>
+                    <dd className={styles.detailValue}>
+                      {selected.description || "Not supplied"}
                     </dd>
                   </div>
                   <div className={styles.detailItem}>

@@ -346,9 +346,10 @@ describe("Incoming", () => {
     expect(mocks.getIncoming).toHaveBeenCalledWith();
   });
 
-  it("shows customer, consignor and salesperson separately in the queue and selected contract", async () => {
+  it("shows description, customer, consignor and salesperson separately in the queue and selected contract", async () => {
     mocks.getIncoming.mockResolvedValue([{
       ...claimedItem,
+      description: "Farm equipment",
       consignorName: "Northfield Consignor",
       salespersonName: "Sam Sales",
     }]);
@@ -356,6 +357,7 @@ describe("Incoming", () => {
 
     const table = await screen.findByRole("table");
     const roles = [
+      ["Description", "Farm equipment"],
       ["Customer", "Northfield Plant Ltd"],
       ["Consignor", "Northfield Consignor"],
       ["Salesperson", "Sam Sales"],
@@ -377,13 +379,13 @@ describe("Incoming", () => {
     renderIncoming();
 
     const table = await screen.findByRole("table");
-    for (const role of ["Consignor", "Salesperson"]) {
+    for (const role of ["Description", "Consignor", "Salesperson"]) {
       expect(table.querySelector(`td[data-label="${role}"]`)).toHaveTextContent(/^Not supplied$/);
     }
     expect(within(table).getByRole("cell", { name: "Northfield Plant Ltd" })).toHaveAttribute("data-label", "Customer");
 
     const panel = await selectContract("CV-200");
-    for (const role of ["Consignor", "Salesperson"]) {
+    for (const role of ["Description", "Consignor", "Salesperson"]) {
       const label = within(panel).getAllByRole("term").find((term) => term.textContent === role);
       expect(label?.nextElementSibling).toHaveTextContent(/^Not supplied$/);
     }

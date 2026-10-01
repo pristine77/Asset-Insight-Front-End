@@ -140,6 +140,12 @@
   overflow-wrap: anywhere;
 }
 
+.descriptionCell {
+  min-width: 140px;
+  max-width: 240px;
+  overflow-wrap: anywhere;
+}
+
 @media (min-width: 768px) {
   .incomingTable th,
   .incomingTable td {
@@ -469,7 +475,8 @@
 }
 
 @media (max-width: 767px) {
-  .contactCell {
+  .contactCell,
+  .descriptionCell {
     min-width: 0;
     max-width: none;
   }
