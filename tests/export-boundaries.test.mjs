@@ -19,6 +19,11 @@ test('each application retains its independent package and lockfile', () => {
   }
 });
 
+test('runtime routes named coverage and artifacts are retained', () => {
+  assert.match(read('assetinsight-client/app/(main)/crm/coverage/page.tsx'), /CrmWorkspace page="coverage"/);
+  assert.match(read('assetinsight-admin/app/api/admin/released-appraisals/[id]/artifacts/[kind]/download/route.ts'), /proxyStreamWithAdminAuth/);
+});
+
 test('admin has no accounting panel, warning helper or accounting BFF routes', () => {
   for (const file of [
     'app/components/dashboard/DashboardCredits.tsx', 'lib/creditWarnings.ts',

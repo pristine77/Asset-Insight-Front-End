@@ -102,6 +102,7 @@ export interface AutoSaveFormData {
   auctionManagementTaskId?: string;
   auctionsoft?: { taskId?: string; contractId?: string; [key: string]: unknown };
   clientSubmissionId?: string;
+  supersedesClientSubmissionId?: string;
   auctioneerWorkItemId?: string;
   clientName?: string;
   effectiveDate?: string;

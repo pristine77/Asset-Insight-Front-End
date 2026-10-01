@@ -33,6 +33,8 @@ export function isNetworkTransportError(error: any): boolean {
       'EAI_AGAIN',
       'ERR_NETWORK',
       'ERR_INTERNET_DISCONNECTED',
+      'UPLOAD_STALLED',
+      'E_UPLOAD_STALLED',
     ].includes(code)
   ) {
     return true;
@@ -106,6 +108,13 @@ export async function shouldQueueAfterError(error: any): Promise<boolean> {
 export function getSubmissionError(error: any): { title: string; message: string } {
   const status = getErrorStatus(error);
   const serverMessage = getServerErrorMessage(error);
+
+  if (['UPLOAD_STALLED', 'E_UPLOAD_STALLED'].includes(String(error?.code || ''))) {
+    return {
+      title: 'Upload Interrupted',
+      message: 'The upload stopped making progress. Your draft and photos are saved. Check the connection, then tap Resume upload. The same submission will be checked before it is completed.',
+    };
+  }
 
   if (status === 401 || status === 403) {
     return {

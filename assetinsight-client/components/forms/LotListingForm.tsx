@@ -106,7 +106,8 @@ const LOT_LISTING_VALUATION_METHODS: ValuationMethod[] = ["FML"];
 
 type Props = {
   onSuccess?: (message?: string) => void;
-  onAcceptedAndContinue?: (reportId: string | undefined) => void;
+  onAcceptedAndContinue?: (reportId: string | undefined, details?: LotContinuationDetails) => void;
+  continuationDetails?: Partial<LotContinuationDetails>;
   onCancel?: () => void;
   onDraftStatusChange?: (status: DraftStatus, label?: string) => void;
   auctioneer?: AuctioneerFormIntegration;
@@ -129,6 +130,8 @@ type DraftSnapshot = {
   clientSubmissionId: string | null;
   lots: MixedLot[];
 };
+
+export type LotContinuationDetails = Omit<DraftSnapshot, "clientSubmissionId" | "auctioneerWorkItemId" | "lots">;
 
 type SerializedDraftImage = {
   lotId: string;
@@ -285,6 +288,7 @@ function draftFailureGuidance(error: unknown): DraftIssue {
 export default function LotListingForm({
   onSuccess,
   onAcceptedAndContinue,
+  continuationDetails,
   onCancel: _onCancel,
   onDraftStatusChange,
   auctioneer,
@@ -317,13 +321,11 @@ export default function LotListingForm({
   const [mixedLots, setMixedLots] = useState<MixedLot[]>(() =>
     buildAuctioneerSeedLots(auctioneer)
   );
-  const [contractNo, setContractNo] = useState(
-    () => auctioneer?.contract.contractNo || ""
-  );
-  const [salesDate, setSalesDate] = useState(importedSalesDate);
-  const [location, setLocation] = useState(importedLocation);
-  const [latitude, setLatitude] = useState<number | null>(null);
-  const [longitude, setLongitude] = useState<number | null>(null);
+  const [contractNo, setContractNo] = useState(continuationDetails?.contractNo ?? (auctioneer?.contract.contractNo || ""));
+  const [salesDate, setSalesDate] = useState(continuationDetails?.salesDate ?? (importedSalesDate));
+  const [location, setLocation] = useState(continuationDetails?.location ?? (importedLocation));
+  const [latitude, setLatitude] = useState<number | null>(continuationDetails?.latitude ?? null);
+  const [longitude, setLongitude] = useState<number | null>(continuationDetails?.longitude ?? null);
   const [locationStatus, setLocationStatus] = useState(
     auctioneer ? "Imported from Auctioneer" : "Detecting current location..."
   );
@@ -333,10 +335,10 @@ export default function LotListingForm({
   const [locationAttributionUrl, setLocationAttributionUrl] = useState<
     string | null
   >(null);
-  const [language, setLanguage] = useState<"en" | "fr" | "es">("en");
-  const [currency, setCurrency] = useState("CAD");
-  const [bankPhotosEnabled, setBankPhotosEnabled] = useState(false);
-  const [watermarkImages, setWatermarkImages] = useState(false);
+  const [language, setLanguage] = useState<"en" | "fr" | "es">(continuationDetails?.language ?? "en");
+  const [currency, setCurrency] = useState(continuationDetails?.currency ?? ("CAD"));
+  const [bankPhotosEnabled, setBankPhotosEnabled] = useState(continuationDetails?.bankPhotosEnabled ?? (false));
+  const [watermarkImages, setWatermarkImages] = useState(continuationDetails?.watermarkImages ?? (false));
 
 
   const [openSections, setOpenSections] = useState({
@@ -628,14 +630,6 @@ export default function LotListingForm({
     },
     [userId]
   );
-
-  /*
-     MixedSection publishes its createLot here so Create Lot & Continue, which
-     sits in the action bar, adds a lot exactly the way the New lot button does
-     — including inheriting the Schedule A parent, which needs the active lot
-     index that section owns.
-  */
-  const addLotRef = useRef<(() => void) | null>(null);
 
   const flushDraft = useCallback(async (signal?: AbortSignal): Promise<boolean> => {
     if (!draftKey || !userId || autosaveBlockedRef.current || restoreBlockedRef.current) return false;
@@ -1056,6 +1050,7 @@ export default function LotListingForm({
       setRestoringDraft(false);
       return () => controller.abort();
     }
+    const applyMetadata = (resumeDraft: ReportDraftRecord) => {
     const formData = resumeDraft.formData as Record<string, unknown>;
     // Show saved fields immediately. Empty File arrays here are placeholders,
     // never editable/savable state until every saved original has downloaded.
@@ -1089,13 +1084,21 @@ export default function LotListingForm({
       lots: resumeDraft.storageMode === "smart_upload" ? [] : metadataLots,
     };
     applyRestoredDraft(serverSnapshot, resumeDraft.revision || 0, 0);
+    };
+    applyMetadata(resumeDraft);
 
     reportDraftStatus("partial", "Loading saved media…");
     void (async () => {
-      if (resumeDraft.storageMode === "smart_upload") {
+      const record = restoreAttempt ? await ReportDraftService.get(resumeDraft._id, controller.signal) : resumeDraft;
+      if (controller.signal.aborted) return;
+      if (record.user !== userId || record.type !== "lotListing" || record._id !== resumeDraft._id || record.clientDraftId !== resumeDraft.clientDraftId) {
+        throw new Error("Return to Drafts and open a draft belonging to the signed-in account.");
+      }
+      if (record !== resumeDraft) applyMetadata(record);
+      if (record.storageMode === "smart_upload") {
         setSmartUploadOpen(true);
       } else {
-        const lots = await ReportDraftService.restoreLots<MixedLot>(resumeDraft, {
+        const lots = await ReportDraftService.restoreLots<MixedLot>(record, {
           signal: controller.signal,
           onProgress: (progress) => {
             if (!controller.signal.aborted) setRestoreProgress(progress);
@@ -1117,7 +1120,8 @@ export default function LotListingForm({
             : "The saved draft could not be restored.";
         setDraftIssue({ tone: "error", title: "Draft restore failed", message: `${message} Your saved draft is unchanged. Retry loading before editing or submitting.` });
         reportDraftStatus("error", "Draft restore failed");
-        toast.error(message);
+        // Keep the error beside Retry. A separate toast can obscure the mobile
+        // controls and remain visible after a successful restoration.
       })
       .finally(() => { if (!controller.signal.aborted) setRestoringDraft(false); });
     return () => controller.abort();
@@ -1522,13 +1526,7 @@ export default function LotListingForm({
           mode: lot.mode,
           ...(lot.source && {
             source_key: lot.source.key,
-            /*
-               The Schedule A line this lot was split out of, present only on a
-               lot the appraiser added. Auctioneer named one line and receives
-               several lots for it; without the parent they arrive as extras it
-               cannot place, which is the mismatch needs_reconciliation catches.
-            */
-            ...(lot.source.parentKey && { source_parent_key: lot.source.parentKey }),
+            ...(lot.source.parentKey ? { source_parent_key: lot.source.parentKey } : {}),
             source_lot_id: lot.source.lotId,
             source_submission_id: lot.source.submissionId,
           }),
@@ -1621,12 +1619,16 @@ export default function LotListingForm({
         updateUploadProgress(1);
         const acceptedMessage =
           "Submission accepted — processing continues in My Reports.";
-        /*
-           The successor branch is gone. Continue no longer submits — it adds a
-           lot — so nothing asks this function to continue, and there is no
-           successor work item to open. Lots accumulate in one report and Close
-           sends them together.
-        */
+        const continuing = Boolean(continueWithNewLot && auctioneer && onAcceptedAndContinue);
+        if (continuing) {
+          // Open the successor at upload acceptance; cleanup remains scoped to
+          // the old draft and does not delay or authorize another upload.
+          dispatchReportCreated();
+          onAcceptedAndContinue?.(acceptedAuctioneerReportId(responseData), {
+            contractNo, salesDate, location, latitude, longitude, language, currency,
+            bankPhotosEnabled, watermarkImages,
+          });
+        }
         const cleanupError = await clearAcceptedDraft();
         forceNewSubmissionRef.current = false;
         supersededSubmissionIdRef.current = null;
@@ -1637,10 +1639,9 @@ export default function LotListingForm({
             "Report submitted, but its local draft could not be removed. You can discard the old local copy later."
           );
         }
-        // Unconditional now: every submission is a Close, and a Close always
-        // finishes. The guard existed only to stay silent while a successor
-        // form was being opened behind the acceptance.
-        onSuccess?.(acceptedMessage);
+        if (!continuing) {
+          onSuccess?.(acceptedMessage);
+        }
       } catch (submitError: any) {
         const isConflict =
           submitError?.response?.status === 409 &&
@@ -2186,7 +2187,6 @@ export default function LotListingForm({
                 allowVideo
                 analysisImageLimit={50}
                 sourceMappedLots={auctioneer?.kind === "scheduleA"}
-                addLotRef={addLotRef}
               />
             </div>
           </FormSection>
@@ -2258,25 +2258,10 @@ export default function LotListingForm({
             {submitting ? "Uploading..." : "Create Lot Listing"}
           </button>
         </span> : null}
-        {/*
-          Gated on the imported contract alone. It used to require
-          onAcceptedAndContinue too, because Continue's whole job was to hand a
-          successor report back through it. Continue now adds a lot to this
-          form and calls nothing, so tying the button to that callback would
-          hide it from every caller that does not supply one.
-        */}
-        {auctioneer ? (
+        {auctioneer && onAcceptedAndContinue ? (
           <AuctioneerContinueAction
             disabled={submitting || restoreBlocked || draftSaving}
-            onClick={() => {
-              /*
-                 Adds a lot and saves. It used to submit the report and open a
-                 successor form, which is why each lot became its own report.
-                 Nothing is sent here now — Create Lot & Close sends them all.
-              */
-              addLotRef.current?.();
-              void flushDraft();
-            }}
+            onClick={() => void onSubmit(undefined, true)}
           />
         ) : null}
         </FormActionBar>

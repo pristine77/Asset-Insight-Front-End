@@ -1,12 +1,61 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { readFileSync } from 'node:fs';
-import { parseYouTubeStatus, parseYouTubeAuthorization, parseYouTubeCallback, youtubeConnectBody, youtubeCompleteBody, youtubeDisconnectBody, youtubeEraseBody } from '../lib/youtube.ts';
+import { parseYouTubeStatus, parseYouTubeAuthorization, parseYouTubeCallback, youtubeConnectBody, youtubeCompleteBody, youtubeDisconnectBody, youtubeEraseBody, finishYouTubeConnection, youtubeConnectionFailure } from '../lib/youtube.ts';
 import { readPreviewMutationJson } from '../lib/previewResubmitRequest.ts';
 import { parseYouTubeVideoPage, youtubeVideoQuery, youtubeVideoRetryBody, youtubeVideoReviewBody } from '../lib/youtubeVideos.ts';
 
 const state = 'a'.repeat(64);
 const status = { configured: true, configurationIssue: null, connected: true, needsReconnect: false, revision: 1, channel: { id: 'UC' + 'a'.repeat(22), title: 'Example channel', url: 'https://malicious.example' }, connectedAt: '2026-09-28T12:00:00Z', privacyStatus: 'public', accessToken: 'never-browser' };
+const response = (body, code = 200) => new Response(JSON.stringify(body), { status: code });
+test('completion first refreshes the session through a read, then exchanges the code once', async () => {
+  const calls = [];
+  const result = await finishYouTubeConnection({ code: 'fixture-code', state }, async (url, init) => {
+    calls.push({ url, init });
+    return response(status);
+  });
+  assert.equal(result.connected, true);
+  assert.deepEqual(calls.map(c => c.url), ['/api/admin/youtube/status', '/api/admin/youtube/complete']);
+  assert.equal(calls[0].init.cache, 'no-store');
+  assert.equal(calls[0].init.body, undefined);
+  assert.equal(calls[1].init.method, 'POST');
+  assert.deepEqual(JSON.parse(calls[1].init.body), { code: 'fixture-code', state });
+  assert.equal('accessToken' in result, false);
+});
+test('failed or malformed authentication preflight never consumes the code', async () => {
+  for (const fail of [() => response({}, 401), () => response({}, 403), () => response({}), () => { throw new Error('secret transport detail'); }]) {
+    const calls = [];
+    await assert.rejects(finishYouTubeConnection({ code: 'fixture-code', state }, async url => { calls.push(url); return fail(); }), error => !error.message.includes('secret transport detail'));
+    assert.deepEqual(calls, ['/api/admin/youtube/status']);
+  }
+});
+test('leaving the callback during preflight prevents a delayed code exchange', async () => {
+  const controller = new AbortController();
+  const calls = [];
+  await assert.rejects(finishYouTubeConnection({ code: 'fixture-code', state }, async url => {
+    calls.push(url); controller.abort(); return response(status);
+  }, controller.signal), /interrupted/);
+  assert.deepEqual(calls, ['/api/admin/youtube/status']);
+});
+test('known connection errors retain their safe code and correction, not provider details', () => {
+  for (const code of ['YOUTUBE_STATE_INVALID', 'YOUTUBE_SCOPE_REQUIRED', 'YOUTUBE_CHANNEL_REQUIRED', 'YOUTUBE_CONNECTION_CHANGED', 'YOUTUBE_AUTHORIZATION_INCOMPLETE']) {
+    const issue = youtubeConnectionFailure({ code, message: 'secret-code-token', access_token: 'secret-token' }, 409);
+    assert.equal(issue.code, code);
+    assert.match(issue.message, new RegExp(code));
+    assert.doesNotMatch(JSON.stringify(issue), /secret/);
+  }
+  for (const value of [null, {}, { code: 'toString', message: 'secret' }, { code: 'YOUTUBE_UNKNOWN_SECRET', message: 'secret' }]) {
+    assert.equal(youtubeConnectionFailure(value, 502).code, undefined);
+    assert.doesNotMatch(youtubeConnectionFailure(value, 502).message, /secret/i);
+  }
+});
+test('failed, timed-out and invalid completion responses are never replayed or declared connected', async () => {
+  for (const fail of [() => response({code:'YOUTUBE_STATE_INVALID'},409), () => response({},401), () => response({ ...status, needsReconnect: true }), () => response({ ...status, connected:false, channel:null }), () => response({}), () => { throw new DOMException('fixture-token','TimeoutError'); }]) {
+    let count = 0;
+    await assert.rejects(finishYouTubeConnection({ code: 'fixture-code', state }, async () => ++count === 1 ? response(status) : fail()), error => !error.message.includes('fixture-token'));
+    assert.equal(count, 2);
+  }
+});
 test('status projects only safe fields and a canonical channel URL', () => {
   const result = parseYouTubeStatus(status);
   assert.equal(result.channel.url, `https://www.youtube.com/channel/${status.channel.id}`);

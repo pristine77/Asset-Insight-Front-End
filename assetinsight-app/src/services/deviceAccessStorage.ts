@@ -109,7 +109,10 @@ export async function getOrCreateDeviceKey() {
   if (!deviceKeyCreation) {
     deviceKeyCreation = (async () => {
       const existing = await SecureStore.getItemAsync(DEVICE_KEY);
-      if (existing && existing.length >= 32) return existing;
+      // The server trims the installation key before validating it. Preserve
+      // every usable identity exactly, but do not send a corrupt padded value
+      // whose apparent length passes here and is rejected during authentication.
+      if (existing && existing.trim().length >= 32) return existing;
 
       const bytes = await Crypto.getRandomBytesAsync(32);
       const key = Array.from(bytes)

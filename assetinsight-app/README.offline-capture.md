@@ -146,6 +146,45 @@ this does not delete device files or report records. See
 
 ## Verification and rollout
 
+### Mobile draft and upload recovery (2026-09-30)
+
+Cloud Save Draft/Create Preview supports both draft target modes. When the API
+does not supply direct PUT URLs, the app uses the existing authenticated media
+endpoint in sequential batches of at most ten URI-backed files. Original files
+are not copied into JavaScript blobs. Direct PUT confirmations remain separate
+from multipart commits; final saved media must be verified before preview starts.
+An uncertain multipart response reads the same draft receipt rather than blindly
+replaying the batch. Local drafts, media IDs, lot grouping and order are retained.
+
+Direct report uploads now require a readable positive file size before reserving
+a session and freeze nested request details during upload-target refreshes. A
+structured `SUBMISSION_MANIFEST_CHANGED` refusal on an ordinary Asset/Lot draft
+offers **Keep Draft** or **Upload updated version**. Only the latter persists a
+new submission ID together with `supersedesClientSubmissionId` on the same local
+draft before transport. Interrupted retries and reopened drafts retain that pair.
+It does not set force-new or automatically submit on reconnect. Account changes,
+closed forms and failed local saves cannot start a delayed replacement.
+
+An existing report receipt blocks replacement. Auctioneer 2.0 Incoming work keeps
+its fixed assignment/submission identity and requires same-upload support recovery;
+this change does not rotate imported work IDs or bypass assignment checks. Backend
+`ACTIVE_REPORT_EXISTS` during replacement does not offer Create Separate.
+
+Deploy the backend supersession safeguard before releasing this mobile update:
+even a failed upload session is immutable once a report, placeholder/outbox,
+finalization claim or durable job proves handoff. No migration, new dependency,
+automatic historical retry or production repair is part of this change. A new
+mobile release is needed for installed clients; server deployment alone does not
+replace their JavaScript. Real-device uploads remain a release smoke-test gate.
+
+Verification: 76 native Jest suites / 666 tests, TypeScript and Android/iOS
+production-mode Hermes exports pass with an isolated loopback API. Regressions
+cover the original missing-URL error, 13 lots / 185 images, lost responses,
+replacement identity save/reopen, account change/unmount, failed local saves and
+fixed Incoming identities. Scoped ESLint has no errors (existing style/import
+warnings remain). No connected device or production request was used; physical
+Android/iOS transport and customer-specific recovery are not claimed verified.
+
 ### Video references (2026-09-24)
 
 Asset and Lot Listing camera clips remain separate from main/report-only photo counts.

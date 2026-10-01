@@ -1,5 +1,116 @@
 # Android local development
 
+## Stalled Asset/Lot uploads — 2026-09-30 (local)
+
+The reported "Uploading Images" hang exposed unbounded waits in native socket
+writes and filesystem/fetch callbacks. Native and JS media transfers now stop
+after 120 seconds without byte progress, not after 120 seconds of total upload
+time. Repeated identical progress events do not reset the deadline. Local size
+preparation has a 30-second response bound; API requests retain their own existing
+timeouts. Pause settles the app request even if a transport's cancellation or
+completion callback never answers. Late progress/results cannot revive that task.
+
+The native uploader preserves four workers, exact-length streaming and original
+URIs. A separate watchdog resolves stalled/cancelled promises once, with bounded
+off-thread stream cleanup. One failed report cancels its sibling transfers, not
+unrelated reports. A stalled attempt stops before working through all queued
+photos; the local draft, submission ID and upload session remain for explicit
+Resume. Resumed sessions verify stored objects before PUT, then use the original
+completion receipt. Reconnection does not start a report automatically.
+
+Both forms show blocking, accessible upload progress with Pause/Pausing/Resume
+states; Asset progress remains available from Details or Images. A confirmed
+acceptance is never labelled paused. Snapshot editing stays blocked during the
+attempt, and late progress is fenced by owner/form identity. No report, photo or
+draft is deleted by these changes. Existing count and watermark rules remain.
+
+Isolated tests cover 160 photos in two lots, 5,000-file bounded queues, no-progress
+timeouts, slow progress, ignored cancellation, late callbacks, same-session resume,
+and missing media metadata. Android API35 local HTTPS/MediaStore instrumentation
+exercises real stalled writes/responses, queued cancellation, four-worker reuse,
+exact bytes and continuing slow response progress. These checks are not a diagnosis
+from the affected customer's device logs or physical-network endurance evidence.
+Final gate: 79 suites / 778 tests, TypeScript, Android/iOS Hermes exports, native
+debug/test APK builds and isolated API35 upload instrumentation pass. Scoped ESLint
+has zero errors; repository style warnings remain. Frozen JS bundle outputs are
+outside the repository; the emulator used no customer or production endpoints.
+No production access, push or deployment is included. A new native mobile binary
+is required; the existing upload-session APIs are reused without backend changes.
+
+## Camera Done handoff — 2026-09-30 (local)
+
+Native camera launch and Done now exchange UUID receipts through Android activity
+Intents; the full lot/photo/activity JSON is written atomically to app-private
+metadata files. Previously the whole manifest travelled through Binder, whose
+shared size limit can strand the JS camera promise after a large capture. This is
+a reproduced size hazard matching the reported stuck "Opening camera" symptom,
+not a forensic diagnosis of that customer's unavailable device logs.
+
+No photo/video original is copied or deleted by this transport. Exact transport
+files are cleaned after reading, while the owner/draft-bound capture journal stays
+available until the local draft transaction succeeds. Launch, input and result
+failures settle explicitly. A failed Done metadata write keeps the camera open
+for retry. A synchronized immutable launch claim prevents a returning camera from
+clearing a later launch's promise or metadata. An uncertain return never opens a
+second backup camera over the saved
+session. The React wrapper distinguishes saving from opening, fences late results
+after account/draft changes, and refuses incomplete media instead of clipping or
+silently dropping it. Existing 200-photo-per-lot and 5,000-photo limits remain.
+
+Verification: 78 suites / 753 tests, TypeScript, both Android/iOS Hermes exports
+and scoped ESLint (zero errors; two pre-existing warnings) pass. Android debug and
+instrumentation APKs build. Isolated network-disabled API35 metadata tests cover
+19 lots / 254 photos and 25 lots / 5,000 photos, exact ordered round trips, activity
+recreation, missing/mismatched receipt rejection, storage obstruction, and durable
+journal preservation. Eight-thread launch contention and interleaved old-result,
+new-launch and old-failure checks pass on that emulator. New launch/return Intents
+are under 512 bytes; the old
+5,000-photo result exceeds 1 MiB. These are metadata fixtures, not physical camera
+capture/endurance or recovery of the customer's actual draft.
+
+A new native mobile binary is required; OTA JS or server deployment alone cannot
+replace the Android handoff code. No production access, customer-data repair,
+push or deployment is included. Existing originals and drafts must be preserved.
+Process death before transport cleanup can retain small private metadata files;
+they are not a second original and do not replace the durable recovery journal.
+
+## Authentication recovery safeguards — 2026-09-30 (local)
+
+Sign-in, verification and both reset paths send the durable installation context.
+Usable existing secure-store keys are never rotated; corrupt whitespace or
+padded-short keys are replaced before transport. Creation remains single-flight
+and awaits secure persistence. Storage failure must not send a partial request.
+
+Public signup/login/forgot/resend/verify/reset requests never refresh/replay using
+an old account token. Reset/verification handoff to device approval must not call
+`/user/me` without a session: only authenticated receipts refresh the profile.
+Malformed token/owner/challenge responses fail before secure-session mutation.
+The forms retain error inputs, fence duplicate actions, and let unverified users
+return to verification from sign-in. Code inputs require six digits; passwords
+are preserved exactly. A reset link is not labelled valid before server checking.
+
+Deploy backend preflight safeguards first, then web and an updated mobile binary.
+Existing device approval, account blocking and IP restrictions remain enforced.
+No automatic retry, live email, customer password change, push or deployment is
+part of this local fix. The reported screenshot demonstrates rejected device
+context, but does not identify the installed app version or secure-storage cause.
+Physical Android/iOS secure storage and real email delivery need release QA;
+mocked screen/service tests and Hermes exports are not physical-device evidence.
+Verification: 78 suites / 728 tests, TypeScript and Android/iOS Hermes exports
+passed. Scoped lint has zero errors (six existing warnings in API/context files).
+An unchanged large-preview test timed out during concurrent bundle builds; the
+complete suite passed after builds finished, without changing its timeout.
+
+## Pristine UI synchronization — 2026-09-30
+
+Ported the standalone mobile repository's report labels (2b8abf7) and service
+price/checkmark presentation (98c656f). Download filenames and Salvage download
+handling are unchanged. The newer owner-scoped Auctioneer 2.0 screens, assignment
+checks, draft isolation and continuation replace the older combined-task adapter;
+do not restore that obsolete adapter over the current workflow. No accounting,
+watermark, upload or report lifecycle behavior changes. A new mobile binary is
+required for installed devices; a web deployment does not update the app.
+
 This is an Expo SDK 54 / React Native 0.81 app with a checked-in, manually maintained `android/` project, custom camera/image native code, and a development client. Use the existing native project; Expo Go cannot validate its native modules.
 
 Do not run `expo prebuild --clean`, delete `android/`, or regenerate the native project to solve a dependency/build error. Review native changes explicitly. `app.config.js` extends the normalized `app.json` configuration and omits `android.googleServicesFile` only when the configured file is missing; it does not rewrite native files. Missing Firebase configuration means push notification testing is not complete.

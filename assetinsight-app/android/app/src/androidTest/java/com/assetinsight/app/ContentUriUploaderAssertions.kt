@@ -35,12 +35,13 @@ object ContentUriUploaderAssertions {
 
     private class Outcome : Promise {
         val settled = CountDownLatch(1)
+        val settlementCount = AtomicInteger()
         @Volatile var value: Any? = null
         @Volatile var code: String? = null
         @Volatile var message: String? = null
-        override fun resolve(value: Any?) { this.value = value; settled.countDown() }
+        override fun resolve(value: Any?) { settlementCount.incrementAndGet(); this.value = value; settled.countDown() }
         override fun reject(code: String, message: String?, cause: Throwable?) {
-            this.code = code; this.message = message; settled.countDown()
+            settlementCount.incrementAndGet(); this.code = code; this.message = message; settled.countDown()
         }
         fun waitFor() { check(settled.await(15, TimeUnit.SECONDS)) { "Native upload did not settle" } }
         fun success() { waitFor(); check(code == null) { "Unexpected native error: " + code + ": " + message }; check((value as Map<*, *>)["status"] == 200) }
@@ -52,7 +53,7 @@ object ContentUriUploaderAssertions {
         @Volatile var digest: ByteArray? = null
     }
 
-    private class Loopback(serverContext: SSLContext, private val hold: Boolean = false, private val slow: Boolean = false) : AutoCloseable {
+    private class Loopback(serverContext: SSLContext, private val hold: Boolean = false, private val slow: Boolean = false, private val trickleResponse: Boolean = false) : AutoCloseable {
         private val server = serverContext.serverSocketFactory.createServerSocket(0, 8, InetAddress.getByName("127.0.0.1")) as SSLServerSocket
         private val workers = Executors.newCachedThreadPool()
         private val sockets = Collections.newSetFromMap(ConcurrentHashMap<Socket, Boolean>())
@@ -114,8 +115,13 @@ object ContentUriUploaderAssertions {
                 }
                 receipt.digest = digest.digest()
                 if (receipt.received == receipt.length) {
-                    socket.getOutputStream().write("HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\nX-Fixture: native-loopback\r\n\r\nOK".toByteArray())
-                    socket.getOutputStream().flush()
+                    val output = socket.getOutputStream()
+                    output.write("HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\nX-Fixture: native-loopback\r\n\r\n".toByteArray())
+                    output.flush()
+                    for (byte in "OK".toByteArray()) {
+                        if (trickleResponse) Thread.sleep(500)
+                        output.write(byte.toInt()); output.flush()
+                    }
                 }
             } catch (_: Exception) {
                 // Disconnects are expected in the explicit cancellation cases.
@@ -208,10 +214,107 @@ object ContentUriUploaderAssertions {
                     uploader.upload("bounded-0", uri.toString(), server.url + "/duplicate", emptyMap(), bytes.size.toLong(), duplicate)
                     duplicate.waitFor(); check(duplicate.code == "E_UPLOAD_ACTIVE")
                     uploader.cancel("bounded-5")
+                    // The cancelled task is still queued behind four held workers.
+                    // Cancellation must settle without waiting for any worker.
+                    check(results.last().settled.await(1, TimeUnit.SECONDS)) { "Queued cancellation waited for an upload worker" }
                     server.release.countDown()
                     results.take(5).forEach { it.success() }; results.last().cancelled()
                     check(server.receipts.size == 5 && !server.receipts.containsKey("/bounded-5"))
                     check(server.maximum.get() <= 4)
+                } finally { uploader.close() }
+            }
+            Loopback(serverTls, hold = true).use { server ->
+                val uploader = ContentUriUploader(context) { _, _, _ -> }
+                val callers = Executors.newFixedThreadPool(8)
+                val start = CountDownLatch(1)
+                val concurrent = List(12) { Outcome() }
+                try {
+                    concurrent.forEachIndexed { index, outcome ->
+                        callers.execute {
+                            start.await()
+                            uploader.upload("close-race-" + index, uri.toString(), server.url + "/close-race-" + index, emptyMap(), bytes.size.toLong(), outcome)
+                        }
+                    }
+                    callers.execute { start.await(); uploader.close() }
+                    start.countDown()
+                    callers.shutdown()
+                    check(callers.awaitTermination(10, TimeUnit.SECONDS)) { "Concurrent close/submit failed to return" }
+                    uploader.close()
+                    concurrent.forEach { it.cancelled(); check(it.settlementCount.get() == 1) }
+                    server.release.countDown()
+                } finally { uploader.close(); callers.shutdownNow() }
+            }
+            Loopback(serverTls, hold = true).use { server ->
+                val sentBytes = ConcurrentHashMap<String, Long>()
+                val uploader = ContentUriUploader(context, idleTimeoutMs = 2_000) { id, sent, _ -> sentBytes[id] = sent }
+                try {
+                    val stalled = List(4) { Outcome() }
+                    stalled.forEachIndexed { index, outcome ->
+                        uploader.upload("stalled-" + index, bigUri.toString(), server.url + "/stalled-" + index, emptyMap(), bigBytes.size.toLong(), outcome)
+                    }
+                    check(server.firstFour.await(10, TimeUnit.SECONDS)) { "Stalled-write fixture did not admit four workers" }
+                    stalled.forEach { outcome ->
+                        outcome.waitFor()
+                        check(outcome.code == "E_UPLOAD_STALLED") { "No-progress transfer did not fail with its recoverable stall code: " + outcome.code }
+                    }
+                    check(server.receipts.values.any { it.received < it.length }) { "Fixture did not exercise an unfinished upload" }
+                    check(sentBytes.values.any { it in 1 until bigBytes.size.toLong() }) { "Fixture did not block a partially written request body" }
+                    server.release.countDown()
+                    // The four timed-out workers must release their sockets/threads,
+                    // not permanently starve a subsequent explicit attempt.
+                    Loopback(serverTls, hold = true).use { resumedServer ->
+                        val resumed = List(4) { Outcome() }
+                        resumed.forEachIndexed { index, outcome ->
+                            uploader.upload("after-stall-" + index, uri.toString(), resumedServer.url + "/after-stall-" + index, emptyMap(), bytes.size.toLong(), outcome)
+                        }
+                        check(resumedServer.firstFour.await(10, TimeUnit.SECONDS)) { "Timed-out workers starved the next four transfers" }
+                        resumedServer.release.countDown()
+                        resumed.forEach { it.success() }
+                    }
+                    stalled.forEach { check(it.settlementCount.get() == 1) { "Late network result settled a stalled upload twice" } }
+                } finally { uploader.close() }
+            }
+            Loopback(serverTls, hold = true).use { server ->
+                val uploader = ContentUriUploader(context) { _, _, _ -> }
+                val closing = List(6) { Outcome() }
+                try {
+                    closing.forEachIndexed { index, outcome ->
+                        uploader.upload("closing-" + index, uri.toString(), server.url + "/closing-" + index, emptyMap(), bytes.size.toLong(), outcome)
+                    }
+                    check(server.firstFour.await(10, TimeUnit.SECONDS))
+                    uploader.close()
+                    closing.forEach { it.cancelled() }
+                    val afterClose = Outcome()
+                    uploader.upload("after-close", uri.toString(), server.url + "/after-close", emptyMap(), bytes.size.toLong(), afterClose)
+                    afterClose.cancelled()
+                    server.release.countDown()
+                    Thread.sleep(300)
+                    closing.forEach { check(it.settlementCount.get() == 1) }
+                } finally { uploader.close() }
+            }
+            Loopback(serverTls, trickleResponse = true).use { server ->
+                val uploader = ContentUriUploader(context, idleTimeoutMs = 750) { _, _, _ -> }
+                try {
+                    val progressing = Outcome()
+                    val started = android.os.SystemClock.elapsedRealtime()
+                    uploader.upload("progressing", uri.toString(), server.url + "/progressing", emptyMap(), bytes.size.toLong(), progressing)
+                    progressing.success()
+                    check(android.os.SystemClock.elapsedRealtime() - started > 750) { "Fixture did not exceed the idle deadline with continuing progress" }
+                    check(progressing.settlementCount.get() == 1)
+                } finally { uploader.close() }
+            }
+            Loopback(serverTls, slow = true).use { server ->
+                val uploader = ContentUriUploader(context, idleTimeoutMs = 750) { _, _, _ -> }
+                try {
+                    // Socket buffering means a small file can be sent completely
+                    // before this deliberately slow server reads it. Withhold its
+                    // response to exercise the response-wait deadline as well.
+                    val noResponse = Outcome()
+                    uploader.upload("response-stall", uri.toString(), server.url + "/response-stall", emptyMap(), bytes.size.toLong(), noResponse)
+                    noResponse.waitFor()
+                    check(noResponse.code == "E_UPLOAD_STALLED") { "Waiting for a server receipt was unbounded" }
+                    Thread.sleep(2_500)
+                    check(noResponse.settlementCount.get() == 1) { "Late receipt overrode the stall outcome" }
                 } finally { uploader.close() }
             }
         } finally {

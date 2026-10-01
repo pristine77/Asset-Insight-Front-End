@@ -15,6 +15,10 @@ import {
   type ReportFormKind,
 } from "@/services/reportFormNavigation";
 import styles from "./ReportFormPage.module.css";
+import type { AssetContinuationDetails } from "./AssetForm";
+import type { LotContinuationDetails } from "./LotListingForm";
+
+type ContinuationDetails = Partial<AssetContinuationDetails & LotContinuationDetails>;
 
 const AssetForm = dynamic(() => import("@/components/forms/AssetForm"), {
   ssr: false,
@@ -33,6 +37,7 @@ type Props = {
 };
 
 type AcceptedContinuation = {
+  details?: ContinuationDetails;
   previous: AuctioneerWorkItemSetup;
   reportId?: string;
   pending: boolean;
@@ -53,6 +58,7 @@ export default function ReportFormPage({ kind }: Props) {
   const [draftSetupRetry, setDraftSetupRetry] = useState(0);
   const [continuation, setContinuation] = useState<AcceptedContinuation | null>(null);
   const [freshLotOpened, setFreshLotOpened] = useState(false);
+  const [continuationDetails, setContinuationDetails] = useState<ContinuationDetails>();
   const continuationHeadingRef = useRef<HTMLHeadingElement>(null);
   const workspaceHeadingRef = useRef<HTMLHeadingElement>(null);
   const [draftStatus, setDraftStatus] = useState<{
@@ -173,6 +179,7 @@ export default function ReportFormPage({ kind }: Props) {
       // Drop all prior draft/resume/saved-input state. A different key remounts
       // the form, including its immutable draft scope and submission refs.
       setHandoff({ version: 1, kind, returnTo, auctioneer: next });
+      setContinuationDetails(accepted.details);
       setFreshLotOpened(true);
       setContinuation(null);
     } catch (error) {
@@ -192,9 +199,9 @@ export default function ReportFormPage({ kind }: Props) {
     }
   };
 
-  const continueAfterAccepted = (reportId: string | undefined) => {
+  const continueAfterAccepted = (reportId: string | undefined, details?: ContinuationDetails) => {
     if (!handoff?.auctioneer) return;
-    void openNextLot({ previous: handoff.auctioneer, reportId, pending: true });
+    void openNextLot({ previous: handoff.auctioneer, reportId, details, pending: true });
   };
 
   if (handoff === undefined) {
@@ -281,6 +288,7 @@ export default function ReportFormPage({ kind }: Props) {
           </div>
         ) : kind === "asset" ? (
           <AssetForm
+            continuationDetails={continuationDetails}
             key={handoff?.resumeDraft?.clientDraftId || handoff?.auctioneer?.workItemId || "asset"}
             onSuccess={complete}
             onAcceptedAndContinue={handoff?.auctioneer ? continueAfterAccepted : undefined}
@@ -300,6 +308,7 @@ export default function ReportFormPage({ kind }: Props) {
           />
         ) : (
           <LotListingForm
+            continuationDetails={continuationDetails}
             key={handoff?.resumeDraft?.clientDraftId || handoff?.auctioneer?.workItemId || "lot-listing"}
             onSuccess={complete}
             onAcceptedAndContinue={handoff?.auctioneer ? continueAfterAccepted : undefined}

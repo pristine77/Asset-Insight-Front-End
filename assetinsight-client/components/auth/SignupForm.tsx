@@ -4,7 +4,7 @@ import { useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { ArrowLeft, ArrowRight, Eye, EyeOff } from "lucide-react";
-import { AuthService } from "@/services/auth";
+import { AuthService, authErrorMessage } from "@/services/auth";
 import AuthLightShell, {
   AUTH_INPUT_CLASS,
   AUTH_LABEL_CLASS,
@@ -67,7 +67,7 @@ export default function SignupForm() {
         router.replace(`/verify-email?email=${encodeURIComponent(email)}`);
       }, 800);
     } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : "Failed to sign up");
+      setError(authErrorMessage(err, "Unable to confirm account creation. Check your email for a verification code before trying again."));
     } finally {
       setLoading(false);
     }

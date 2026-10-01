@@ -446,7 +446,8 @@ function restoredFileName(item: ReportDraftMediaDescriptor) {
 async function downloadDraftFile(
   draftId: string,
   item: ReportDraftMediaDescriptor,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  onFailure?: () => void,
 ) {
   const contentPath =
     item.contentPath ||
@@ -462,8 +463,33 @@ async function downloadDraftFile(
     responseType: "blob",
     timeout: 10 * 60 * 1000,
     signal,
+  }).catch(async (error: unknown) => {
+    onFailure?.();
+    signal?.throwIfAborted();
+    const failure = error as { response?: { status?: number; data?: unknown } };
+    if (!failure.response) throw error;
+    let data = failure.response.data;
+    if (data instanceof Blob && data.size < 16_384) {
+      try { data = JSON.parse(await data.text()); } catch { data = undefined; }
+    }
+    const code = (data as { code?: string } | undefined)?.code;
+    const messages: Record<string, string> = {
+      DRAFT_NOT_FOUND: "This draft is no longer available to this account. Return to Drafts and refresh the list.",
+      DRAFT_MEDIA_CHANGED: "The saved photo list changed. Retry loading the latest draft.",
+      DRAFT_MEDIA_UPLOAD_INCOMPLETE: "The original was not uploaded completely. Keep the original on the device used to save this draft and contact support.",
+      DRAFT_MEDIA_SIZE_MISMATCH: "The saved original is incomplete or could not be verified. Keep the original and contact support.",
+      DRAFT_MEDIA_MISSING: "The original is missing from storage. Keep the original on the device used to save this draft and contact support.",
+      DRAFT_MEDIA_UNAVAILABLE: "Storage is temporarily unavailable. Retry loading the draft.",
+    };
+    throw new Error((code && messages[code]) || (failure.response.status === 404
+      ? "The saved original or draft could not be found. Retry loading the latest draft; if this persists, keep the original and contact support."
+      : "The original could not be downloaded. Check your connection and retry loading the draft."));
   });
   const blob = response.data;
+  if (!blob.size || (item.size > 0 && blob.size !== item.size)) {
+    onFailure?.();
+    throw new Error("The downloaded original is incomplete. Retry loading the draft; your saved data has not been changed.");
+  }
   const file = new File([blob], restoredFileName(item), {
     type: item.mimeType || blob.type || "application/octet-stream",
     lastModified: item.lastModified || Date.now(),
@@ -812,6 +838,14 @@ export const ReportDraftService = {
     const lotById = new Map(
       lots.map((lot, index) => [lotIdFor(lot, index), lot])
     );
+    if (lotById.size !== lots.length) throw new Error("The saved draft contains duplicate lot identifiers. Contact support; no photos were moved or removed.");
+    const mediaIds = new Set<string>();
+    for (const item of record.media || []) {
+      if (!item.clientFileId || mediaIds.has(item.clientFileId) || !lotById.has(String(item.lotId || "")) || !["main", "extra", "video"].includes(item.slot)) {
+        throw new Error("The saved draft photo mapping is incomplete or inconsistent. Contact support; no photos were moved or removed.");
+      }
+      mediaIds.add(item.clientFileId);
+    }
     const lotRank = new Map(
       lots.map((lot, index) => [lotIdFor(lot, index), index])
     );
@@ -829,12 +863,20 @@ export const ReportDraftService = {
       );
     });
     const restored = new Map<string, File>();
+    let failureObserved = false;
     options.onProgress?.({ completed: 0, total: media.length });
     await mapWithConcurrency(
       media,
       async (item) => {
-        const file = await downloadDraftFile(draftId, item, options.signal);
+        if (failureObserved) return;
+        const file = await downloadDraftFile(draftId, item, options.signal, () => { failureObserved = true; }).catch((error: unknown) => {
+          options.signal?.throwIfAborted();
+          const lot = lotById.get(String(item.lotId)) as { lotNumber?: string; lot_number?: string };
+          const lotLabel = lot.lotNumber || lot.lot_number || String((lotRank.get(String(item.lotId)) ?? 0) + 1);
+          throw new Error(`Lot ${lotLabel}, ${item.slot === "extra" ? "report-only photo" : item.slot === "video" ? "video" : "photo"} ${item.index + 1} (${restoredFileName(item)}): ${error instanceof Error ? error.message : "The original could not be restored."}`);
+        });
         options.signal?.throwIfAborted();
+        if (failureObserved) return;
         restored.set(item.clientFileId, file);
         options.onProgress?.({ completed: restored.size, total: media.length });
       },

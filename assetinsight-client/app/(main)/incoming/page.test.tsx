@@ -103,6 +103,8 @@ function setupFor(
       id: item.contractId,
       contractNo: item.contractNo,
       customerName: item.customerName,
+      consignorName: item.consignorName,
+      salespersonName: item.salespersonName,
       eventId: item.eventId,
       eventTitle: item.eventTitle,
       eventDate: item.eventDate,
@@ -342,6 +344,51 @@ describe("Incoming", () => {
     ).toBeVisible();
     expect(screen.getAllByText("ProposalInAssetInsight")).toHaveLength(2);
     expect(mocks.getIncoming).toHaveBeenCalledWith();
+  });
+
+  it("shows customer, consignor and salesperson separately in the queue and selected contract", async () => {
+    mocks.getIncoming.mockResolvedValue([{
+      ...claimedItem,
+      consignorName: "Northfield Consignor",
+      salespersonName: "Sam Sales",
+    }]);
+    renderIncoming();
+
+    const table = await screen.findByRole("table");
+    const roles = [
+      ["Customer", "Northfield Plant Ltd"],
+      ["Consignor", "Northfield Consignor"],
+      ["Salesperson", "Sam Sales"],
+    ];
+    for (const [role, name] of roles) {
+      expect(within(table).getByRole("columnheader", { name: role })).toBeVisible();
+      expect(within(table).getByRole("cell", { name })).toHaveAttribute("data-label", role);
+    }
+
+    const panel = await selectContract("CV-200");
+    for (const [role, name] of roles) {
+      const label = within(panel).getAllByRole("term").find((term) => term.textContent === role);
+      expect(label?.nextElementSibling).toHaveTextContent(name);
+    }
+  });
+
+  it("shows unavailable contact roles without borrowing the customer or claimant name", async () => {
+    mocks.getIncoming.mockResolvedValue([claimedItem]);
+    renderIncoming();
+
+    const table = await screen.findByRole("table");
+    for (const role of ["Consignor", "Salesperson"]) {
+      expect(table.querySelector(`td[data-label="${role}"]`)).toHaveTextContent(/^Not supplied$/);
+    }
+    expect(within(table).getByRole("cell", { name: "Northfield Plant Ltd" })).toHaveAttribute("data-label", "Customer");
+
+    const panel = await selectContract("CV-200");
+    for (const role of ["Consignor", "Salesperson"]) {
+      const label = within(panel).getAllByRole("term").find((term) => term.textContent === role);
+      expect(label?.nextElementSibling).toHaveTextContent(/^Not supplied$/);
+    }
+    const customer = within(panel).getAllByRole("term").find((term) => term.textContent === "Customer");
+    expect(customer?.nextElementSibling).toHaveTextContent("Northfield Plant Ltd");
   });
 
   it("drops the previous user's rows while the next user's queue loads", async () => {

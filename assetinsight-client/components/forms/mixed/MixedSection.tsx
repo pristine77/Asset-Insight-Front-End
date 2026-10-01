@@ -93,16 +93,6 @@ type Props = {
    * through its own source.locked, not through this.
    */
   sourceMappedLots?: boolean;
-  /**
-   * Receives this section's "add a lot" action.
-   *
-   * Create Lot & Continue lives in the form's action bar but must add a lot
-   * exactly the way the New lot button does — including inheriting the Schedule
-   * A parent, which depends on the active lot index this section owns. Handing
-   * the function over keeps one implementation; duplicating it in the form
-   * would leave two that drift.
-   */
-  addLotRef?: { current: (() => void) | null };
 };
 
 type RemovedMedia = {
@@ -125,7 +115,6 @@ export default function MixedSection({
   allowVideo = true,
   analysisImageLimit,
   sourceMappedLots = false,
-  addLotRef,
 }: Props) {
   const [lots, setLots] = useState<MixedLot[]>(value || []);
   const lotsRef = useRef<MixedLot[]>(value || []);
@@ -380,31 +369,25 @@ export default function MixedSection({
     */
     const parent = sourceMappedLots ? lotsRef.current[activeIdx]?.source : undefined;
     const parentKey = parent?.parentKey || parent?.key;
+    if (sourceMappedLots && !parentKey) return;
     const source: MixedLot["source"] | undefined = parentKey
       ? {
           key: `${parentKey}:split:${id}`,
           parentKey,
           lotId: parent?.lotId,
           submissionId: parent?.submissionId,
-          lotNumber: parent?.lotNumber,
           label: parent?.label ? `${parent.label} — added lot` : "Added lot",
           locked: false,
         }
       : undefined;
     const next: MixedLot[] = [
       ...lotsRef.current,
-      { id, source, files: [], extraFiles: [], videoFiles: [], coverIndex: 0 },
+      { id, source, ...(sourceMappedLots ? { mode: "single_lot" as const } : {}), files: [], extraFiles: [], videoFiles: [], coverIndex: 0 },
     ];
     commitLots(next);
     setActiveIdx(next.length - 1);
   }
 
-  /*
-     Re-published on every render because createLot closes over activeIdx and
-     lotsRef: a handle captured once would keep adding beneath whichever lot was
-     active when the form first mounted.
-  */
-  if (addLotRef) addLotRef.current = createLot;
 
   function removeLot(lotId: string) {
     const idx = lotsRef.current.findIndex((lot) => lot.id === lotId);
@@ -1967,7 +1950,7 @@ export default function MixedSection({
                     {MODE_OPTIONS.map((option) => {
                       const checked = activeLot.mode === option.value;
                       const disabled = Boolean(
-                        activeLot.source?.locked ||
+                        sourceMappedLots ||
                           (activeLot.mode &&
                             !checked &&
                             activeLot.files.length > 0)

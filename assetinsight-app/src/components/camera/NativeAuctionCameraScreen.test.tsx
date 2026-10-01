@@ -33,6 +33,7 @@ function props(lockedStructure?: boolean) {
 
 beforeEach(() => {
   jest.clearAllMocks();
+  jest.mocked(OfflineCaptureStore.stageCameraActivity).mockResolvedValue(undefined);
   Object.defineProperty(Platform, 'OS', { value: 'android', configurable: true });
   jest.mocked(loadNativeAuctionCamera).mockResolvedValue({ openAuctionCamera });
   jest.mocked(openAuctionCamera).mockResolvedValue(JSON.stringify([{ ...lot, files: [photo] }]));
@@ -226,4 +227,183 @@ it.each(['lock', 'hide', 'unmount'])('does not open a late-resolving native load
   expect(openAuctionCamera).not.toHaveBeenCalled();
   expect(input.setLots).not.toHaveBeenCalled();
   expect(input.onClose).not.toHaveBeenCalled();
+});
+
+it.each(['hide', 'unmount', 'owner', 'draft', 'lock'])('does not acknowledge or close a stale camera handoff after %s during its draft save', async (change) => {
+  const acknowledgeCapture = jest.fn().mockResolvedValue(true);
+  const context = { ownerId: 'owner', draftId: 'draft', sessionId: 'session' };
+  const input = { ...props(), captureContext: context };
+  let finishSave!: () => void;
+  input.onAutoSave.mockReturnValue(new Promise<void>((resolve) => { finishSave = resolve; }));
+  jest.mocked(loadNativeAuctionCamera).mockResolvedValue({ openAuctionCamera, acknowledgeCapture });
+  openAuctionCamera.mockResolvedValueOnce(JSON.stringify({ ...context, revision: 2, lots: [{ ...lot, files: [photo] }] }));
+  // A newly selected account/draft must never inherit the previous result.
+  openAuctionCamera.mockImplementation(() => new Promise<string>(() => {}));
+  const view = await render(<NativeAuctionCameraScreen {...input} />);
+  await waitFor(() => expect(input.onAutoSave).toHaveBeenCalledTimes(1));
+  expect(view.getByText('Saving camera media...')).toBeTruthy();
+  const nextClose = jest.fn();
+  const nextSave = jest.fn();
+  if (change === 'unmount') await view.unmount();
+  else await view.rerender(<NativeAuctionCameraScreen {...input}
+    visible={change !== 'hide'}
+    lockedStructure={change === 'lock'}
+    captureContext={{ ...context,
+      ownerId: change === 'owner' ? 'new-owner' : context.ownerId,
+      draftId: change === 'draft' ? 'new-draft' : context.draftId,
+    }}
+    onClose={nextClose} onAutoSave={nextSave} />);
+  await act(async () => { finishSave(); });
+  expect(acknowledgeCapture).not.toHaveBeenCalled();
+  expect(input.onClose).not.toHaveBeenCalled();
+  expect(nextClose).not.toHaveBeenCalled();
+  expect(nextSave).not.toHaveBeenCalled();
+});
+
+it('does not open another camera when same-draft form callbacks rerender during capture', async () => {
+  const context = { ownerId: 'owner', draftId: 'draft', sessionId: 'session' };
+  const input = { ...props(), captureContext: context };
+  let finishCapture!: (payload: string) => void;
+  openAuctionCamera.mockReturnValue(new Promise<string>((resolve) => { finishCapture = resolve; }));
+  const acknowledgeCapture = jest.fn().mockResolvedValue(true);
+  jest.mocked(loadNativeAuctionCamera).mockResolvedValue({ openAuctionCamera, acknowledgeCapture });
+  const view = await render(<NativeAuctionCameraScreen {...input} />);
+  await waitFor(() => expect(openAuctionCamera).toHaveBeenCalledTimes(1));
+  for (let index = 0; index < 4; index += 1) {
+    await view.rerender(<NativeAuctionCameraScreen {...input} captureContext={{ ...context }}
+      lots={[...input.lots]} onClose={() => input.onClose()} onAutoSave={(...args) => input.onAutoSave(...args)} />);
+  }
+  expect(openAuctionCamera).toHaveBeenCalledTimes(1);
+  await act(async () => { finishCapture(JSON.stringify({ ...context, revision: 3, lots: [{ ...lot, files: [photo] }] })); });
+  await waitFor(() => expect(acknowledgeCapture).toHaveBeenCalledTimes(1));
+  expect(input.onClose).toHaveBeenCalledTimes(1);
+  expect(input.onAutoSave).toHaveBeenCalledTimes(1);
+  expect(openAuctionCamera).toHaveBeenCalledTimes(1);
+});
+
+const cameraLotsFixture = (lotCount: number, totalPhotos: number): MixedLot[] => {
+  let photoPosition = 0;
+  return Array.from({ length: lotCount }, (_, index) => {
+    const count = Math.floor(totalPhotos / lotCount) + (index < totalPhotos % lotCount ? 1 : 0);
+    const files = Array.from({ length: count - 2 }, (_, slot) => {
+      const position = ++photoPosition;
+      const uri = `content://media/external/images/media/${position}`;
+      return { uri, originalUri: uri, sourceUri: uri, displayUri: uri, mediaId: `photo-${position}`,
+        name: `lot-${index}-photo-${slot}.jpg`, type: 'image/jpeg', captureOrigin: 'camera' as const,
+        ownership: 'gallery' as const, captureOrder: position, size: 4_000_000 };
+    });
+    const extraFiles = Array.from({ length: 2 }, (_, slot) => {
+      const position = ++photoPosition;
+      const uri = `content://media/external/images/media/${position}`;
+      return { uri, originalUri: uri, sourceUri: uri, displayUri: uri, mediaId: `photo-${position}`,
+        name: `lot-${index}-extra-${slot}.jpg`, type: 'image/jpeg', captureOrigin: 'camera' as const,
+        ownership: 'gallery' as const, captureOrder: position, size: 4_000_000 };
+    });
+    return { id: `stable-lot-${index}`, lotNumber: `${2500 + index}A`, title: `Saved lot ${index}`,
+      mode: 'single_lot' as const, files, extraFiles, coverIndex: Math.min(2, files.length - 1) };
+  });
+};
+
+it.each([[19, 254], [25, 5000]])('preserves all %i lots and %i original references, photo positions and covers when Done returns', async (lotCount, totalPhotos) => {
+  const captured = cameraLotsFixture(lotCount, totalPhotos);
+  const context = { ownerId: 'owner', draftId: 'large-draft', sessionId: 'large-session' };
+  const input = { ...props(), lots: captured, captureContext: context, activeLotIdx: lotCount - 1 };
+  const acknowledgeCapture = jest.fn().mockResolvedValue(true);
+  jest.mocked(loadNativeAuctionCamera).mockResolvedValue({ openAuctionCamera, acknowledgeCapture });
+  openAuctionCamera.mockResolvedValueOnce(JSON.stringify({ ...context, revision: 18, lots: captured }));
+  await render(<NativeAuctionCameraScreen {...input} />);
+  await waitFor(() => expect(input.onClose).toHaveBeenCalledTimes(1));
+  expect(openAuctionCamera).toHaveBeenCalledTimes(1);
+  const received: MixedLot[] = input.setLots.mock.calls[0][0];
+  expect(received).toHaveLength(lotCount);
+  expect(received.reduce((count, item) => count + item.files.length + item.extraFiles.length, 0)).toBe(totalPhotos);
+  const identities = (lots: MixedLot[]) => lots.map((item) => ({
+    id: item.id, lotNumber: item.lotNumber, title: item.title, coverIndex: item.coverIndex,
+    files: item.files.map(file => [file.mediaId, file.uri, file.originalUri, file.size, file.captureOrder]),
+    extraFiles: item.extraFiles.map(file => [file.mediaId, file.uri, file.originalUri, file.size, file.captureOrder]),
+  }));
+  expect(identities(received)).toEqual(identities(captured));
+  expect(input.onAutoSave).toHaveBeenCalledWith(received, lotCount - 1);
+  expect(acknowledgeCapture).toHaveBeenCalledWith(context.ownerId, context.draftId, context.sessionId, 18);
+  expect(LegacyCameraScreen).not.toHaveBeenCalled();
+});
+
+it.each(['E_RESULT_READ', 'E_RESULT_MISSING', 'E_CAMERA_ALREADY_OPEN', 'E_CAMERA_RESULT', 'E_CAMERA_BUSY'])('retains failed native result %s for recovery and does not start a backup camera over captured work', async (code) => {
+  const alert = jest.spyOn(Alert, 'alert').mockImplementation(() => {});
+  jest.spyOn(console, 'warn').mockImplementation(() => {});
+  const input = { ...props(), captureContext: { ownerId: 'owner', draftId: 'draft', sessionId: 'session' } };
+  const acknowledgeCapture = jest.fn();
+  jest.mocked(loadNativeAuctionCamera).mockResolvedValue({ openAuctionCamera, acknowledgeCapture });
+  openAuctionCamera.mockRejectedValueOnce(Object.assign(new Error('The saved camera result could not be read.'), { code }));
+  await render(<NativeAuctionCameraScreen {...input} />);
+  await waitFor(() => expect(input.onClose).toHaveBeenCalledTimes(1));
+  expect(input.setLots).not.toHaveBeenCalled();
+  expect(input.onAutoSave).not.toHaveBeenCalled();
+  expect(acknowledgeCapture).not.toHaveBeenCalled();
+  expect(LegacyCameraScreen).not.toHaveBeenCalled();
+  expect(alert).toHaveBeenCalledWith(expect.stringMatching(/recover|saved/i), expect.stringMatching(/recover|reopen/i));
+});
+
+it('keeps the journal recoverable instead of importing an invalid native result as empty lots', async () => {
+  const alert = jest.spyOn(Alert, 'alert').mockImplementation(() => {});
+  const acknowledgeCapture = jest.fn();
+  const input = { ...props(), captureContext: { ownerId: 'owner', draftId: 'draft', sessionId: 'session' } };
+  jest.mocked(loadNativeAuctionCamera).mockResolvedValue({ openAuctionCamera, acknowledgeCapture });
+  openAuctionCamera.mockResolvedValueOnce('{not-complete-json');
+  await render(<NativeAuctionCameraScreen {...input} />);
+  await waitFor(() => expect(input.onClose).toHaveBeenCalledTimes(1));
+  expect(input.setLots).not.toHaveBeenCalled();
+  expect(input.onAutoSave).not.toHaveBeenCalled();
+  expect(acknowledgeCapture).not.toHaveBeenCalled();
+  expect(LegacyCameraScreen).not.toHaveBeenCalled();
+  expect(alert).toHaveBeenCalledWith(expect.stringMatching(/recover/i), expect.stringMatching(/recover/i));
+});
+
+it.each([
+  ['missing lot manifest', {}],
+  ['non-array lot manifest', { lots: 'truncated' }],
+  ['null lot', { lots: [null] }],
+  ['array instead of lot', { lots: [[]] }],
+  ['non-array main photos', { lots: [{ ...lot, files: 'truncated' }] }],
+  ['non-array extra photos', { lots: [{ ...lot, extraFiles: 'truncated' }] }],
+  ['invalid video', { lots: [{ ...lot, videoFile: {} }] }],
+  ['invalid main photo', { lots: [{ ...lot, files: [null] }] }],
+  ['invalid extra photo', { lots: [{ ...lot, extraFiles: [{}] }] }],
+  ['photo limit overflow', { lots: [{ ...lot, files: Array.from({ length: 200 }, () => photo), extraFiles: [photo] }] }],
+])('preserves the camera journal instead of silently accepting %s', async (_description, result) => {
+  const alert = jest.spyOn(Alert, 'alert').mockImplementation(() => {});
+  const context = { ownerId: 'owner', draftId: 'draft', sessionId: 'session' };
+  const input = { ...props(), captureContext: context };
+  const acknowledgeCapture = jest.fn();
+  jest.mocked(loadNativeAuctionCamera).mockResolvedValue({ openAuctionCamera, acknowledgeCapture });
+  openAuctionCamera.mockResolvedValueOnce(JSON.stringify({ ...context, revision: 1, ...result }));
+  await render(<NativeAuctionCameraScreen {...input} />);
+  await waitFor(() => expect(input.onClose).toHaveBeenCalledTimes(1));
+  expect(input.setLots).not.toHaveBeenCalled();
+  expect(input.onAutoSave).not.toHaveBeenCalled();
+  expect(acknowledgeCapture).not.toHaveBeenCalled();
+  expect(LegacyCameraScreen).not.toHaveBeenCalled();
+  expect(alert).toHaveBeenCalledWith(expect.stringMatching(/recover/i), expect.stringMatching(/recover/i));
+});
+
+it('does not save or acknowledge old captured work after the draft changes while staging camera activity', async () => {
+  const context = { ownerId: 'owner', draftId: 'draft', sessionId: 'session' };
+  const input = { ...props(), captureContext: context };
+  let finishStaging!: () => void;
+  jest.mocked(OfflineCaptureStore.stageCameraActivity).mockReturnValueOnce(new Promise<void>((resolve) => { finishStaging = resolve; }));
+  const acknowledgeCapture = jest.fn();
+  jest.mocked(loadNativeAuctionCamera).mockResolvedValue({ openAuctionCamera, acknowledgeCapture });
+  openAuctionCamera.mockResolvedValueOnce(JSON.stringify({ ...context, revision: 4, lots: [{ ...lot, files: [photo] }] }));
+  const view = await render(<NativeAuctionCameraScreen {...input} />);
+  await waitFor(() => expect(OfflineCaptureStore.stageCameraActivity).toHaveBeenCalledTimes(1));
+  const nextSave = jest.fn();
+  const nextClose = jest.fn();
+  await view.rerender(<NativeAuctionCameraScreen {...input} captureContext={{ ...context, draftId: 'new-draft' }}
+    onAutoSave={nextSave} onClose={nextClose} />);
+  await act(async () => { finishStaging(); });
+  expect(input.onAutoSave).not.toHaveBeenCalled();
+  expect(nextSave).not.toHaveBeenCalled();
+  expect(acknowledgeCapture).not.toHaveBeenCalled();
+  expect(input.onClose).not.toHaveBeenCalled();
+  expect(nextClose).not.toHaveBeenCalled();
 });

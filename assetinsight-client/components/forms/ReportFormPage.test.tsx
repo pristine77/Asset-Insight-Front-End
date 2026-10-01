@@ -29,9 +29,11 @@ vi.mock("next/dynamic", () => ({
       onDraftStatusChange,
       resumeDraft,
       resumeLocalDraftScopeId,
+      continuationDetails,
     }: {
       auctioneer?: AuctioneerWorkItemSetup;
-      onAcceptedAndContinue?: (reportId: string | undefined) => void;
+      onAcceptedAndContinue?: (reportId: string | undefined, details?: { location: string; currency: string }) => void;
+      continuationDetails?: { location?: string; currency?: string };
       onSuccess?: () => void;
       onDraftStatusChange?: (status: "dirty", label?: string) => void;
       resumeDraft?: unknown;
@@ -46,6 +48,7 @@ vi.mock("next/dynamic", () => ({
           <span data-testid="contract-metadata">{JSON.stringify(auctioneer?.contract)}</span>
           <span data-testid="source-lots">{auctioneer?.lots.length}</span>
           <span data-testid="media-count">{mediaCount}</span>
+          <span data-testid="carried-details">{JSON.stringify(continuationDetails)}</span>
           <span data-testid="resume-state">{resumeDraft || resumeLocalDraftScopeId ? "resume" : "fresh"}</span>
           <button onClick={() => {
             setMediaCount((count) => count + 1);
@@ -53,7 +56,7 @@ vi.mock("next/dynamic", () => ({
           }}>Add mock photo</button>
           <button onClick={onSuccess}>Normal submit accepted</button>
           {onAcceptedAndContinue ? <>
-            <button onClick={() => onAcceptedAndContinue("accepted-report-1")}>Continue accepted report</button>
+            <button onClick={() => onAcceptedAndContinue("accepted-report-1", { location: "Edited yard", currency: "USD" })}>Continue accepted report</button>
             <button onClick={() => onAcceptedAndContinue(undefined)}>Continue missing receipt</button>
           </> : null}
         </div>
@@ -134,6 +137,7 @@ describe("ReportFormPage handoff", () => {
     await waitFor(() => expect(screen.getByTestId("work-item")).toHaveTextContent("work-101"));
     expect(screen.getByTestId("submission")).toHaveTextContent("submission-101");
     expect(screen.getByTestId("media-count")).toHaveTextContent("0");
+    expect(screen.getByTestId("carried-details")).toHaveTextContent(JSON.stringify({ location: "Edited yard", currency: "USD" }));
     expect(screen.getByTestId("resume-state")).toHaveTextContent("fresh");
     expect(screen.getByTestId("contract-metadata")).toHaveTextContent(JSON.stringify(previous.contract));
     expect(screen.getByTestId("source-lots")).toHaveTextContent("0");
@@ -168,6 +172,7 @@ describe("ReportFormPage handoff", () => {
     ]);
     await act(async () => { resolveRetry(freshSuccessor()); });
     await waitFor(() => expect(screen.getByTestId("work-item")).toHaveTextContent("work-101"));
+    expect(screen.getByTestId("carried-details")).toHaveTextContent(JSON.stringify({ location: "Edited yard", currency: "USD" }));
   });
 
   it("keeps acceptance visible without resubmission when the response omitted reportId", async () => {

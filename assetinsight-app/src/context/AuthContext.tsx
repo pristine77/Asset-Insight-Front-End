@@ -156,7 +156,7 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
       if (generation !== authEpoch.current) throw staleAuthOperation();
       const message = err.response?.data?.message || err.message || "Login failed";
       setError(message);
-      throw new Error(message);
+      throw Object.assign(new Error(message), { code: err.response?.data?.code || err.code });
     } finally {
       if (generation === authEpoch.current) setLoading(false);
     }
@@ -235,7 +235,7 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
     }
   };
 
-  const clearError = () => setError(null);
+  const clearError = useCallback(() => setError(null), []);
 
   return (
     <AuthContext.Provider

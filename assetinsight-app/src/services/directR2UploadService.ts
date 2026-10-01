@@ -2,7 +2,7 @@ import api from './api';
 import { Platform } from 'react-native';
 import { randomUUID } from 'expo-crypto';
 import { loadNativeAuctionCamera } from '../components/camera/nativeAuctionCameraModule';
-import { createUploadOperation, cancellableUploadRequest, registerUploadCancellation, type UploadOperation } from './uploadCancellation';
+import { createUploadOperation, cancellableUploadRequest, cancellableUploadTask, isUploadStalled, UPLOAD_IDLE_TIMEOUT_MS, type UploadOperation } from './uploadCancellation';
 import { isRetryableRequestError } from './connectivityService';
 
 const FileSystem = require('expo-file-system/legacy');
@@ -118,24 +118,23 @@ async function uploadOneWithFileSystem(
   const uploadType = FileSystem.FileSystemUploadType?.BINARY_CONTENT ?? 'BINARY_CONTENT';
 
   if (typeof FileSystem.createUploadTask === 'function') {
-    const task = FileSystem.createUploadTask(
-      uploadUrl,
-      file.uri,
-      {
-        httpMethod: 'PUT',
-        uploadType,
-        headers,
-      },
-      (progress: any) => {
-        if (!operation.isActive()) return;
-        const sent = Number(progress?.totalBytesSent || 0);
-        const expected = Number(progress?.totalBytesExpectedToSend || file.size || 0) || undefined;
-        onFileProgress?.(sent, expected);
-      }
-    );
-    const unregister = registerUploadCancellation(() => { void Promise.resolve(task.cancelAsync?.()).catch(() => undefined); });
-    let result;
-    try { result = await task.uploadAsync(); } finally { unregister(); }
+    let task: any;
+    const result: any = await cancellableUploadTask(operation, async ({ touch, isActive }) => {
+      let lastSent = 0;
+      task = FileSystem.createUploadTask(
+        uploadUrl,
+        file.uri,
+        { httpMethod: 'PUT', uploadType, headers },
+        (progress: any) => {
+          if (!isActive()) return;
+          const sent = Number(progress?.totalBytesSent || 0);
+          const expected = Number(progress?.totalBytesExpectedToSend || file.size || 0) || undefined;
+          if (sent > lastSent) { lastSent = sent; touch(); }
+          onFileProgress?.(sent, expected);
+        }
+      );
+      return task.uploadAsync();
+    }, () => { void Promise.resolve(task?.cancelAsync?.()).catch(() => undefined); }, { idleTimeoutMs: UPLOAD_IDLE_TIMEOUT_MS });
     operation.assertActive();
     const status = Number(result?.status || 0);
     if (status < 200 || status >= 300) {
@@ -158,18 +157,22 @@ async function uploadOne(
 ) {
   operation.assertActive();
   if (Platform.OS === 'android' && file.uri.startsWith('content://')) {
-    const native = await loadNativeAuctionCamera();
+    const native = await cancellableUploadTask(operation, () => loadNativeAuctionCamera(), () => {}, { idleTimeoutMs: 30_000 });
     operation.assertActive();
     if (!native.streamContentUriUpload) throw new Error('This app version cannot stream gallery photos. Install the updated mobile build; your draft remains on this device.');
     const id = randomUUID();
-    const unregister = registerUploadCancellation(() => { void Promise.resolve(native.cancelContentUriUpload?.(id)).catch(() => undefined); });
-    try {
-      const result = await native.streamContentUriUpload({ id, uri: file.uri, url: uploadUrl,
+    const result = await cancellableUploadTask(operation, ({ touch, isActive }) => {
+      let lastSent = 0;
+      return native.streamContentUriUpload!({ id, uri: file.uri, url: uploadUrl,
         headers: { ...(signedHeaders || {}), 'Content-Type': contentType || file.type }, size: file.size || 0,
-        onProgress: (sent, expected) => { if (operation.isActive()) onFileProgress?.(sent, expected); } });
-      operation.assertActive();
-      if (result.status < 200 || result.status >= 300) throw makeR2UploadError(file, result.status, result.body);
-    } finally { unregister(); }
+        onProgress: (sent, expected) => {
+          if (!isActive()) return;
+          if (sent > lastSent) { lastSent = sent; touch(); }
+          onFileProgress?.(sent, expected);
+        } });
+    }, () => { void Promise.resolve(native.cancelContentUriUpload?.(id)).catch(() => undefined); }, { idleTimeoutMs: UPLOAD_IDLE_TIMEOUT_MS });
+    operation.assertActive();
+    if (result.status < 200 || result.status >= 300) throw makeR2UploadError(file, result.status, result.body);
     return;
   }
   try {
@@ -177,6 +180,7 @@ async function uploadOne(
     return;
   } catch (error: any) {
     operation.assertActive();
+    if (isUploadStalled(error)) throw error;
     // A signed R2 response is authoritative. Do not hide a 4xx/5xx failure by
     // attempting a second transport with the same invalid URL.
     if (Number(error?.status || 0) > 0) throw error;
@@ -187,11 +191,16 @@ async function uploadOne(
     console.warn('[DirectR2Upload] Filesystem upload failed, using fetch fallback:', error);
   }
 
-  await cancellableUploadRequest(operation, async (signal) => {
+  const controller = new AbortController();
+  await cancellableUploadTask(operation, async ({ touch, isActive }) => {
+    const signal = controller.signal;
     const source = await fetch(file.uri, { signal });
+    if (!isActive()) throw new Error('Upload no longer active');
     operation.assertActive();
     const blob = await source.blob();
+    if (!isActive()) throw new Error('Upload no longer active');
     operation.assertActive();
+    touch();
     onFileProgress?.(0, blob.size || file.size);
     const response = await fetch(uploadUrl, {
       signal,
@@ -202,12 +211,13 @@ async function uploadOne(
       },
       body: blob,
     });
+    if (!isActive()) throw new Error('Upload no longer active');
     operation.assertActive();
     if (!response.ok) {
       throw makeR2UploadError(file, response.status, await response.text().catch(() => ""));
     }
     onFileProgress?.(blob.size || file.size || 1, blob.size || file.size);
-  });
+  }, () => controller.abort(), { idleTimeoutMs: UPLOAD_IDLE_TIMEOUT_MS });
 }
 
 async function uploadOneWithRetry(
@@ -226,6 +236,7 @@ async function uploadOneWithRetry(
       return;
     } catch (error) {
       operation.assertActive();
+      if (isUploadStalled(error)) throw error;
       lastError = error;
       if (!isRetryableRequestError(error)) break;
       if (attempt < DIRECT_UPLOAD_RETRIES) {
@@ -432,23 +443,29 @@ async function resolveRuntimeFileSizes(
     } else {
       try {
         const isContentUri = Platform.OS === 'android' && file.uri.startsWith('content://');
-        const native = isContentUri ? await loadNativeAuctionCamera() : undefined;
-        operation.assertActive();
-        if (isContentUri && !native?.getContentUriInfo) throw new Error('Install the updated app to read gallery photo sizes. Your draft remains saved.');
-        const info = isContentUri ? await native!.getContentUriInfo!(file.uri)
-          : await FileSystem.getInfoAsync(file.uri, { size: true });
+        const info: any = await cancellableUploadTask(operation, async ({ isActive }) => {
+          const native = isContentUri ? await loadNativeAuctionCamera() : undefined;
+          if (!isActive()) throw new Error('Upload no longer active');
+          operation.assertActive();
+          if (isContentUri && !native?.getContentUriInfo) throw new Error('Install the updated app to read gallery photo sizes. Your draft remains saved.');
+          return isContentUri ? native!.getContentUriInfo!(file.uri)
+            : FileSystem.getInfoAsync(file.uri, { size: true });
+        }, () => {}, { idleTimeoutMs: 30_000, message: `Reading ${file.name || 'an original file'} stopped responding. Your draft is saved. Restore file access, then resume.` });
         operation.assertActive();
         const localSize = Number(info?.size || 0);
         if (info?.exists && Number.isFinite(localSize) && localSize > 0) {
           sizes[index] = localSize;
           file.size = localSize;
-        } else if (isContentUri) {
-          throw new Error('A gallery photo is unavailable or its size cannot be read. Restore its permission or replace it before submitting.');
+        } else {
+          throw new Error('An original file is unavailable or its size cannot be read. Restore its permission or replace it before submitting.');
         }
       } catch (error) {
         operation.assertActive();
+        if (isUploadStalled(error)) throw error;
         if (file.uri.startsWith('content://')) throw error;
-        console.warn(`[DirectR2Upload] Could not read size for ${file.name}:`, error);
+        // Reserving an unknown size makes a later successful metadata read look
+        // like changed media under the same submission. Stop before admission.
+        throw new Error(`The size of ${file.name || 'an original file'} could not be read. Your draft remains saved. Restore access to the file, then retry.`);
       }
     }
     resolvedCount += 1;
@@ -458,7 +475,7 @@ async function resolveRuntimeFileSizes(
   return sizes;
 }
 
-export async function uploadReportFilesDirectToR2(args: {
+async function performReportUpload(args: {
   endpoint: '/asset' | '/lot-listing';
   details: Record<string, any>;
   files: DirectUploadFile[];
@@ -467,6 +484,9 @@ export async function uploadReportFilesDirectToR2(args: {
 }): Promise<{ jobId: string; reportId: string; message: string; phase?: string; status?: string }> {
   const operation = args.operation || createUploadOperation();
   operation.assertActive();
+  // Freeze the JSON request, including nested lot settings, before callbacks or
+  // preparation can change caller state. Signed-target refreshes are exact retries.
+  const details: Record<string, any> = JSON.parse(JSON.stringify(args.details));
   // Size resolution must not mutate the caller's saved draft, order or media identity.
   const files = args.files.map((file) => ({ ...file }));
   const totalFiles = args.files.length;
@@ -564,7 +584,7 @@ export async function uploadReportFilesDirectToR2(args: {
     uploadedBytes: 0,
     totalBytes,
   });
-  let session = await createOrResumeUploadSession(operation, args.endpoint, args.details, manifest);
+  let session = await createOrResumeUploadSession(operation, args.endpoint, details, manifest);
   if (session.alreadyQueued && session.reportId) {
     emitProgress(100, {
       stage: 'complete',
@@ -603,6 +623,12 @@ export async function uploadReportFilesDirectToR2(args: {
         const target = uploadById.get(descriptor.fileId);
         if (!target) throw new Error(`Missing upload target for ${file.name}`);
         try {
+          // A lost response may have left the object safely in storage. On an
+          // explicit resumed session, verify before sending those bytes again.
+          if (session.resumed && refreshAttempt === 0 && await verifyUploadSessionFile(operation, args.endpoint, session.sessionId, descriptor.fileId)) {
+            markFileComplete(index, file.name);
+            return;
+          }
           await uploadOneWithRetry(
             operation,
             file,
@@ -613,6 +639,10 @@ export async function uploadReportFilesDirectToR2(args: {
           );
           markFileComplete(index, file.name);
         } catch (error) {
+          operation.assertActive();
+          // Stop a stalled attempt promptly instead of applying this timeout to
+          // every remaining photo. Explicit resume reconciles the same session.
+          if (isUploadStalled(error)) throw normalizeUploadError(error, `Upload stopped for ${file.name}`);
           failures.push({ index, error });
         }
       });
@@ -712,7 +742,7 @@ export async function uploadReportFilesDirectToR2(args: {
       // Reusing the same manifest and client submission id returns the same
       // session with fresh signed targets. Completed files are left untouched.
       operation.assertActive();
-      session = await createOrResumeUploadSession(operation, args.endpoint, args.details, manifest);
+      session = await createOrResumeUploadSession(operation, args.endpoint, details, manifest);
       uploadById = new Map(session.files.map((file) => [file.fileId, file]));
       pendingIndexes.splice(0, pendingIndexes.length, ...failures.map((failure) => failure.index));
     }
@@ -751,4 +781,16 @@ export async function uploadReportFilesDirectToR2(args: {
     totalBytes,
   });
   return completeResponse.data;
+}
+
+export async function uploadReportFilesDirectToR2(args: Parameters<typeof performReportUpload>[0]) {
+  // One failed worker must cancel siblings; their late callbacks cannot overlap
+  // the user's next explicit resume. Do not cancel other reports or the parent.
+  const operation = createUploadOperation(args.operation);
+  try {
+    return await performReportUpload({ ...args, operation });
+  } catch (error) {
+    operation.cancel(error instanceof Error ? error : new Error('Upload interrupted'));
+    throw error;
+  }
 }

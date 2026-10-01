@@ -97,11 +97,19 @@ class AuthService {
   }
 
   private async applyAuthResponse(data: AuthResponse, assertCurrent = captureAuthOperation()): Promise<AuthResponse> {
+    const nonblank = (value: unknown): value is string => typeof value === 'string' && value.trim().length > 0;
+    if (!data || !['authenticated', 'registration_required', 'pending', 'rerequest_pending', 'rejected', 'revoked', 'ip_blocked'].includes(data.authState)) {
+      throw new Error('The sign-in response was incomplete. Please try signing in again.');
+    }
+    if (data.authState === 'authenticated') {
+      if (!data.user || !nonblank(data.user._id || (data.user as any).id) || !nonblank(data.accessToken) || !nonblank(data.refreshToken)) {
+        throw new Error('The sign-in response was incomplete. Please sign in again.');
+      }
+    } else if (data.authState !== 'ip_blocked' && !nonblank(data.challengeToken)) {
+      throw new Error('The device approval response was incomplete. Please sign in again.');
+    }
     return mutateAuthSession(assertCurrent, async () => {
       if (data.authState === "authenticated") {
-        if (!data.user || !String(data.user._id || (data.user as any).id || '').trim() || !data.accessToken || !data.refreshToken) {
-          throw new Error('The sign-in response was incomplete. Please sign in again.');
-        }
         const user = await this.persistSession(data.accessToken, data.refreshToken, data.user, assertCurrent);
         return { ...data, user };
       }
@@ -135,9 +143,11 @@ class AuthService {
 
   async verifyEmail(payload: VerifyEmailPayload): Promise<AuthResponse & AuthMessageResponse> {
     const assertCurrent = captureAuthOperation();
+    const deviceContext = await buildNativeDeviceContext();
+    assertCurrent();
     const { data } = await api.post(API_ENDPOINTS.VERIFY_EMAIL, {
       ...payload,
-      deviceContext: await buildNativeDeviceContext(),
+      deviceContext,
     }) as {
       data: AuthResponse & AuthMessageResponse;
     };
@@ -162,9 +172,11 @@ class AuthService {
   async resetPassword(payload: ResetPasswordPayload): Promise<AuthResponse & AuthMessageResponse> {
     const assertCurrent = captureAuthOperation();
     const { token, password } = payload;
+    const deviceContext = await buildNativeDeviceContext();
+    assertCurrent();
     const { data } = await api.post(
       `${API_ENDPOINTS.RESET_PASSWORD}/${encodeURIComponent(token)}`,
-      { password, deviceContext: await buildNativeDeviceContext() }
+      { password, deviceContext }
     ) as {
       data: AuthResponse & AuthMessageResponse;
     };
@@ -173,9 +185,11 @@ class AuthService {
 
   async resetPasswordByCode(payload: ResetPasswordCodePayload): Promise<AuthResponse & AuthMessageResponse> {
     const assertCurrent = captureAuthOperation();
+    const deviceContext = await buildNativeDeviceContext();
+    assertCurrent();
     const { data } = await api.post(API_ENDPOINTS.RESET_PASSWORD_CODE, {
       ...payload,
-      deviceContext: await buildNativeDeviceContext(),
+      deviceContext,
     }) as {
       data: AuthResponse & AuthMessageResponse;
     };

@@ -1,10 +1,10 @@
 "use client";
 
-import { useState } from "react";
+import { useRef, useState } from "react";
 import Link from "next/link";
 import { ArrowRight } from "lucide-react";
 import { useRouter } from "next/navigation";
-import { AuthService } from "@/services/auth";
+import { AuthService, authErrorMessage } from "@/services/auth";
 import { useAuthContext } from "@/context/AuthContext";
 import AuthLightShell, {
   AUTH_INPUT_CLASS,
@@ -33,15 +33,17 @@ export default function ForgotPasswordForm() {
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [step, setStep] = useState<"request" | "reset">("request");
+  const requestActive = useRef(false);
 
   const onSubmit = async (event: React.FormEvent) => {
     event.preventDefault();
+    if (requestActive.current) return;
     setError(null);
     setMessage(null);
 
     if (step === "reset") {
-      if (!code.trim()) {
-        setError("Enter the reset code sent to your email.");
+      if (!/^\d{6}$/.test(code.trim())) {
+        setError("Enter the six-digit reset code sent to your email.");
         return;
       }
       if (password.length < 6) {
@@ -54,6 +56,7 @@ export default function ForgotPasswordForm() {
       }
     }
 
+    requestActive.current = true;
     setLoading(true);
     const normalizedEmail = email.trim().toLowerCase();
     try {
@@ -77,17 +80,19 @@ export default function ForgotPasswordForm() {
       }
     } catch (err: unknown) {
       if (step === "request") {
-        setMessage("If an account exists, a password reset code has been sent.");
-        setStep("reset");
+        setError(authErrorMessage(err, "We could not confirm the reset-code request. Check your connection and try again."));
       } else {
-        setError(err instanceof Error ? err.message : "Failed to reset password.");
+        setError(authErrorMessage(err, "Failed to reset password."));
       }
     } finally {
+      requestActive.current = false;
       setLoading(false);
     }
   };
 
   const onResendCode = async () => {
+    if (requestActive.current) return;
+    requestActive.current = true;
     setError(null);
     setMessage(null);
     setLoading(true);
@@ -96,9 +101,10 @@ export default function ForgotPasswordForm() {
       const response = await AuthService.forgotPassword({ email: normalizedEmail });
       setEmail(normalizedEmail);
       setMessage(response.message || "A new password reset code has been sent.");
-    } catch {
-      setMessage("If an account exists, a password reset code has been sent.");
+    } catch (err: unknown) {
+      setError(authErrorMessage(err, "We could not confirm a new reset code was sent. Check your email before trying again."));
     } finally {
+      requestActive.current = false;
       setLoading(false);
     }
   };

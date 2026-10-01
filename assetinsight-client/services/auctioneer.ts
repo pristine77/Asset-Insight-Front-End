@@ -23,6 +23,8 @@ export type AuctioneerIncomingItem = {
   contractId: string;
   contractNo: string;
   customerName: string;
+  consignorName?: string;
+  salespersonName?: string;
   eventId?: string;
   eventTitle: string;
   eventDate?: string;
@@ -66,6 +68,8 @@ export type AuctioneerWorkItemSetup = {
     id: string;
     contractNo: string;
     customerName: string;
+    consignorName?: string;
+    salespersonName?: string;
     eventId?: string;
     eventTitle: string;
     eventDate?: string;
@@ -129,6 +133,14 @@ function textValue(...values: unknown[]) {
     if (text) return text;
   }
   return "";
+}
+
+// Contact roles are explicit API metadata, never inferred from the customer,
+// claimant or appraiser. Older servers may omit them entirely.
+function contactName(...values: unknown[]): string | undefined {
+  return values.find((value): value is string =>
+    typeof value === "string" && Boolean(value.trim())
+  )?.trim();
 }
 
 function normalizeKind(value: unknown, record: UnknownRecord): AuctioneerIncomingKind {
@@ -204,6 +216,14 @@ function normalizeIncomingItem(value: unknown): AuctioneerIncomingItem {
       customer.name,
       customer.companyName,
       customer.company_name
+    ),
+    consignorName: contactName(
+      item.consignorName, item.consignor_name,
+      contract.consignorName, contract.consignor_name
+    ),
+    salespersonName: contactName(
+      item.salespersonName, item.salesperson_name,
+      contract.salespersonName, contract.salesperson_name
     ),
     eventId:
       textValue(item.eventId, item.event_id, contract.eventId, event.id, event._id) ||
@@ -367,6 +387,14 @@ function normalizeSetup(value: unknown): AuctioneerWorkItemSetup {
         customer.name,
         customer.companyName,
         customer.company_name
+      ),
+      consignorName: contactName(
+        raw.consignorName, raw.consignor_name,
+        contract.consignorName, contract.consignor_name
+      ),
+      salespersonName: contactName(
+        raw.salespersonName, raw.salesperson_name,
+        contract.salespersonName, contract.salesperson_name
       ),
       eventId:
         textValue(raw.eventId, contract.eventId, event.id, event._id) || undefined,

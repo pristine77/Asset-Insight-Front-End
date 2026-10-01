@@ -152,11 +152,17 @@ const normalizeNativeLots = (value: unknown, previousLots: MixedLot[]): MixedLot
     ? value
     : Array.isArray(asObject(value)?.lots)
       ? (asObject(value)?.lots as unknown[])
-      : [];
+      : null;
+  if (!rawLots) throw new Error('Camera returned an incomplete lot manifest.');
   const existingByUri = createPhotoLookup(previousLots);
+  const previousById = new Map(previousLots.map((lot) => [lot.id, lot]));
 
   return rawLots.map((item, lotIndex) => {
-    const rawLot = asObject(item) ?? {};
+    const rawLot = asObject(item);
+    if (!rawLot || Array.isArray(item) || (rawLot.files !== undefined && !Array.isArray(rawLot.files)) ||
+      (rawLot.extraFiles !== undefined && !Array.isArray(rawLot.extraFiles))) {
+      throw new Error('Camera returned an incomplete lot. Keep its journal for recovery.');
+    }
     const id =
       optionalString(rawLot.id) ??
       previousLots[lotIndex]?.id ??
@@ -165,8 +171,7 @@ const normalizeNativeLots = (value: unknown, previousLots: MixedLot[]): MixedLot
     const files = (Array.isArray(rawLot.files) ? rawLot.files : [])
       .map((photo, photoIndex) =>
         normalizeNativePhoto(photo, existingByUri, `lot-${lotIndex + 1}-${photoIndex + 1}.jpg`)
-      )
-      .filter((photo): photo is PhotoFile => Boolean(photo));
+      );
     const extraFiles = (Array.isArray(rawLot.extraFiles) ? rawLot.extraFiles : [])
       .map((photo, photoIndex) =>
         normalizeNativePhoto(
@@ -174,31 +179,31 @@ const normalizeNativeLots = (value: unknown, previousLots: MixedLot[]): MixedLot
           existingByUri,
           `lot-${lotIndex + 1}-extra-${photoIndex + 1}.jpg`
         )
-      )
-      .filter((photo): photo is PhotoFile => Boolean(photo));
-    const cappedFiles = files.slice(0, MAX_ASSET_LOT_PHOTOS);
-    const cappedExtraFiles = extraFiles.slice(
-      0,
-      Math.max(0, MAX_ASSET_LOT_PHOTOS - cappedFiles.length)
-    );
+      );
+    if (files.some((photo) => !photo) || extraFiles.some((photo) => !photo) || files.length + extraFiles.length > MAX_ASSET_LOT_PHOTOS) {
+      throw new Error('Camera media is incomplete or exceeds the per-lot limit. Keep its journal for recovery.');
+    }
+    const normalizedFiles = files as PhotoFile[];
+    const normalizedExtraFiles = extraFiles as PhotoFile[];
     const videoFile = normalizeNativePhoto(
       rawLot.videoFile,
       existingByUri,
       `lot-${lotIndex + 1}-walkthrough.mp4`,
       'video/mp4'
     );
+    if (rawLot.videoFile != null && !videoFile) throw new Error('Camera returned incomplete video metadata.');
     const coverIndex = Math.max(
       0,
-      Math.min(optionalNumber(rawLot.coverIndex) ?? previousLots[lotIndex]?.coverIndex ?? 0, cappedFiles.length - 1)
+      Math.min(optionalNumber(rawLot.coverIndex) ?? previousLots[lotIndex]?.coverIndex ?? 0, normalizedFiles.length - 1)
     );
 
     return {
       id,
-      lotNumber: previousLots.find((lot) => lot.id === id)?.lotNumber,
-      title: previousLots.find((lot) => lot.id === id)?.title,
+      lotNumber: previousById.get(id)?.lotNumber,
+      title: previousById.get(id)?.title,
       mode,
-      files: cappedFiles,
-      extraFiles: cappedExtraFiles,
+      files: normalizedFiles,
+      extraFiles: normalizedExtraFiles,
       coverIndex: Number.isFinite(coverIndex) ? coverIndex : 0,
       ...(videoFile ? { videoFile } : {}),
     };
@@ -365,18 +370,25 @@ const NativeAuctionCameraScreen: React.FC<CameraScreenProps> = (props) => {
     const launchId = launchIdRef.current + 1;
     launchIdRef.current = launchId;
     let disposed = false;
+    const current = latestPropsRef.current;
+    const stillCurrent = () => !disposed && launchIdRef.current === launchId &&
+      latestPropsRef.current.visible && !latestPropsRef.current.lockedStructure &&
+      latestPropsRef.current.captureContext?.ownerId === current.captureContext?.ownerId &&
+      latestPropsRef.current.captureContext?.draftId === current.captureContext?.draftId;
 
     const launchNativeCamera = async () => {
       setLaunching(true);
+      let receivedResult = false;
 
       try {
-        const current = latestPropsRef.current;
         const payload = buildNativePayload(current.lots, current.activeLotIdx, current.captureContext);
         const { openAuctionCamera, acknowledgeCapture } = await loadNativeAuctionCamera();
-        if (disposed || launchIdRef.current !== launchId || latestPropsRef.current.lockedStructure) return;
+        if (!stillCurrent()) return;
         const json = await openAuctionCamera(payload);
 
-        if (disposed || launchIdRef.current !== launchId) return;
+        if (!stillCurrent()) return;
+        receivedResult = true;
+        setSavingDraft(true);
 
         const parsed = JSON.parse(json);
         if (current.captureContext && (
@@ -394,33 +406,42 @@ const NativeAuctionCameraScreen: React.FC<CameraScreenProps> = (props) => {
             ? Math.max(0, Math.min(current.activeLotIdx, nextLots.length - 1))
             : 0;
 
-        current.setLots(nextLots);
-        current.setActiveLotIdx(nextActiveIdx);
+        latestPropsRef.current.setLots(nextLots);
+        latestPropsRef.current.setActiveLotIdx(nextActiveIdx);
 
-        if (current.onAutoSave) {
-          setSavingDraft(true);
+        if (latestPropsRef.current.onAutoSave) {
           try {
             if (current.captureContext) await OfflineCaptureStore.stageCameraActivity({ ...parsed, ...current.captureContext });
-            await current.onAutoSave(nextLots, nextActiveIdx);
+            if (!stillCurrent()) return;
+            await latestPropsRef.current.onAutoSave?.(nextLots, nextActiveIdx);
+            if (!stillCurrent()) return;
             if (current.captureContext && typeof parsed.revision === 'number' && typeof parsed.sessionId === 'string') {
               await acknowledgeCapture?.(current.captureContext.ownerId, current.captureContext.draftId, parsed.sessionId, parsed.revision);
             }
           } catch (saveError) {
+            if (!stillCurrent()) return;
             console.warn('[Camera] Captured photos could not be saved to draft immediately:', saveError);
             Alert.alert(
               'Draft Save Warning',
-              'Photos were captured, but the draft could not be saved immediately. Close the form after it finishes saving.'
+              'Camera media has not been saved to the draft yet. Keep the originals. Free device storage if needed, then reopen this draft to recover the camera session.'
             );
-          } finally {
-            setSavingDraft(false);
           }
         }
 
-        current.onClose();
+        if (stillCurrent()) latestPropsRef.current.onClose();
       } catch (error) {
-        if (disposed || launchIdRef.current !== launchId) return;
+        if (!stillCurrent()) return;
 
         if (isCancelledError(error)) {
+          latestPropsRef.current.onClose();
+          return;
+        }
+
+        const code = asObject(error)?.code;
+        if (receivedResult || code === 'E_RESULT_READ' || code === 'E_RESULT_MISSING' || code === 'E_CAMERA_RESULT' || code === 'E_CAMERA_BUSY' || code === 'E_CAMERA_ALREADY_OPEN') {
+          // Never start a second camera after a failed return handoff. The
+          // durable owner-bound journal is recovered from the original draft.
+          Alert.alert('Camera media needs recovery', 'The camera could not return its media to this form. Keep the originals and reopen this draft to recover the saved camera session.');
           latestPropsRef.current.onClose();
           return;
         }
@@ -431,6 +452,7 @@ const NativeAuctionCameraScreen: React.FC<CameraScreenProps> = (props) => {
       } finally {
         if (!disposed && launchIdRef.current === launchId) {
           setLaunching(false);
+          setSavingDraft(false);
         }
       }
     };
@@ -453,10 +475,10 @@ const NativeAuctionCameraScreen: React.FC<CameraScreenProps> = (props) => {
       <View style={styles.loadingOverlay}>
         <View style={styles.loadingCard}>
           <ActivityIndicator size="large" color="#2563EB" />
-          <Text style={styles.loadingTitle}>Opening camera...</Text>
+          <Text style={styles.loadingTitle}>{savingDraft ? 'Saving camera media...' : 'Opening camera...'}</Text>
           <Text style={styles.loadingText}>
             {savingDraft
-              ? 'Saving captured photos to Drafts.'
+              ? 'Keeping your lots and media in the saved draft.'
               : launching
                 ? 'Preparing the native auction camera.'
                 : 'Please wait.'}

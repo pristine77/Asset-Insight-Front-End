@@ -1,6 +1,7 @@
 import api from './api';
 import { allowsCloudDraft } from './offlineDraftPolicy';
 import OfflineCaptureStore from './offlineCaptureStore';
+import { isRetryableRequestError } from './connectivityService';
 import { createUploadOperation, cancellableUploadRequest } from './uploadCancellation';
 import type {
   AutoSaveFormData,
@@ -101,6 +102,7 @@ type DraftUploadTarget = {
 };
 
 const TARGET_BATCH_SIZE = 200;
+const MULTIPART_BATCH_SIZE = 10;
 const UPLOAD_CONCURRENCY = 4;
 
 const normalizeContractNo = (value?: string | null) =>
@@ -255,6 +257,17 @@ function serializeLots(lots: SavedLotData[]): SavedLotData[] {
   }));
 }
 
+function isConfirmedDraftEntry(entry: DraftMediaEntry, media: CloudDraftMedia[]) {
+  const expected = entry.descriptor;
+  const saved = media.find((item) => item.clientFileId === expected.clientFileId);
+  if (!saved?.uploadedAt || !saved.url) return false;
+  // A response may have been lost after the multipart batch committed. Only
+  // matching saved identities/metadata can establish that this batch succeeded.
+  const fields = ['lotId', 'slot', 'index', 'originalOrder', 'name', 'mimeType', 'lastModified'] as const;
+  return fields.every((field) => saved[field] === expected[field]) &&
+    (!expected.size || Number(saved.verifiedSize ?? saved.size) === expected.size);
+}
+
 const reportDraftService = {
   async list(): Promise<ReportDraft[]> {
     const response = await api.get<{ message: string; data: ReportDraft[] }>('/report-drafts');
@@ -333,6 +346,7 @@ const reportDraftService = {
         (targetResponse.data.data || []).map((target) => [target.clientFileId, target])
       );
       const confirmed: string[] = [];
+      const multipart: DraftMediaEntry[] = [];
 
       await mapWithConcurrency(batch, UPLOAD_CONCURRENCY, async (entry) => {
         assertAllowed();
@@ -345,7 +359,10 @@ const reportDraftService = {
           );
         }
         if (!target.uploadUrl) {
-          throw new Error(`No upload URL was returned for ${entry.descriptor.name}.`);
+          // Draft direct PUTs are optional on the server. The authenticated
+          // multipart route persists the same media identities when disabled.
+          multipart.push(entry);
+          return;
         }
         await uploadLocalFileToPresignedUrl(
           entry.file,
@@ -363,6 +380,43 @@ const reportDraftService = {
           { clientFileIds: idBatch },
           { timeout: 120000, signal }
         ));
+      }
+
+      for (const mediaBatch of chunks(multipart, MULTIPART_BATCH_SIZE)) {
+        assertAllowed();
+        const body = new FormData();
+        body.append('replace', 'false');
+        body.append('metadata', JSON.stringify(mediaBatch.map((entry) => entry.descriptor)));
+        mediaBatch.forEach((entry) => body.append('files', {
+          uri: entry.file!.uri,
+          name: entry.file!.name,
+          type: entry.file!.type,
+        } as any));
+        try {
+          await cancellableUploadRequest(operation, (signal) => api.post(
+            `/report-drafts/${encodeURIComponent(draftId)}/media`,
+            body,
+            { headers: { 'Content-Type': 'multipart/form-data' }, timeout: 120000, signal }
+          ));
+          assertAllowed();
+        } catch (error) {
+          assertAllowed();
+          if (!isRetryableRequestError(error)) throw error;
+          // Multipart writes allocate fresh object keys. Never replay an
+          // uncertain batch: read the same draft before proceeding or retrying.
+          let savedMedia: CloudDraftMedia[] = [];
+          try {
+            const saved = await cancellableUploadRequest(operation, (signal) => api.get<{ data: ReportDraft }>(
+              `/report-drafts/${encodeURIComponent(draftId)}`, { signal }
+            ));
+            assertAllowed();
+            savedMedia = saved.data.data.media || [];
+          } catch {
+            assertAllowed();
+            throw error;
+          }
+          if (!mediaBatch.every((entry) => isConfirmedDraftEntry(entry, savedMedia))) throw error;
+        }
       }
     }
 

@@ -106,6 +106,12 @@ const AUTH_STATE_BY_CODE: Record<string, string> = {
   IP_BLOCKED: "ip_blocked",
 };
 
+// Public authentication actions use the submitted credentials/code, not an old
+// account's refresh token. Never replay one-time actions after a 401 response.
+function isPublicAuthRequest(url: unknown): boolean {
+  return typeof url === 'string' && /^\/auth\/(?:login|signup|verify-email|resend-verification-code|forgot-password|reset-password-code|reset-password\/[^?]+)(?:\?|$)/.test(url);
+}
+
 api.interceptors.response.use(
   (response: any) => {
     if (response.config?._authEpoch != null && response.config._authEpoch !== getAuthOperationEpoch()) throw staleAuthOperation();
@@ -118,6 +124,12 @@ api.interceptors.response.use(
     const status = error.response?.status;
     const responseData = error.response?.data;
     const code = String(responseData?.code || "");
+    const publicAuthRequest = isPublicAuthRequest(originalRequest?.url);
+    if (publicAuthRequest && code === 'DEVICE_CONTEXT_REQUIRED' && !responseData?.challengeToken) {
+      // Invalid request metadata is not a revocation of an existing session.
+      // Keep the recovery screen/code intact and let it display the error.
+      return Promise.reject(error);
+    }
     const restrictedCodes = new Set([
       "DEVICE_CONTEXT_REQUIRED",
       "DEVICE_PENDING",
@@ -142,7 +154,7 @@ api.interceptors.response.use(
       return Promise.reject(error);
     }
 
-    if (status === 401 && originalRequest && !originalRequest._retry) {
+    if (status === 401 && originalRequest && !originalRequest._retry && !publicAuthRequest) {
       if (isRefreshing) {
         return new Promise((resolve, reject) => {
           failedQueue.push({ resolve, reject });

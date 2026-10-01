@@ -1,4 +1,5 @@
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { StrictMode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AuctioneerWorkItemSetup } from "@/services/auctioneer";
 import type { ReportDraftRecord } from "@/services/reportDrafts";
@@ -31,6 +32,8 @@ const mocks = vi.hoisted(() => ({
   geolocation: vi.fn(),
   reverseGeocode: vi.fn(),
   restoreLots: vi.fn(),
+  getDraft: vi.fn(),
+  authUser: vi.fn(),
   toastSuccess: vi.fn(),
   toastError: vi.fn(),
   toastInfo: vi.fn(),
@@ -129,11 +132,7 @@ vi.mock("next/dynamic", async () => {
 
 vi.mock("@/context/AuthContext", () => ({
   useAuthContext: () => ({
-    user: {
-      _id: "user-asset-workflow",
-      username: "Alex Appraiser",
-      companyName: "Asset Insight QA",
-    },
+    user: mocks.authUser(),
   }),
 }));
 
@@ -159,6 +158,7 @@ vi.mock("@/services/reportDrafts", () => ({
     upsertWithMedia: mocks.upsertWithMedia,
     deleteByClientId: mocks.deleteDraftByClientId,
     restoreLots: mocks.restoreLots,
+    get: mocks.getDraft,
   },
   createReportDraftClientId: () => "asset-workflow-draft",
   getDuplicateLotWarning: () => null,
@@ -309,6 +309,7 @@ function makeAssetResumeDraft(
 describe("AssetForm manual save and submission workflow", () => {
   beforeEach(() => {
     Object.values(mocks).forEach((mock) => mock.mockReset());
+    mocks.authUser.mockReturnValue({ _id: "user-asset-workflow", username: "Alex Appraiser", companyName: "Asset Insight QA" });
     mocks.deleteDraftByClientId.mockResolvedValue(undefined);
     mocks.deleteScopedDraft.mockResolvedValue(undefined);
     mocks.deleteSmartUploadDraft.mockResolvedValue(undefined);
@@ -320,6 +321,7 @@ describe("AssetForm manual save and submission workflow", () => {
       source: "nominatim",
     });
     mocks.restoreLots.mockResolvedValue([]);
+    mocks.getDraft.mockResolvedValue(makeAssetResumeDraft());
     mocks.geolocation.mockImplementation(
       (success: PositionCallback, _error?: PositionErrorCallback, _options?: PositionOptions) => {
         success(position);
@@ -353,6 +355,18 @@ describe("AssetForm manual save and submission workflow", () => {
     fireEvent.click(screen.getByRole("button", { name: label }));
     expect(await screen.findByTestId("asset-upload-method")).toHaveTextContent(method);
     expect(mocks.createAsset).not.toHaveBeenCalled();
+  });
+
+  it("prefills a fresh continuation with edited details without reusing the previous submission", async () => {
+    const auctioneer = makeAuctioneerSetup("unknown");
+    render(<AssetForm auctioneer={auctioneer} continuationDetails={{ clientName: "Edited client", location: "Edited yard", currency: "USD", appraisalPurpose: "Continued inspection", bankPhotosEnabled: true }} />);
+    expect(screen.getByLabelText(/Client name/i)).toHaveValue("Edited client");
+    expect(screen.getByLabelText(/Inspection location/i)).toHaveValue("Edited yard");
+    expect(screen.getByLabelText(/Currency/i)).toHaveValue("USD");
+    addTestMedia();
+    fireEvent.click(screen.getByRole("button", { name: "Create report" }));
+    await waitFor(() => expect(mocks.createAsset).toHaveBeenCalledOnce());
+    expect(mocks.createAsset.mock.calls[0][0]).toMatchObject({ client_submission_id: auctioneer.clientSubmissionId, client_name: "Edited client", location: "Edited yard", currency: "USD" });
   });
 
   it.each(["unknown", "scheduleA"] as const)(
@@ -395,11 +409,11 @@ describe("AssetForm manual save and submission workflow", () => {
 
       await act(async () => upload.resolve({ reportId: "accepted-asset-report", status: "processing" }));
       await waitFor(() => expect(mocks.deleteDraftByClientId).toHaveBeenCalledExactlyOnceWith(auctioneer.clientSubmissionId, "asset"));
-      expect(onAcceptedAndContinue).toHaveBeenCalledExactlyOnceWith("accepted-asset-report");
+      expect(onAcceptedAndContinue).toHaveBeenCalledExactlyOnceWith("accepted-asset-report", expect.objectContaining({ contractNo: auctioneer.contract.contractNo }));
       expect(onSuccess).not.toHaveBeenCalled();
       await act(async () => cleanup.resolve());
 
-      await waitFor(() => expect(onAcceptedAndContinue).toHaveBeenCalledExactlyOnceWith("accepted-asset-report"));
+      await waitFor(() => expect(onAcceptedAndContinue).toHaveBeenCalledExactlyOnceWith("accepted-asset-report", expect.objectContaining({ contractNo: auctioneer.contract.contractNo })));
       expect(onSuccess).not.toHaveBeenCalled();
       expect(mocks.createAsset).toHaveBeenCalledOnce();
       expect(screen.getByTestId("selected-asset-media")).toHaveTextContent("No media selected");
@@ -425,7 +439,7 @@ describe("AssetForm manual save and submission workflow", () => {
     const original = mocks.createAsset.mock.calls[0];
     fireEvent.click(screen.getByRole("button", { name: "Create Lot & Continue" }));
 
-    await waitFor(() => expect(onAcceptedAndContinue).toHaveBeenCalledExactlyOnceWith("accepted-after-retry"));
+    await waitFor(() => expect(onAcceptedAndContinue).toHaveBeenCalledExactlyOnceWith("accepted-after-retry", expect.objectContaining({ contractNo: "IMPORTED-100" })));
     expect(mocks.createAsset).toHaveBeenCalledTimes(2);
     expect(mocks.createAsset.mock.calls[1][0].client_submission_id).toBe(original[0].client_submission_id);
     expect(mocks.createAsset.mock.calls[1][1]).toEqual(original[1]);
@@ -463,7 +477,7 @@ describe("AssetForm manual save and submission workflow", () => {
       }
       await act(async () => pending.resolve({ _id: "saved-draft", media: [], reportId: "accepted-single-flight" }));
       if (first === "continue") {
-        await waitFor(() => expect(onAcceptedAndContinue).toHaveBeenCalledExactlyOnceWith("accepted-single-flight"));
+        await waitFor(() => expect(onAcceptedAndContinue).toHaveBeenCalledExactlyOnceWith("accepted-single-flight", expect.objectContaining({ contractNo: "IMPORTED-100" })));
         expect(onSuccess).not.toHaveBeenCalled();
       } else if (first === "normal") {
         await waitFor(() => expect(onSuccess).toHaveBeenCalledOnce());
@@ -484,7 +498,7 @@ describe("AssetForm manual save and submission workflow", () => {
     addTestMedia();
     fireEvent.click(screen.getByRole("button", { name: "Create Lot & Continue" }));
 
-    await waitFor(() => expect(onAcceptedAndContinue).toHaveBeenCalledExactlyOnceWith("accepted-cleanup-failure"));
+    await waitFor(() => expect(onAcceptedAndContinue).toHaveBeenCalledExactlyOnceWith("accepted-cleanup-failure", expect.objectContaining({ contractNo: "IMPORTED-100" })));
     expect(mocks.toastWarning).toHaveBeenCalledWith(expect.stringContaining("Report submitted"));
     expect(onSuccess).not.toHaveBeenCalled();
     expect(mocks.createAsset).toHaveBeenCalledOnce();
@@ -1168,6 +1182,66 @@ describe("AssetForm manual save and submission workflow", () => {
     expect(
       onDraftStatusChange.mock.calls.some(([status]) => status === "saved")
     ).toBe(false);
+  });
+
+  it("keeps a failed restore locked and retries the latest saved snapshot without saving partial data", async () => {
+    mocks.restoreLots.mockRejectedValueOnce(new Error("Lot 2, photo 3: missing original"));
+    const draft = makeAssetResumeDraft(RESOLVED_ASSET_LOCATION);
+    const latest = { ...draft, revision: 5, contractNo: "LATEST-SAVED" };
+    mocks.getDraft.mockResolvedValue(latest);
+    render(<AssetForm resumeDraft={draft} />);
+    const retry = await screen.findByRole("button", { name: "Retry loading draft" });
+    expect(screen.getByRole("button", { name: /Save draft/i })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Create report" })).toBeDisabled();
+    fireEvent.submit(screen.getByRole("button", { name: "Create report" }).closest("form")!);
+    expect(mocks.createAsset).not.toHaveBeenCalled();
+    fireEvent.click(retry);
+    await waitFor(() => expect(screen.getByRole("button", { name: /Save draft/i })).toBeEnabled());
+    expect(mocks.getDraft).toHaveBeenCalledWith(draft._id, expect.any(AbortSignal));
+    expect(mocks.restoreLots).toHaveBeenLastCalledWith(latest, expect.objectContaining({ signal: expect.any(AbortSignal) }));
+    expect(mocks.upsertWithMedia).not.toHaveBeenCalled();
+    expect(mocks.deleteDraftByClientId).not.toHaveBeenCalled();
+  });
+
+  it("restarts account restoration in StrictMode and ignores late media after unmount", async () => {
+    const loading = deferred<MixedLot[]>();
+    mocks.restoreLots.mockReturnValue(loading.promise);
+    const view = render(<StrictMode><AssetForm resumeDraft={makeAssetResumeDraft(RESOLVED_ASSET_LOCATION)} /></StrictMode>);
+    expect(mocks.restoreLots).toHaveBeenCalledTimes(2);
+    expect(mocks.restoreLots.mock.calls[0][1].signal.aborted).toBe(true);
+    view.unmount();
+    expect(mocks.restoreLots.mock.calls[1][1].signal.aborted).toBe(true);
+    await act(async () => loading.resolve([]));
+    expect(mocks.toastInfo).not.toHaveBeenCalled();
+    expect(mocks.upsertWithMedia).not.toHaveBeenCalled();
+  });
+
+  it("rejects another owner's draft before reading media", async () => {
+    render(<AssetForm resumeDraft={{ ...makeAssetResumeDraft(), user: "other-owner" }} />);
+    await screen.findByRole("button", { name: "Retry loading draft" });
+    expect(mocks.restoreLots).not.toHaveBeenCalled();
+    expect(screen.getByRole("button", { name: /Save draft/i })).toBeDisabled();
+  });
+
+  it("waits for authentication and cancels restoration when the signed-in account changes", async () => {
+    const download = deferred<MixedLot[]>();
+    mocks.authUser.mockReturnValue(null);
+    mocks.restoreLots.mockReturnValue(download.promise);
+    const draft = makeAssetResumeDraft(RESOLVED_ASSET_LOCATION);
+    const view = render(<AssetForm resumeDraft={draft} />);
+    expect(mocks.restoreLots).not.toHaveBeenCalled();
+    expect(screen.getByRole("button", { name: "Create report" })).toBeDisabled();
+    mocks.authUser.mockReturnValue({ _id: draft.user });
+    view.rerender(<AssetForm resumeDraft={draft} />);
+    await waitFor(() => expect(mocks.restoreLots).toHaveBeenCalledOnce());
+    const signal = mocks.restoreLots.mock.calls[0][1].signal;
+    mocks.authUser.mockReturnValue({ _id: "another-user" });
+    view.rerender(<AssetForm resumeDraft={draft} />);
+    expect(signal.aborted).toBe(true);
+    await act(async () => download.resolve([]));
+    expect(screen.getByRole("button", { name: /Save draft/i })).toBeDisabled();
+    expect(mocks.toastInfo).not.toHaveBeenCalled();
+    expect(mocks.upsertWithMedia).not.toHaveBeenCalled();
   });
 
   it("keeps an immediately resolved legacy draft location marked dirty after hydration", async () => {

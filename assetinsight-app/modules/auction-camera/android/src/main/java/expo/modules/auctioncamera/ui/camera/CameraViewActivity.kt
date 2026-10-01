@@ -259,8 +259,16 @@ class CameraViewActivity : BaseActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        val initialPayload = intent.getStringExtra(expo.modules.auctioncamera.AuctionCameraModule.EXTRA_LOT_PAYLOAD_JSON)
-        viewModel.repository.configureCapture(initialPayload)
+        val initialPayload = try {
+            expo.modules.auctioncamera.CameraPayloadStore.input(this, intent).also {
+                viewModel.repository.configureCapture(it)
+            }
+        } catch (error: Exception) {
+            Log.e("AuctionCameraTiming", "Camera draft handoff could not be restored", error)
+            setResult(RESULT_CANCELED, Intent().putExtra(expo.modules.auctioncamera.CameraPayloadStore.EXTRA_ERROR_CODE, "E_CAMERA_INPUT"))
+            finish()
+            return
+        }
         // Restore before observers can initialize an empty builder and checkpoint it.
         val restoredLifecycleSession = (savedInstanceState != null || viewModel.repository.hasPendingJournal()) && viewModel.restoreSessionIfAvailable()
         if (!restoredLifecycleSession && initialPayload != null && initialPayload.isNotEmpty() && initialPayload != "[]") {
@@ -395,7 +403,7 @@ class CameraViewActivity : BaseActivity() {
     override fun onSaveInstanceState(outState: Bundle) {
         super.onSaveInstanceState(outState)
         outState.putBoolean(KEY_BOX_MODE_ACTIVE, isBoxModeActive)
-        viewModel.persistSessionForBackground()
+        if (::binding.isInitialized) viewModel.persistSessionForBackground()
     }
 
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
@@ -415,6 +423,7 @@ class CameraViewActivity : BaseActivity() {
 
     override fun onResume() {
         super.onResume()
+        if (!::binding.isInitialized) return
         viewModel.refresh()
         if (!::engine.isInitialized) return
 
@@ -437,7 +446,7 @@ class CameraViewActivity : BaseActivity() {
 
     override fun onPause() {
         super.onPause()
-        viewModel.persistSessionForBackground()
+        if (::binding.isInitialized) viewModel.persistSessionForBackground()
         clearPreviewFreeze()
         if (!::engine.isInitialized) return
         cameraBound = false
@@ -1452,6 +1461,7 @@ class CameraViewActivity : BaseActivity() {
     }
 
     private fun clearPreviewFreeze() {
+        if (!::binding.isInitialized) return
         binding.previewView.removeCallbacks(clearPreviewFreezeRunnable)
         binding.previewView.removeCallbacks(delayedClearPreviewFreezeRunnable)
         val drawable = previewFreezeDrawable ?: return
@@ -1616,7 +1626,13 @@ class CameraViewActivity : BaseActivity() {
                 "return_payload lots=${allLots.size} bytes=${json.length} buildMs=${SystemClock.elapsedRealtime() - returnStartMs}"
             )
 
-            val resultIntent = Intent().apply { putExtra(expo.modules.auctioncamera.AuctionCameraModule.EXTRA_LOT_PAYLOAD_JSON, json) }
+            val resultIntent = try {
+                expo.modules.auctioncamera.CameraPayloadStore.resultIntent(this, intent, json)
+            } catch (error: Exception) {
+                Log.e("AuctionCameraTiming", "Camera result handoff could not be saved", error)
+                toast("Draft could not be handed back. Free device storage and tap Done again. Your photos are still saved.")
+                return@setOnClickListener
+            }
             setResult(RESULT_OK, resultIntent)
             viewModel.clearSession()
             finish()

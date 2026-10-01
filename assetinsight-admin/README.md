@@ -20,6 +20,19 @@ removes the authorization query immediately and requires **Finish connecting**.
 The one-time code is sent only to the same-origin HttpOnly BFF; Google credentials
 and encrypted refresh tokens belong to the backend, never this application.
 
+Finish connecting first checks status through the authenticated BFF so an expired
+admin access token can refresh before the single-use Google code is sent. The
+completion request allows 45 seconds for the two bounded backend provider calls;
+it is never replayed. Known backend failures show a safe error code and correction
+steps instead of hiding every failure behind a generic message. Unknown provider
+bodies and credentials are not displayed. After an uncertain response, return to
+settings and refresh status before starting a new connection. An already-used or
+expired callback link cannot be reused. This is an admin-only flow correction;
+it does not alter Google verification requirements or existing channel data.
+Leaving the callback cancels the pending request; a delayed authentication check
+cannot start a new code exchange after navigation. The production failure behind
+the former generic message is not established by isolated fixture checks.
+
 The bounded BFF exposes `status` (GET), `connect`, `complete`, `disconnect`, `revoke`,
 `erase-data` and `acknowledge-revocation` (POST) under `/api/admin/youtube`. Mutations enforce same-origin JSON, exact fields
 and body limits. They are not automatically replayed after authentication failure
@@ -77,6 +90,14 @@ provider error data. New controls require backend support before this admin buil
 
 Focused policy checks: `node --test tests/youtube.test.mjs`. Rendered QA must use
 an isolated backend fixture; do not connect or publish to a real channel as a test.
+
+Callback verification (2026-09-29): lint/typecheck/production build and all 96
+policy tests passed. Thirteen isolated production Chromium flows at 320/390/1366px
+covered session refresh, denied access, known/unknown errors, double clicks and
+a 31-second response. Tested light/dark success/error states passed WCAG A/AA
+checks without horizontal overflow or runtime page errors. Browser plugin was
+unavailable; existing Playwright was reused. No live Google authorization,
+deployment, Safari or Firefox verification was performed.
 
 Verification (2026-09-28): admin verify and 85 policy tests pass. Isolated
 production-build Chromium checks cover 25 flows at 320/390/768/1366px, light/dark,

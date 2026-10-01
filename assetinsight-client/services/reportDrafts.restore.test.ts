@@ -19,6 +19,31 @@ function fixture(count = 693): ReportDraftRecord {
 describe("account draft media restoration", () => {
   beforeEach(() => { mocks.get.mockReset(); });
 
+  it.each(["duplicate-photo", "duplicate-lot", "unknown-lot", "unknown-slot"])("rejects %s mappings before downloading and never silently discards media", async (issue) => {
+    const record = fixture(3);
+    if (issue === "duplicate-photo") record.media[1].clientFileId = record.media[0].clientFileId;
+    if (issue === "duplicate-lot") record.lots[1] = record.lots[0];
+    if (issue === "unknown-lot") record.media[0].lotId = "missing-lot";
+    if (issue === "unknown-slot") record.media[0].slot = "unknown" as "main";
+    await expect(ReportDraftService.restoreLots(record)).rejects.toThrow(/saved draft/);
+    expect(mocks.get).not.toHaveBeenCalled();
+  });
+
+  it.each([0, 2])("rejects a downloaded size of %i rather than returning an incomplete original", async (size) => {
+    mocks.get.mockResolvedValue({ data: new Blob(["x".repeat(size)]) });
+    await expect(ReportDraftService.restoreLots(fixture(1))).rejects.toThrow(/Lot 1, photo 1.*incomplete/);
+  });
+
+  it("shows the affected lot, photo and safe reason from a binary API error", async () => {
+    mocks.get.mockRejectedValue({ response: { status: 409, data: new Blob([JSON.stringify({ code: "DRAFT_MEDIA_MISSING", message: "private provider url" })]) } });
+    await expect(ReportDraftService.restoreLots(fixture(1))).rejects.toThrow(/Lot 1, photo 1.*missing from storage/);
+  });
+
+  it("shows useful retry guidance for older backends returning a generic 404", async () => {
+    mocks.get.mockRejectedValue({ response: { status: 404 } });
+    await expect(ReportDraftService.restoreLots(fixture(1))).rejects.toThrow(/Retry loading the latest draft/);
+  });
+
   it("restores 693 photos in saved lot order with four concurrent downloads and complete progress", async () => {
     let active = 0, peak = 0;
     mocks.get.mockImplementation(async () => {

@@ -9,6 +9,25 @@ vi.mock("@/lib/api", () => ({
   },
 }));
 
+const contactPayloads = [
+  {
+    source: "root camelCase",
+    fields: { consignorName: "  Northfield Consignor  ", salespersonName: "  Sam Sales  " },
+  },
+  {
+    source: "root snake_case",
+    fields: { consignor_name: "  Northfield Consignor  ", salesperson_name: "  Sam Sales  " },
+  },
+  {
+    source: "contract camelCase",
+    fields: { contract: { consignorName: "  Northfield Consignor  ", salespersonName: "  Sam Sales  " } },
+  },
+  {
+    source: "contract snake_case",
+    fields: { contract: { consignor_name: "  Northfield Consignor  ", salesperson_name: "  Sam Sales  " } },
+  },
+];
+
 describe("AuctioneerService incoming", () => {
   beforeEach(() => {
     vi.mocked(API.get).mockReset();
@@ -59,6 +78,112 @@ describe("AuctioneerService incoming", () => {
     expect(vi.mocked(API.get).mock.calls[0]?.[1]).not.toHaveProperty(
       "params.userId"
     );
+  });
+
+  it.each(contactPayloads)("keeps distinct, trimmed incoming contact names from $source", async ({ fields }) => {
+    vi.mocked(API.get).mockResolvedValueOnce({
+      data: { data: { items: [{
+        cycleKey: "cycle-1",
+        contractId: "contract-1",
+        customerName: "Independent Customer",
+        claimedBy: { username: "Assigned Appraiser" },
+        ...fields,
+      }] } },
+    });
+
+    const [item] = await AuctioneerService.getIncoming();
+
+    expect(item).toMatchObject({
+      customerName: "Independent Customer",
+      consignorName: "Northfield Consignor",
+      salespersonName: "Sam Sales",
+      claimedBy: { username: "Assigned Appraiser" },
+    });
+  });
+
+  it("keeps missing or malformed incoming contacts unknown without inferring other roles", async () => {
+    const malformed = [undefined, null, "", " \t ", 42, false, ["Wrong Person"], { name: "Wrong Person" }];
+    vi.mocked(API.get).mockResolvedValueOnce({
+      data: { data: { items: malformed.map((value, index) => ({
+        cycleKey: `cycle-${index}`,
+        contractId: `contract-${index}`,
+        customerName: "Customer is not consignor",
+        claimedBy: { username: "Claimant is not salesperson" },
+        salesperson: { name: "Unmapped salesperson object" },
+        consignor: { name: "Unmapped consignor object" },
+        consignorName: value,
+        consignor_name: value,
+        salespersonName: value,
+        salesperson_name: value,
+        contract: {
+          consignorName: value,
+          consignor_name: value,
+          salespersonName: value,
+          salesperson_name: value,
+          customer: { name: "Another customer" },
+        },
+      })) } },
+    });
+
+    const items = await AuctioneerService.getIncoming();
+
+    expect(items).toHaveLength(malformed.length);
+    for (const item of items) {
+      expect(item.consignorName).toBeUndefined();
+      expect(item.salespersonName).toBeUndefined();
+      expect(item.customerName).toBe("Customer is not consignor");
+    }
+  });
+
+  describe.each(["getSetup", "claim", "continueWorkItem"] as const)("%s contact metadata", (operation) => {
+    async function readSetup(fields: Record<string, unknown>) {
+      const response = {
+        data: { data: {
+          workItemId: "work-1",
+          contractId: "contract-1",
+          contractNo: "CV-100",
+          customerName: "Independent Customer",
+          claimedBy: { username: "Assigned Appraiser" },
+          ...fields,
+        } },
+      };
+      if (operation === "getSetup") {
+        vi.mocked(API.get).mockResolvedValueOnce(response);
+        return AuctioneerService.getSetup("work-1");
+      }
+      vi.mocked(API.post).mockResolvedValueOnce(response);
+      return operation === "claim"
+        ? AuctioneerService.claim("cycle-1", "asset")
+        : AuctioneerService.continueWorkItem("work-1", "report-accepted");
+    }
+
+    it.each(contactPayloads)("preserves trimmed contact names from $source", async ({ fields }) => {
+      const setup = await readSetup(fields);
+
+      expect(setup.contract).toMatchObject({
+        customerName: "Independent Customer",
+        consignorName: "Northfield Consignor",
+        salespersonName: "Sam Sales",
+      });
+    });
+
+    it("does not infer missing contacts or stringify malformed canonical values", async () => {
+      for (const fields of [{}, {
+        consignorName: { name: "Wrong Consignor" },
+        consignor_name: 42,
+        salespersonName: ["Wrong Salesperson"],
+        salesperson_name: false,
+        contract: { consignorName: null, consignor_name: "  ", salespersonName: {}, salesperson_name: "" },
+        consignor: { name: "Unmapped consignor object" },
+        salesperson: { name: "Unmapped salesperson object" },
+      }]) {
+        const setup = await readSetup(fields);
+
+        expect(setup.contract.consignorName).toBeUndefined();
+        expect(setup.contract.salespersonName).toBeUndefined();
+        expect(setup.contract.customerName).toBe("Independent Customer");
+      }
+    });
   });
 
   it.each([

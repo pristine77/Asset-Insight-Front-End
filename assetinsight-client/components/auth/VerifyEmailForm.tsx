@@ -4,7 +4,7 @@ import { useEffect, useState } from "react";
 import Link from "next/link";
 import { ArrowRight } from "lucide-react";
 import { useRouter, useSearchParams } from "next/navigation";
-import { AuthService } from "@/services/auth";
+import { AuthService, authErrorMessage } from "@/services/auth";
 import { useAuthContext } from "@/context/AuthContext";
 import AuthLightShell, {
   AUTH_INPUT_CLASS,
@@ -53,7 +53,7 @@ export default function VerifyEmailForm() {
         router.replace(response.authState === "authenticated" ? "/dashboard" : "/device-access");
       }, 800);
     } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : "Failed to verify email");
+      setError(authErrorMessage(err, "Failed to verify email"));
     } finally {
       setLoading(false);
     }
@@ -67,7 +67,7 @@ export default function VerifyEmailForm() {
       const response = await AuthService.resendVerificationCode(email);
       setMessage(response.message || "Verification code resent.");
     } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : "Failed to resend code");
+      setError(authErrorMessage(err, "Unable to confirm the verification-code request. Check your email before trying again."));
     } finally {
       setLoading(false);
     }

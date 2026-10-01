@@ -20,6 +20,7 @@ import useDeviceDraftSave from './useDeviceDraftSave';
 import DraftStorageStatus from './DraftStorageStatus';
 import OfflineCaptureStore from '../../services/offlineCaptureStore';
 import { prepareOfflineSubmission } from '../../services/offlineSubmissionService';
+import { showUploadManifestRecovery, uploadConflictSource } from './uploadManifestRecovery';
 import { createUploadOperation, pauseActiveUploads } from '../../services/uploadCancellation';
 import { needsExplicitUploadResume, setDraftCaptureMode } from '../../services/offlineDraftPolicy';
 import CameraScreen from '../camera/NativeAuctionCameraScreen';
@@ -102,6 +103,9 @@ const LotListingFormSheet = ({
 
   // Submission state
   const [submitting, setSubmitting] = useState(false);
+  const [pausingUpload, setPausingUpload] = useState(false);
+  const pauseRequestedRef = useRef(false);
+  const uploadAcceptedRef = useRef(false);
   const [savingDraftPreview, setSavingDraftPreview] = useState(false);
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [uploadProgress, setUploadProgress] = useState(0);
@@ -135,7 +139,19 @@ const LotListingFormSheet = ({
     setCaptureMode(mode);
   };
   const submissionIdRef = useRef<string | null>(auctioneer?.clientSubmissionId || null);
+  const supersedesSubmissionIdRef = useRef<string | undefined>(undefined);
+  const recoveryScopeRef = useRef(0);
+  useEffect(() => {
+    recoveryScopeRef.current += 1;
+    return () => { recoveryScopeRef.current += 1; };
+  }, [visible, draftIdToLoad, auctioneer?.workItemId]);
   const submissionLockRef = useRef(false);
+  const handlePauseUpload = () => {
+    if (!submissionLockRef.current || pauseRequestedRef.current || uploadAcceptedRef.current || uploadStatus?.stage === 'complete') return;
+    pauseRequestedRef.current = true;
+    setPausingUpload(true);
+    pauseActiveUploads();
+  };
   const autoSaveTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const loadedDraftIdRef = useRef<string | null>(null);
   const awaitingDraft = Boolean(draftIdToLoad && loadedDraftIdRef.current !== draftIdToLoad);
@@ -357,6 +373,7 @@ const LotListingFormSheet = ({
       if (data.formData.clientSubmissionId) {
         submissionIdRef.current = data.formData.clientSubmissionId;
       }
+      supersedesSubmissionIdRef.current = data.formData.supersedesClientSubmissionId;
       if (data.formData.effectiveDate) setSalesDate(data.formData.effectiveDate);
       if (data.formData.salesDate) setSalesDate(data.formData.salesDate);
       if (typeof data.formData.bankPhotosEnabled === 'boolean') {
@@ -484,6 +501,7 @@ const LotListingFormSheet = ({
       clientSubmissionId:
         submissionIdRef.current ||
         (submissionIdRef.current = `ll-mobile-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`),
+      supersedesClientSubmissionId: supersedesSubmissionIdRef.current,
       contractNo,
       effectiveDate: salesDate,
       salesDate,
@@ -794,12 +812,13 @@ const LotListingFormSheet = ({
 
   const handleSubmit = async (
     destination: AuctionManagementDestination = 'LottingBoard',
-    options: { forceNew?: boolean; nextLot?: boolean } = {}
+    options: { forceNew?: boolean; nextLot?: boolean; replaceSubmissionId?: string; replacementSourceId?: string } = {}
   ) => {
     if (submissionLockRef.current || saveLock.current || awaitingDraft || submitting || auctioneerControl?.accepted) return;
     if (options.nextLot && captureMode === 'offline') return;
     if (saveOnly) { await handleSaveOfflineAndClose(); return; }
     if (auctioneer && (options.forceNew || !hasValidAuctioneerLotStructure(auctioneer, lots))) return;
+    if (options.replaceSubmissionId && (auctioneer || submissionIdRef.current !== options.replaceSubmissionId)) return;
     if (!validateForm()) {
       Alert.alert('Validation Error', 'Please fix the required fields');
       return;
@@ -812,7 +831,11 @@ const LotListingFormSheet = ({
     // Bind the user's explicit action across local preparation and transport.
     const operation = createUploadOperation();
     const attemptOwner = OfflineCaptureStore.getOwnerId();
+    const attemptRecoveryScope = recoveryScopeRef.current;
     submissionLockRef.current = true;
+    pauseRequestedRef.current = false;
+    uploadAcceptedRef.current = false;
+    setPausingUpload(false);
     setSubmitting(true);
     setUploadProgress(1);
     setUploadStatus({
@@ -835,7 +858,12 @@ const LotListingFormSheet = ({
       const separateDraftId = options.forceNew ? randomUUID() : undefined;
       if (separateDraftId) {
         submissionIdRef.current = randomUUID();
+        supersedesSubmissionIdRef.current = undefined;
         setDraftCaptureMode(separateDraftId, captureMode);
+      }
+      if (options.replaceSubmissionId) {
+        supersedesSubmissionIdRef.current = options.replacementSourceId || options.replaceSubmissionId;
+        submissionIdRef.current = randomUUID();
       }
       const localDraft = await saveCurrentDraftNow(lots, activeLotIdx, separateDraftId);
       operation.assertActive();
@@ -891,6 +919,7 @@ const LotListingFormSheet = ({
         focus_boxes: focusBoxes.length > 0 ? focusBoxes : undefined,
         progress_id: jobId,
         client_submission_id: jobId,
+        supersedes_client_submission_id: supersedesSubmissionIdRef.current,
         force_new: options.forceNew === true,
         auctionsoft: buildAuctionsoftMetadata(destination),
       };
@@ -939,11 +968,13 @@ const LotListingFormSheet = ({
       const modernDraft = auctioneer ? await saveCurrentDraftNow() : null;
       operation.assertActive();
       const acceptedResponse = await lotListingService.createLotListing(details, serviceLots, (progress, detail) => {
+        if (!operation.isActive() || recoveryScopeRef.current !== attemptRecoveryScope || OfflineCaptureStore.getOwnerId() !== attemptOwner) return;
         setUploadProgress(progress);
         if (detail) setUploadStatus(detail);
       });
       operation.assertActive();
       uploadAccepted = true;
+      uploadAcceptedRef.current = true;
       await OfflineCaptureStore.setSubmissionState(localDraft.id, 'accepted', (acceptedResponse as any).reportId);
 
       if (options.nextLot && auctioneerControl) {
@@ -975,7 +1006,7 @@ const LotListingFormSheet = ({
         return;
       }
 
-      if (!auctioneer && e?.response?.status === 409 && e?.response?.data?.code === 'ACTIVE_REPORT_EXISTS') {
+      if (!auctioneer && !supersedesSubmissionIdRef.current && e?.response?.status === 409 && e?.response?.data?.code === 'ACTIVE_REPORT_EXISTS') {
         setSubmitting(false);
         Alert.alert(
           'Report Already Processing',
@@ -1001,10 +1032,16 @@ const LotListingFormSheet = ({
       setUploadPaused(true);
       await OfflineCaptureStore.setSubmissionState(attemptDraftId, 'paused', undefined, e?.message).catch(() => undefined);
       setSubmitting(false);
+      const conflictedSubmissionId = submissionIdRef.current;
+      if (showUploadManifestRecovery(e, !auctioneer && conflictedSubmissionId ? () => {
+        if (!operation.isActive() || recoveryScopeRef.current !== attemptRecoveryScope || OfflineCaptureStore.getOwnerId() !== attemptOwner) return;
+        void handleSubmit(destination, { replaceSubmissionId: conflictedSubmissionId, replacementSourceId: uploadConflictSource(e, conflictedSubmissionId) });
+      } : undefined)) return;
       const feedback = OfflineQueueService.getSubmissionError(e);
       Alert.alert(feedback.title, feedback.message);
     } finally {
       submissionLockRef.current = false;
+      setPausingUpload(false);
     }
   };
 
@@ -1030,6 +1067,7 @@ const LotListingFormSheet = ({
     setCurrentDraftId(null);
     loadedDraftIdRef.current = null;
     submissionIdRef.current = null;
+    supersedesSubmissionIdRef.current = undefined;
   };
 
   const handleClose = async () => {
@@ -1123,7 +1161,7 @@ const LotListingFormSheet = ({
                   accessibilityRole="button"
                   accessibilityLabel={saveOnly ? 'Save offline lot listing' : uploadPaused ? 'Resume upload' : 'Submit lot listing'}
                   style={[styles.submitBtn, ((!saveOnly && !canSubmit) || savingDraftPreview) && styles.submitBtnDisabled]}
-                  onPress={() => handleSubmit()}
+                  onPress={() => void handleSubmit()}
                   disabled={(!saveOnly && !canSubmit) || submitting || savingDraftPreview}>
                   {submitting ? (
                     <ActivityIndicator size="small" color="#fff" />
@@ -1137,23 +1175,27 @@ const LotListingFormSheet = ({
         </View>
 
         {/* Progress Overlay */}
-        {(submitting || savingDraftPreview) && (
+        <Modal testID="lot-upload-progress" visible={visible && (submitting || savingDraftPreview)} transparent animationType="fade"
+          onRequestClose={submitting ? handlePauseUpload : () => undefined}>
           <View style={styles.progressOverlay}>
-            <View style={styles.progressCard}>
+            <View style={styles.progressCard} accessibilityViewIsModal>
               <ActivityIndicator size="large" color="#8B5CF6" />
               <Text style={styles.progressText}>
-                {savingDraftPreview ? 'Saving Draft to Cloud' : uploadTitle}
+                {savingDraftPreview ? 'Saving Draft to Cloud' : pausingUpload ? 'Pausing upload…' : uploadTitle}
               </Text>
-              <Text style={styles.progressMessage} numberOfLines={2}>
+              <Text style={styles.progressMessage} accessibilityLiveRegion="polite">
                 {savingDraftPreview
                   ? `Uploading and verifying ${totalImages} ${totalImages === 1 ? 'image' : 'images'}, then starting preview processing.`
-                  : uploadStatus?.message || `Preparing ${totalImages} images...`}
+                  : pausingUpload ? 'Stopping this transfer. Your saved draft will stay available; tap Resume upload when ready.' : uploadStatus?.message || `Preparing ${totalImages} images...`}
               </Text>
               {!savingDraftPreview ? (
                 <>
-                  <TouchableOpacity accessibilityRole="button" onPress={pauseActiveUploads} style={{ minHeight: 44, padding: 12 }}>
-                    <Text style={{ color: '#1D4ED8' }}>Pause upload</Text>
-                  </TouchableOpacity>
+                  {uploadStatus?.stage !== 'complete' && !uploadAcceptedRef.current ? (
+                    <TouchableOpacity accessibilityRole="button" accessibilityLabel={pausingUpload ? 'Pausing upload' : 'Pause upload'}
+                      accessibilityState={{ disabled: pausingUpload }} disabled={pausingUpload} onPress={handlePauseUpload} style={{ minHeight: 44, padding: 12 }}>
+                      <Text style={{ color: '#1D4ED8' }}>{pausingUpload ? 'Pausing upload…' : 'Pause upload'}</Text>
+                    </TouchableOpacity>
+                  ) : null}
                   <View style={styles.progressBar}>
                     <View style={[styles.progressFill, { width: `${uploadProgress}%` }]} />
                   </View>
@@ -1174,7 +1216,7 @@ const LotListingFormSheet = ({
               ) : null}
             </View>
           </View>
-        )}
+        </Modal>
 
         {/* Restore Draft Modal */}
         <Modal
@@ -1226,7 +1268,6 @@ const LotListingFormSheet = ({
           showsVerticalScrollIndicator={false}>
           <OfflineCapturePanel mode={captureMode} onChange={changeCaptureMode} lots={lots} savedAt={localSavedAt}
             manualSubmissionRequired={manualSubmissionRequired} reviewingSavedDraft={reviewingSavedDraft}
-            onPause={submitting ? pauseActiveUploads : undefined}
             error={localSaveError} disabled={submitting || savingDraftPreview} paused={uploadPaused}
             onSave={() => { void handleSaveDraftPreview(); }} />
           
@@ -1381,9 +1422,17 @@ const LotListingFormSheet = ({
                         style={[styles.serviceChip, selected && styles.serviceChipActive]}
                         onPress={() => toggleAuctionService(activeLotIdx, service.rowGuid)}
                         activeOpacity={0.86}>
-                        <Text style={[styles.serviceChipText, selected && styles.serviceChipTextActive]} numberOfLines={1}>
-                          {service.serviceName}
-                        </Text>
+                        <View style={styles.serviceChipCopy}>
+                          <Text style={[styles.serviceChipText, selected && styles.serviceChipTextActive]} numberOfLines={1}>
+                            {service.serviceName}
+                          </Text>
+                          <Text style={[styles.serviceChipPrice, selected && styles.serviceChipPriceActive]}>
+                            ${Number(String(service.defaultPrice ?? '0').replace(/[^0-9.-]/g, '')) || 0}
+                          </Text>
+                        </View>
+                        <View style={[styles.serviceChipCheck, selected && styles.serviceChipCheckActive]}>
+                          {selected ? <Feather name="check" size={12} color="#FFFFFF" /> : null}
+                        </View>
                       </TouchableOpacity>
                     );
                   })}
@@ -1864,12 +1913,16 @@ const styles = StyleSheet.create({
   },
   serviceChip: {
     maxWidth: '100%',
+    minWidth: '47%',
     paddingHorizontal: 10,
     paddingVertical: 8,
     borderRadius: 10,
     borderWidth: 1,
     borderColor: '#CBD5E1',
     backgroundColor: '#F8FAFC',
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
   },
   serviceChipActive: {
     borderColor: '#2563EB',
@@ -1882,6 +1935,31 @@ const styles = StyleSheet.create({
   },
   serviceChipTextActive: {
     color: '#1D4ED8',
+  },
+  serviceChipCopy: {
+    flex: 1,
+  },
+  serviceChipPrice: {
+    color: '#64748B',
+    fontSize: 11,
+    fontWeight: '700',
+    marginTop: 2,
+  },
+  serviceChipPriceActive: {
+    color: '#1D4ED8',
+  },
+  serviceChipCheck: {
+    width: 18,
+    height: 18,
+    borderRadius: 9,
+    borderWidth: 1,
+    borderColor: '#94A3B8',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  serviceChipCheckActive: {
+    backgroundColor: '#2563EB',
+    borderColor: '#2563EB',
   },
   datePickerSmall: {
     flexDirection: 'row',

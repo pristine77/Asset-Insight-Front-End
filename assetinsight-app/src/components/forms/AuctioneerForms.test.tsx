@@ -103,12 +103,238 @@ beforeEach(() => {
   jest.mocked(OfflineQueueService.getSubmissionError).mockReturnValue({ title: 'Upload failed', message: 'Retry this submission.' } as any);
   jest.mocked(AutoSaveService.saveDraft).mockImplementation(async (input) => ({ ...input, ownerId: 'owner', id: 'local-parent' }) as any);
   jest.mocked(OfflineCaptureStore.recordDraftOpened).mockReset().mockResolvedValue(undefined);
+  jest.mocked(OfflineCaptureStore.setSubmissionState).mockReset().mockResolvedValue(undefined as any);
   jest.mocked(AutoSaveService.removeDraftRecordOnly).mockResolvedValue(undefined);
   jest.mocked(assetService.createAssetReport).mockResolvedValue({ jobId: 'job-parent', reportId: 'report-parent', message: 'Queued' });
   jest.mocked(lotListingService.createLotListing).mockResolvedValue({ jobId: 'job-parent', reportId: 'report-parent', message: 'Queued' });
 });
 
 afterEach(async () => { await cleanup(); jest.restoreAllMocks(); });
+
+describe.each(['asset', 'lotListing'] as const)('%s upload progress and explicit pause', type => {
+  const Form = type === 'asset' ? AssetFormSheet : LotListingFormSheet;
+  const upload = type === 'asset' ? assetService.createAssetReport : lotListingService.createLotListing;
+  const submitLabel = type === 'asset' ? 'Submit asset report' : 'Submit lot listing';
+  const progressId = type === 'asset' ? 'asset-upload-progress' : 'lot-upload-progress';
+  async function mount() {
+    const saved = draft(type);
+    delete (saved.formData as any).auctioneerWorkItemId;
+    saved.lots = Array.from({ length: 2 }, (_, lotIndex) => ({
+      ...saved.lots[0], id: `capture-lot-${lotIndex}`, coverIndex: 5,
+      mainImages: Array.from({ length: 80 }, (_, index) => ({
+        uri: `content://photos/lot-${lotIndex}/photo-${index}`, name: `lot-${lotIndex}-photo-${index}.jpg`, type: 'image/jpeg',
+        size: 1024, mediaId: `lot-${lotIndex}-photo-${index}`, captureOrder: index,
+      })),
+    }));
+    jest.mocked(AutoSaveService.getDraft).mockResolvedValue(saved as any);
+    const closed = jest.fn();
+    await render(<Form visible draftIdToLoad="local-parent" onClose={closed} />);
+    await waitFor(() => expect(screen.getByTestId('mock-photo-count').props.children).toBe(160));
+    return { saved, closed };
+  }
+  function pendingUpload() {
+    let reject!: (error: Error) => void;
+    let progress!: NonNullable<Parameters<typeof assetService.createAssetReport>[2]>;
+    jest.mocked(upload).mockImplementationOnce((_details, _lots, onProgress) => {
+      progress = onProgress!;
+      return new Promise((_resolve, fail) => { reject = fail; });
+    });
+    return { reject: (error: Error) => reject(error), progress: (percent: number, detail: any) => progress(percent, detail) };
+  }
+  const detail = { percent: 24, stage: 'uploading', message: 'Uploading 160 files…', completedFiles: 39, totalFiles: 160,
+    uploadedBytes: 39 * 1024, totalBytes: 160 * 1024, activeFileName: 'lot-0-photo-39.jpg' };
+
+  it('shows transfer progress independently of the Asset tab and preserves 160 photos across two lots', async () => {
+    const pending = pendingUpload();
+    const { saved } = await mount();
+    if (type === 'asset') await fireEvent.press(screen.getByText('Details'));
+    await fireEvent.press(screen.getByRole('button', { name: submitLabel }));
+    await waitFor(() => expect(upload).toHaveBeenCalledTimes(1));
+    await act(async () => { pending.progress(24, detail); });
+    expect(screen.getByTestId(progressId).props.visible).toBe(true);
+    expect(screen.getByText('39 / 160 files')).toBeTruthy();
+    expect(screen.getByText('lot-0-photo-39.jpg')).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Pause upload' })).toBeTruthy();
+    if (type === 'asset') {
+      await fireEvent.press(screen.getByRole('tab', { name: 'Images' }));
+      expect(screen.queryByTestId('asset-images-scroll')).toBeNull();
+      expect(screen.getByText('160')).toBeTruthy();
+      expect(screen.getByText('2')).toBeTruthy();
+    }
+    const [details, lots] = jest.mocked(upload).mock.calls[0];
+    expect(details.mixed_lots).toEqual([expect.objectContaining({ count: 80, cover_index: 5 }), expect.objectContaining({ count: 80, cover_index: 5 })]);
+    expect(lots.map(lot => ({ id: lot.id, uris: lot.files.map(file => file.uri) }))).toEqual(saved.lots.map(lot => ({ id: lot.id, uris: lot.mainImages.map(file => file.uri) })));
+    await act(async () => { pending.reject(new Error('No transfer progress. Resume this upload when ready.')); });
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Resume upload' })).toBeTruthy());
+    expect(screen.queryByTestId(progressId)).toBeNull();
+  });
+
+  it('acknowledges Pause immediately, waits for settlement, then resumes the same saved upload only on request', async () => {
+    const pending = pendingUpload();
+    const { closed } = await mount();
+    await fireEvent.press(screen.getByRole('button', { name: submitLabel }));
+    await waitFor(() => expect(upload).toHaveBeenCalledTimes(1));
+    await fireEvent.press(screen.getByRole('button', { name: 'Pause upload' }));
+    expect(screen.getByRole('button', { name: 'Pausing upload' }).props.accessibilityState.disabled).toBe(true);
+    expect(screen.getByText('Stopping this transfer. Your saved draft will stay available; tap Resume upload when ready.')).toBeTruthy();
+    await fireEvent.press(screen.getByRole('button', { name: 'Pausing upload' }));
+    await act(async () => { pending.progress(24, detail); });
+    expect(screen.queryByText('lot-0-photo-39.jpg')).toBeNull();
+    expect(upload).toHaveBeenCalledTimes(1);
+    expect(closed).not.toHaveBeenCalled();
+    await act(async () => { pending.reject(Object.assign(new Error('Upload paused'), { code: 'ERR_CANCELED' })); });
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Resume upload' })).toBeTruthy());
+    expect(OfflineCaptureStore.setSubmissionState).toHaveBeenCalledWith('local-parent', 'paused', undefined, 'Upload paused');
+    expect(screen.getByTestId('mock-photo-count').props.children).toBe(160);
+    expect(AutoSaveService.deleteDraft).not.toHaveBeenCalled();
+    expect(AutoSaveService.removeDraftRecordOnly).not.toHaveBeenCalled();
+    expect(upload).toHaveBeenCalledTimes(1);
+    const second = pendingUpload();
+    await fireEvent.press(screen.getByRole('button', { name: 'Resume upload' }));
+    await waitFor(() => expect(upload).toHaveBeenCalledTimes(2));
+    expect(jest.mocked(upload).mock.calls[1][0].client_submission_id).toBe(jest.mocked(upload).mock.calls[0][0].client_submission_id);
+    expect(jest.mocked(upload).mock.calls[1][1]).toEqual(jest.mocked(upload).mock.calls[0][1]);
+    expect(screen.getByRole('button', { name: 'Pause upload' })).toBeTruthy();
+    await act(async () => { second.reject(new Error('Offline')); });
+  });
+
+  it('does not offer to pause a completed receipt while local acceptance is being saved', async () => {
+    let finishLocal!: () => void;
+    jest.mocked(OfflineCaptureStore.setSubmissionState).mockImplementation(async (_id, state) => {
+      if (state === 'accepted') await new Promise<void>(resolve => { finishLocal = resolve; });
+      return undefined as any;
+    });
+    jest.mocked(upload).mockImplementationOnce(async (_details, _lots, progress) => {
+      progress?.(100, { ...detail, percent: 100, stage: 'complete', message: 'Upload complete', completedFiles: 160 });
+      return { jobId: 'job-parent', reportId: 'report-parent', message: 'Queued' };
+    });
+    await mount();
+    await fireEvent.press(screen.getByRole('button', { name: submitLabel }));
+    await waitFor(() => expect(OfflineCaptureStore.setSubmissionState).toHaveBeenCalledWith('local-parent', 'accepted', 'report-parent'));
+    expect(screen.queryByRole('button', { name: 'Pause upload' })).toBeNull();
+    await act(async () => { screen.getByTestId(progressId).props.onRequestClose(); });
+    expect(screen.queryByRole('button', { name: 'Pausing upload' })).toBeNull();
+    await act(async () => { finishLocal(); });
+    expect(OfflineCaptureStore.setSubmissionState).not.toHaveBeenCalledWith('local-parent', 'paused', expect.anything(), expect.anything());
+  });
+
+  it('ignores late transfer progress after an account change', async () => {
+    const pending = pendingUpload();
+    await mount();
+    await fireEvent.press(screen.getByRole('button', { name: submitLabel }));
+    await waitFor(() => expect(upload).toHaveBeenCalledTimes(1));
+    mockOwner = 'another-owner'; setUploadOwner(mockOwner);
+    await act(async () => { pending.progress(24, detail); });
+    expect(screen.queryByText('lot-0-photo-39.jpg')).toBeNull();
+    await act(async () => { pending.reject(new Error('Stopped')); });
+    expect(OfflineCaptureStore.setSubmissionState).not.toHaveBeenCalledWith('local-parent', 'accepted', 'report-parent');
+  });
+});
+
+describe.each(['asset', 'lotListing'] as const)('%s changed upload recovery', type => {
+  const Form = type === 'asset' ? AssetFormSheet : LotListingFormSheet;
+  const upload = type === 'asset' ? assetService.createAssetReport : lotListingService.createLotListing;
+  const conflict = (data = {}) => ({ response: { status: 409, data: { code: 'SUBMISSION_MANIFEST_CHANGED', data } } });
+  const transportFailure = { response: { status: 503 }, message: 'Response unavailable' };
+  async function mount(formData = {}) {
+    const saved = draft(type);
+    delete (saved.formData as any).auctioneerWorkItemId;
+    jest.mocked(AutoSaveService.getDraft).mockResolvedValue({ ...saved, submissionState: 'paused', formData: { ...saved.formData, ...formData } } as any);
+    await render(<Form visible draftIdToLoad="local-parent" onClose={jest.fn()} />);
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Resume upload' })).toBeTruthy());
+  }
+  function recoveryButtons() {
+    return jest.mocked(Alert.alert).mock.calls.find(call => call[0] === 'Upload needs updating')?.[2];
+  }
+  it('retains the draft and does not replace anything until explicitly confirmed', async () => {
+    jest.mocked(upload).mockRejectedValueOnce(conflict());
+    await mount();
+    await fireEvent.press(screen.getByRole('button', { name: 'Resume upload' }));
+    await waitFor(() => expect(recoveryButtons()).toBeTruthy());
+    expect(upload).toHaveBeenCalledTimes(1);
+    expect(recoveryButtons()?.map(button => button.text)).toEqual(['Keep Draft', 'Upload updated version']);
+    expect(AutoSaveService.deleteDraft).not.toHaveBeenCalled();
+    expect(AutoSaveService.removeDraftRecordOnly).not.toHaveBeenCalled();
+  });
+  it('saves the replacement identity before transport and reuses it after a lost response', async () => {
+    jest.mocked(upload).mockRejectedValueOnce(conflict({ jobId: 'canonical-old-submission' })).mockRejectedValue(transportFailure);
+    await mount();
+    await fireEvent.press(screen.getByRole('button', { name: 'Resume upload' }));
+    await waitFor(() => expect(recoveryButtons()).toBeTruthy());
+    await act(async () => { recoveryButtons()?.find(button => button.text === 'Upload updated version')?.onPress?.(); });
+    await waitFor(() => expect(upload).toHaveBeenCalledTimes(2));
+    const replacement = jest.mocked(upload).mock.calls[1][0];
+    expect(replacement).toMatchObject({ supersedes_client_submission_id: 'canonical-old-submission', force_new: false, contract_no: '93530.3-A' });
+    expect(replacement.client_submission_id).not.toBe('submission-parent');
+    const savedIndex = jest.mocked(AutoSaveService.saveDraft).mock.calls.findIndex(([value]) => value.formData.clientSubmissionId === replacement.client_submission_id);
+    expect(savedIndex).toBeGreaterThanOrEqual(0);
+    expect(jest.mocked(AutoSaveService.saveDraft).mock.calls[savedIndex][0]).toMatchObject({ id: 'local-parent', formData: { supersedesClientSubmissionId: 'canonical-old-submission' } });
+    expect(jest.mocked(AutoSaveService.saveDraft).mock.invocationCallOrder[savedIndex]).toBeLessThan(jest.mocked(upload).mock.invocationCallOrder[1]);
+    expect(jest.mocked(upload).mock.calls[1][1]).toEqual(jest.mocked(upload).mock.calls[0][1]);
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Resume upload' }).props.accessibilityState?.disabled).not.toBe(true));
+    await fireEvent.press(screen.getByRole('button', { name: 'Resume upload' }));
+    await waitFor(() => expect(upload).toHaveBeenCalledTimes(3));
+    expect(jest.mocked(upload).mock.calls[2][0]).toEqual(replacement);
+  });
+  it('preserves the persisted replacement pair after reopening the draft', async () => {
+    jest.mocked(upload).mockRejectedValue(transportFailure);
+    await mount({ clientSubmissionId: 'replacement-id', supersedesClientSubmissionId: 'old-id' });
+    await fireEvent.press(screen.getByRole('button', { name: 'Resume upload' }));
+    await waitFor(() => expect(upload).toHaveBeenCalledTimes(1));
+    expect(jest.mocked(upload).mock.calls[0][0]).toMatchObject({ client_submission_id: 'replacement-id', supersedes_client_submission_id: 'old-id', force_new: false });
+  });
+  it('never offers replacement when the conflict already identifies a report', async () => {
+    jest.mocked(upload).mockRejectedValueOnce(conflict({ reportId: 'existing-report' }));
+    await mount();
+    await fireEvent.press(screen.getByRole('button', { name: 'Resume upload' }));
+    await waitFor(() => expect(Alert.alert).toHaveBeenCalledWith('Existing report found', expect.any(String)));
+    expect(recoveryButtons()).toBeUndefined();
+    expect(upload).toHaveBeenCalledTimes(1);
+  });
+  it('blocks a delayed replacement confirmation after account change', async () => {
+    jest.mocked(upload).mockRejectedValueOnce(conflict());
+    await mount();
+    await fireEvent.press(screen.getByRole('button', { name: 'Resume upload' }));
+    await waitFor(() => expect(recoveryButtons()).toBeTruthy());
+    mockOwner = 'someone-else';
+    setUploadOwner(mockOwner);
+    await act(async () => { recoveryButtons()?.find(button => button.text === 'Upload updated version')?.onPress?.(); });
+    expect(upload).toHaveBeenCalledTimes(1);
+  });
+  it('blocks a delayed replacement confirmation after the form is unmounted', async () => {
+    jest.mocked(upload).mockRejectedValueOnce(conflict());
+    await mount();
+    await fireEvent.press(screen.getByRole('button', { name: 'Resume upload' }));
+    await waitFor(() => expect(recoveryButtons()).toBeTruthy());
+    const confirm = recoveryButtons()?.find(button => button.text === 'Upload updated version')?.onPress;
+    const savedCount = jest.mocked(AutoSaveService.saveDraft).mock.calls.length;
+    await cleanup();
+    await act(async () => { confirm?.(); });
+    expect(upload).toHaveBeenCalledTimes(1);
+    expect(AutoSaveService.saveDraft).toHaveBeenCalledTimes(savedCount);
+  });
+  it('never sends a replacement when saving its recovery identity fails', async () => {
+    jest.mocked(upload).mockRejectedValueOnce(conflict());
+    await mount();
+    await fireEvent.press(screen.getByRole('button', { name: 'Resume upload' }));
+    await waitFor(() => expect(recoveryButtons()).toBeTruthy());
+    jest.mocked(AutoSaveService.saveDraft).mockRejectedValueOnce(new Error('Storage full'));
+    await act(async () => { recoveryButtons()?.find(button => button.text === 'Upload updated version')?.onPress?.(); });
+    await waitFor(() => expect(OfflineQueueService.getSubmissionError).toHaveBeenCalled());
+    expect(upload).toHaveBeenCalledTimes(1);
+    expect(AutoSaveService.deleteDraft).not.toHaveBeenCalled();
+  });
+  it('does not offer Create Separate if the original was accepted during replacement', async () => {
+    jest.mocked(upload).mockRejectedValueOnce(conflict()).mockRejectedValueOnce({ response: { status: 409, data: { code: 'ACTIVE_REPORT_EXISTS' } } });
+    await mount();
+    await fireEvent.press(screen.getByRole('button', { name: 'Resume upload' }));
+    await waitFor(() => expect(recoveryButtons()).toBeTruthy());
+    await act(async () => { recoveryButtons()?.find(button => button.text === 'Upload updated version')?.onPress?.(); });
+    await waitFor(() => expect(upload).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(OfflineQueueService.getSubmissionError).toHaveBeenCalled());
+    expect(jest.mocked(Alert.alert).mock.calls.some(call => call[2]?.some(button => button.text === 'Create Separate'))).toBe(false);
+  });
+});
 
 describe.each(['asset', 'lotListing'] as const)('%s offline save then review', type => {
   const Form = type === 'asset' ? AssetFormSheet : LotListingFormSheet;
@@ -239,6 +465,16 @@ describe.each(['asset', 'lotListing'] as const)('%s incoming generate-and-next',
     await fireEvent.press(screen.getByRole('button', { name: 'Open mock lot camera' }));
     expect(screen.getByTestId('camera-locked').props.children).toBe('true');
     expect(screen.getByTestId('camera-locked').props.accessibilityLabel).toBe('Lot 157');
+  });
+
+  it('keeps the fixed Incoming identity instead of offering a separate changed upload', async () => {
+    const { upload } = await mount('paused');
+    jest.mocked(upload).mockRejectedValueOnce({ response: { status: 409, data: { code: 'SUBMISSION_MANIFEST_CHANGED' } } });
+    await fireEvent.press(screen.getByRole('button', { name: 'Generate files & new lot' }));
+    await waitFor(() => expect(Alert.alert).toHaveBeenCalledWith('Upload needs updating', expect.stringContaining('same assigned upload'), [{ text: 'Keep Draft', style: 'cancel' }]));
+    expect(upload).toHaveBeenCalledTimes(1);
+    expect(jest.mocked(upload).mock.calls[0][0].client_submission_id).toBe('submission-parent');
+    expect(auctioneerService.continueWorkItem).not.toHaveBeenCalled();
   });
 
   it('switches an Online saved Incoming draft to local Save when Offline is newly selected', async () => {

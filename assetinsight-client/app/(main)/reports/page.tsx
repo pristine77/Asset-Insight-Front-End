@@ -1726,6 +1726,15 @@ export default function ReportsPage() {
             type="button"
             role="tab"
             aria-selected={queueTab === tab.id}
+            tabIndex={queueTab === tab.id ? 0 : -1}
+            onKeyDown={(event) => {
+              if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+              event.preventDefault();
+              const next = event.key === "Home" ? "outstanding" : event.key === "End" ? "completed" : queueTab === "outstanding" ? "completed" : "outstanding";
+              setQueueTab(next);
+              const index = next === "outstanding" ? 0 : 1;
+              (event.currentTarget.parentElement?.querySelectorAll("button")[index] as HTMLButtonElement | undefined)?.focus();
+            }}
             onClick={() => setQueueTab(tab.id)}
             className={`inline-flex min-h-8 items-center gap-2 rounded-md px-3 text-sm font-semibold transition-colors ${
               queueTab === tab.id
@@ -1899,7 +1908,7 @@ export default function ReportsPage() {
                         <p className="mt-1 break-words text-sm leading-5 text-[var(--app-text-muted)]">
                           {subtitle}
                         </p>
-                        <p className="mt-1 text-xs text-[var(--app-text-subtle)] sm:hidden">
+                          <p className="mt-1 text-xs text-[var(--app-text-muted)] sm:hidden">
                           {reportTypeColumnLabel(group.type)} ·{" "}
                           {new Date(group.createdAt).toLocaleDateString()}
                         </p>
@@ -1914,26 +1923,26 @@ export default function ReportsPage() {
                   </div>
 
                   <div className="mt-3.5 flex flex-col gap-3 border-t border-[var(--app-border)] pt-3 sm:flex-row sm:items-end sm:justify-between">
-                    <dl className="grid grid-cols-2 gap-x-8 gap-y-3">
+                    <div className="grid grid-cols-2 gap-x-8 gap-y-3">
                       <div className="flex min-w-0 gap-2.5">
                         <Boxes className="mt-0.5 size-[18px] shrink-0 text-[var(--app-text-muted)]" strokeWidth={1.8} />
-                        <div>
+                        <dl>
                           <dt className="text-xs font-medium text-[var(--app-text-muted)]">Lots</dt>
                           <dd className="mt-1 text-sm font-semibold text-[var(--app-text)]">
                             {group.lotCount || "—"} {group.lotCount === 1 ? "lot" : group.lotCount ? "lots" : ""}
                           </dd>
-                        </div>
+                        </dl>
                       </div>
                       <div className="flex min-w-0 gap-2.5">
                         <ChartNoAxesColumnIncreasing className="mt-0.5 size-[18px] shrink-0 text-[var(--app-text-muted)]" strokeWidth={1.8} />
-                        <div>
+                        <dl>
                           <dt className="text-xs font-medium text-[var(--app-text-muted)]">Market value</dt>
                           <dd className="mt-1 break-words text-sm font-semibold text-[var(--app-text)]">
                             {group.fairMarketValue || "—"}
                           </dd>
-                        </div>
+                        </dl>
                       </div>
-                    </dl>
+                    </div>
                     <div className="grid w-full gap-2 sm:max-w-xl sm:grid-cols-2">
                       <div>{renderFileControls(group)}</div>
                       <div>{renderReportActions(group)}</div>

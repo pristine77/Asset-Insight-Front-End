@@ -71,3 +71,26 @@ it('coalesces transient refresh failure without deleting either waiting requestâ
   expect((await settled).every((result) => result.status === 'rejected')).toBe(true);
   expect(axios.post).toHaveBeenCalledTimes(1); expect(storage.clearSecureSession).not.toHaveBeenCalled();
 });
+
+it.each(['login', 'signup', 'verify-email', 'resend-verification-code', 'forgot-password', 'reset-password-code', 'reset-password/fixture-token'])('never refreshes or replays public auth action %s', async (route) => {
+  const failure = { ...unauthorized(), config: { url: `/auth/${route}`, headers: {} } };
+  await expect(rejectResponse(failure)).rejects.toBe(failure);
+  expect(axios.post).not.toHaveBeenCalled();
+  expect(api).not.toHaveBeenCalled();
+  expect(storage.clearSecureSession).not.toHaveBeenCalled();
+});
+
+it('keeps a device-context input error on the reset screen without expiring the session', async () => {
+  const failure = { response: { status: 428, data: { code: 'DEVICE_CONTEXT_REQUIRED', authState: 'registration_required' } }, config: { url: '/auth/reset-password-code' } };
+  await expect(rejectResponse(failure)).rejects.toBe(failure);
+  expect(storage.clearSecureSession).not.toHaveBeenCalled();
+  expect(storage.emitSessionInvalidated).not.toHaveBeenCalled();
+  expect(storage.emitRestrictedDeviceAccess).not.toHaveBeenCalled();
+});
+
+it('continues enforcing real device rejection on public auth requests', async () => {
+  const failure = { response: { status: 403, data: { code: 'DEVICE_REVOKED', authState: 'revoked' } }, config: { url: '/auth/login' } };
+  await expect(rejectResponse(failure)).rejects.toBe(failure);
+  expect(storage.clearSecureSession).toHaveBeenCalledTimes(1);
+  expect(storage.emitRestrictedDeviceAccess).toHaveBeenCalledWith(expect.objectContaining({ authState: 'revoked' }), expect.any(Function));
+});

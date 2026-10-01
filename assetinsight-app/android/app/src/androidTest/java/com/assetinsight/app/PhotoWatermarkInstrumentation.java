@@ -17,10 +17,14 @@ import expo.modules.auctioncamera.utils.PhotoWatermarkReceipt;
 public class PhotoWatermarkInstrumentation extends Instrumentation {
     private boolean videoOnly;
     private boolean recordVideo;
+    private boolean cameraHandoffOnly;
+    private boolean uploadOnly;
     @Override public void onCreate(Bundle arguments) {
         super.onCreate(arguments);
         videoOnly = arguments != null && "true".equals(arguments.getString("videoOnly"));
         recordVideo = arguments != null && "true".equals(arguments.getString("recordVideo"));
+        cameraHandoffOnly = arguments != null && "true".equals(arguments.getString("cameraHandoffOnly"));
+        uploadOnly = arguments != null && "true".equals(arguments.getString("uploadOnly"));
         start();
     }
     private static void check(boolean condition, String message) {
@@ -29,6 +33,18 @@ public class PhotoWatermarkInstrumentation extends Instrumentation {
     @Override public void onStart() {
         Bundle result = new Bundle();
         try {
+            if (uploadOnly) {
+                ContentUriUploaderAssertions.run(getTargetContext());
+                result.putString("stream", "PASS: native MediaStore HTTPS byte/length/progress integrity, four-worker bound, prompt queued/active cancellation, stalled writes/receipt deadline, one settlement and worker recovery.");
+                finish(Activity.RESULT_OK, result);
+                return;
+            }
+            CameraPayloadAssertions.run(getTargetContext());
+            if (cameraHandoffOnly) {
+                result.putString("stream", "PASS: 19-lot/254-photo and 5,000-photo metadata handoffs, sub-512-byte activity Intents, exact ordered round trips, recreation, missing/mismatched receipt rejection, storage failure and durable-journal preservation.");
+                finish(Activity.RESULT_OK, result);
+                return;
+            }
             ListingVideoAssertions.run(getTargetContext());
             if (videoOnly) {
                 String recording = recordVideo ? ListingVideoAssertions.record(this) : "Actual camera capture not requested.";

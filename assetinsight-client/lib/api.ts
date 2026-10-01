@@ -58,6 +58,11 @@ const DEVICE_ACCESS_CODES = new Set([
   "IP_BLOCKED",
 ]);
 
+function ownsAuthenticationResponse(url: string | undefined) {
+  return url === "/auth/login" || url === "/auth/verify-email" ||
+    url === "/auth/reset-password-code" || Boolean(url?.startsWith("/auth/reset-password/"));
+}
+
 function emitRestrictedAccess(data: RestrictedDeviceAccess | undefined) {
   if (typeof window === "undefined" || !data?.authState) return;
   window.dispatchEvent(
@@ -105,8 +110,9 @@ API.interceptors.response.use(
     const responseData = error?.response?.data as RestrictedDeviceAccess | undefined;
     const responseCode = String((responseData as any)?.code || "");
 
-    // Login owns its restricted response; dispatching it here would invalidate that same attempt.
-    if ((DEVICE_ACCESS_CODES.has(responseCode) || responseData?.authState === "ip_blocked") && originalRequest.url !== "/auth/login") {
+    // Authentication owns its restricted response. Dispatching it here can
+    // invalidate the same verification/reset attempt before it handles receipt.
+    if ((DEVICE_ACCESS_CODES.has(responseCode) || responseData?.authState === "ip_blocked") && !ownsAuthenticationResponse(originalRequest.url)) {
       const restricted = normalizeRestrictedAccess(responseData, responseCode);
       if (restricted?.authState === "registration_required" && !restricted.challengeToken) {
         invalidateSession();

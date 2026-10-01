@@ -21,11 +21,13 @@ function Harness({
   allowVideo = true,
   maxTotalImages,
   analysisImageLimit,
+  sourceMappedLots,
 }: {
   initial?: MixedLot[];
   allowVideo?: boolean;
   maxTotalImages?: number;
   analysisImageLimit?: number;
+  sourceMappedLots?: boolean;
 }) {
   const [lots, setLots] = useState(initial);
   return (
@@ -37,12 +39,14 @@ function Harness({
         {lots.reduce((sum, lot) => sum + lot.files.length, 0)}
       </output>
       <output data-testid="lot-count">{lots.length}</output>
+      <output data-testid="lot-metadata">{JSON.stringify(lots.map(({id, source, mode}) => ({id, source, mode})))}</output>
       <MixedSection
         value={lots}
         onChange={setLots}
         allowVideo={allowVideo}
         maxTotalImages={maxTotalImages}
         analysisImageLimit={analysisImageLimit}
+        sourceMappedLots={sourceMappedLots}
       />
     </>
   );
@@ -74,6 +78,21 @@ describe("MixedSection workflow", () => {
 
     fireEvent.click(screen.getByRole("radio", { name: /bundle/i }));
     expect(addPhotos).toBeEnabled();
+  });
+
+  it("adds a distinct Schedule A split without inheriting the parent's lot number", () => {
+    render(<Harness sourceMappedLots initial={[{
+      id: "original", files: [], extraFiles: [], coverIndex: 0, mode: "single_lot",
+      source: { key: "line-1", lotId: "upstream-1", lotNumber: "100", locked: true },
+    }]} />);
+    fireEvent.click(screen.getByRole("button", { name: /add lot to this line/i }));
+    const rows = JSON.parse(screen.getByTestId("lot-metadata").textContent || "[]");
+    expect(rows).toHaveLength(2);
+    expect(rows[0].source).toMatchObject({ key: "line-1", lotNumber: "100", locked: true });
+    expect(rows[1].source).toMatchObject({ parentKey: "line-1", lotId: "upstream-1", locked: false });
+    expect(rows[1].source.key).not.toBe("line-1");
+    expect(rows[1].source.lotNumber).toBeUndefined();
+    expect(rows[1].mode).toBe("single_lot");
   });
 
   it("explains the terminal lot-number card and high-number sampling policy", () => {

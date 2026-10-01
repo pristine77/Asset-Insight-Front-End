@@ -1,7 +1,7 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { proxyJsonWithAdminAuth } from "@/lib/adminProxy";
 import { PreviewResubmitRequestError, readPreviewMutationJson } from "@/lib/previewResubmitRequest";
-import { parseYouTubeAuthorization, parseYouTubeStatus, youtubeCompleteBody, youtubeConnectBody, youtubeDisconnectBody, youtubeEraseBody } from "@/lib/youtube";
+import { parseYouTubeAuthorization, parseYouTubeStatus, youtubeCompleteBody, youtubeConnectBody, youtubeDisconnectBody, youtubeEraseBody, youtubeConnectionFailure } from "@/lib/youtube";
 
 export async function youtubeProxy(request: NextRequest, action: "status" | "connect" | "complete" | "disconnect" | "revoke" | "erase-data" | "acknowledge-revocation") {
   let body: string | undefined;
@@ -24,7 +24,7 @@ export async function youtubeProxy(request: NextRequest, action: "status" | "con
     // Return only this integration's public DTO, never upstream token fields.
     const result = response.ok
       ? action === "connect" ? parseYouTubeAuthorization(payload) : parseYouTubeStatus(payload)
-      : { message: safeIssue(payload), ...(response.status === 401 ? { signInRequired: true } : {}) };
+      : { ...(action === "complete" ? youtubeConnectionFailure(payload, response.status) : { message: safeIssue(payload) }), ...(response.status === 401 ? { signInRequired: true } : {}) };
     const headers = new Headers(response.headers);
     headers.set("Cache-Control", "no-store");
     headers.set("Referrer-Policy", "no-referrer");

@@ -41,6 +41,7 @@ export interface MixedLot {
 export interface AssetCreateDetails {
   capture_id?: string;
   client_submission_id?: string;
+  supersedes_client_submission_id?: string;
   auctioneer_work_item_id?: string;
   force_new?: boolean;
   // Client info

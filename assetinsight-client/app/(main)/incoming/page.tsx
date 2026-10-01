@@ -497,11 +497,13 @@ export default function IncomingPage() {
             </div>
           ) : (
             <div className="app-table-wrap">
-              <table className="app-table app-table--responsive">
+              <table className={`app-table app-table--responsive ${styles.incomingTable}`}>
                 <thead>
                   <tr>
                     <th>Contract</th>
                     <th>Customer</th>
+                    <th>Consignor</th>
+                    <th>Salesperson</th>
                     <th>Event</th>
                     <th>Assigned lots</th>
                     <th>Status</th>
@@ -528,8 +530,14 @@ export default function IncomingPage() {
                             {item.location || "Location not supplied"}
                           </div>
                         </td>
-                        <td data-label="Customer">
+                        <td className={styles.contactCell} data-label="Customer">
                           {item.customerName || "Not supplied"}
+                        </td>
+                        <td className={styles.contactCell} data-label="Consignor">
+                          {item.consignorName || "Not supplied"}
+                        </td>
+                        <td className={styles.contactCell} data-label="Salesperson">
+                          {item.salespersonName || "Not supplied"}
                         </td>
                         <td data-label="Event">
                           <div>{item.eventTitle || "Not supplied"}</div>
@@ -607,44 +615,62 @@ export default function IncomingPage() {
               <div className={styles.detailBody}>
                 <dl className={styles.detailList}>
                   <div className={styles.detailItem}>
-                    <UserRound className={styles.detailIcon} size={17} aria-hidden />
-                    <div>
-                      <dt className={styles.detailLabel}>Customer</dt>
-                      <dd className={styles.detailValue}>
-                        {selected.customerName || "Not supplied"}
-                      </dd>
-                    </div>
+                    <dt className={styles.detailLabel}>
+                      <UserRound className={styles.detailIcon} size={17} aria-hidden />
+                      <span>Customer</span>
+                    </dt>
+                    <dd className={styles.detailValue}>
+                      {selected.customerName || "Not supplied"}
+                    </dd>
                   </div>
                   <div className={styles.detailItem}>
-                    <CalendarDays className={styles.detailIcon} size={17} aria-hidden />
-                    <div>
-                      <dt className={styles.detailLabel}>Event</dt>
-                      <dd className={styles.detailValue}>
-                        {selected.eventTitle || "Not supplied"} ·{" "}
-                        {displayDate(selected.eventDate)}
-                      </dd>
-                    </div>
+                    <dt className={styles.detailLabel}>
+                      <UserRound className={styles.detailIcon} size={17} aria-hidden />
+                      <span>Consignor</span>
+                    </dt>
+                    <dd className={styles.detailValue}>
+                      {selected.consignorName || "Not supplied"}
+                    </dd>
                   </div>
                   <div className={styles.detailItem}>
-                    <MapPin className={styles.detailIcon} size={17} aria-hidden />
-                    <div>
-                      <dt className={styles.detailLabel}>Location</dt>
-                      <dd className={styles.detailValue}>
-                        {selected.location || "Not supplied"}
-                      </dd>
-                    </div>
+                    <dt className={styles.detailLabel}>
+                      <UserRound className={styles.detailIcon} size={17} aria-hidden />
+                      <span>Salesperson</span>
+                    </dt>
+                    <dd className={styles.detailValue}>
+                      {selected.salespersonName || "Not supplied"}
+                    </dd>
                   </div>
                   <div className={styles.detailItem}>
-                    <ListTree className={styles.detailIcon} size={17} aria-hidden />
-                    <div>
-                      <dt className={styles.detailLabel}>Assigned scope</dt>
-                      <dd className={styles.detailValue}>
-                        {selected.lotCount} assigned lots ·{" "}
-                        {selected.kind === "scheduleA"
-                          ? "Schedule A"
-                          : "Unknown lots"}
-                      </dd>
-                    </div>
+                    <dt className={styles.detailLabel}>
+                      <CalendarDays className={styles.detailIcon} size={17} aria-hidden />
+                      <span>Event</span>
+                    </dt>
+                    <dd className={styles.detailValue}>
+                      {selected.eventTitle || "Not supplied"} ·{" "}
+                      {displayDate(selected.eventDate)}
+                    </dd>
+                  </div>
+                  <div className={styles.detailItem}>
+                    <dt className={styles.detailLabel}>
+                      <MapPin className={styles.detailIcon} size={17} aria-hidden />
+                      <span>Location</span>
+                    </dt>
+                    <dd className={styles.detailValue}>
+                      {selected.location || "Not supplied"}
+                    </dd>
+                  </div>
+                  <div className={styles.detailItem}>
+                    <dt className={styles.detailLabel}>
+                      <ListTree className={styles.detailIcon} size={17} aria-hidden />
+                      <span>Assigned scope</span>
+                    </dt>
+                    <dd className={styles.detailValue}>
+                      {selected.lotCount} assigned lots ·{" "}
+                      {selected.kind === "scheduleA"
+                        ? "Schedule A"
+                        : "Unknown lots"}
+                    </dd>
                   </div>
                 </dl>
 

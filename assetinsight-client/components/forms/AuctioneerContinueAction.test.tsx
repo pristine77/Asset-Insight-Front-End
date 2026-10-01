@@ -15,23 +15,8 @@ describe("imported lot creation actions", () => {
     fireEvent.click(screen.getByRole("button", { name: "Create Lot & Continue" }));
     expect(next).toHaveBeenCalledOnce();
     expect(close).toHaveBeenCalledOnce();
-    /*
-       The copy states the new division of labour. Continue used to submit the
-       report and open a successor form — "Continue opens a fresh lot after
-       upload acceptance" — so the person could not tell that pressing it sent
-       anything. Now nothing leaves until Close, and both controls say so.
-    */
-    expect(screen.getByText(/adds another lot to this contract/i)).toHaveTextContent(
-      /nothing is sent until you close/i
-    );
-    expect(screen.getByRole("button", { name: "Create Lot & Close" })).toHaveAttribute(
-      "title",
-      expect.stringContaining("Send every lot on this contract")
-    );
-    expect(screen.getByRole("button", { name: "Create Lot & Continue" })).toHaveAttribute(
-      "title",
-      expect.stringContaining("Nothing is sent")
-    );
+    expect(screen.getByText(/after upload acceptance/i)).toHaveTextContent(/review each preview/i);
+    expect(screen.getByRole("button", { name: "Create Lot & Close" })).toHaveAttribute("title", expect.stringContaining("contract stays open"));
   });
 
   it("disables both creation intents during an upload or draft save", () => {

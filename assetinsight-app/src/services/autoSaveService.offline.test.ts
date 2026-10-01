@@ -71,6 +71,20 @@ it('preserves stable photo identities when photos are reordered', async () => {
   expect(result.lots[0].mainImages[1]).toMatchObject({ mediaId: `stable-${photo(1).uri}` });
 });
 
+it('persists a replacement identity on the same draft without copying or changing its original references', async () => {
+  const input = form();
+  const first = await AutoSaveService.saveDraft(input);
+  const imports = jest.mocked(LocalMediaStore.importMedia).mock.calls.length;
+  const next = await AutoSaveService.saveDraft({ ...input, formData: { ...input.formData,
+    clientSubmissionId: 'new-submission', supersedesClientSubmissionId: first.formData.clientSubmissionId,
+  } });
+  expect(next.id).toBe(first.id);
+  expect(next.formData).toMatchObject({ clientSubmissionId: 'new-submission', supersedesClientSubmissionId: 'submit-draft' });
+  expect(next.lots).toEqual(first.lots);
+  expect(LocalMediaStore.importMedia).toHaveBeenCalledTimes(imports);
+  expect(saved.size).toBe(1);
+});
+
 it.each(['asset', 'lotListing'] as const)('retains %s video references and metadata across repeated offline saves', async type => {
   const clip = { uri: 'content://media/external/video/media/720', name: 'walkthrough.mp4', type: 'video/mp4',
     mediaId: 'stable-video', captureOrder: 7, originalOrder: 7, width: 1280, height: 720, timestamp: 1700000000 };
