@@ -1,4 +1,5 @@
 import API from "@/lib/api";
+import { safeReportOperationError } from "./reportTransferErrors";
 import {
   DIRECT_UPLOAD_CONCURRENCY,
   mapWithConcurrency,
@@ -313,18 +314,12 @@ function unwrapMessage(error: unknown, fallback: string) {
     };
     message?: string;
   };
-  return (
-    candidate?.response?.data?.message ||
-    (typeof candidate?.response?.data?.error === "string"
-      ? candidate.response.data.error
-      : undefined) ||
-    candidate?.message ||
-    fallback
-  );
+  const response = candidate?.response;
+  return safeReportOperationError(response ? { ...candidate, response: { ...response, status: (response as { status?: number }).status || 400, data: { ...response.data, message: response.data?.message || response.data?.error } } } : error, fallback);
 }
 
 export function getSmartUploadError(error: unknown) {
-  return unwrapMessage(error, "Smart Upload could not continue.");
+  return unwrapMessage(error, "Smart Upload could not continue. Check your connection and retry this same saved upload; do not start a duplicate upload.");
 }
 
 export function getSmartUploadErrorCode(error: unknown) {

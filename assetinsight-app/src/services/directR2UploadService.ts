@@ -4,6 +4,7 @@ import { randomUUID } from 'expo-crypto';
 import { loadNativeAuctionCamera } from '../components/camera/nativeAuctionCameraModule';
 import { createUploadOperation, cancellableUploadRequest, cancellableUploadTask, isUploadStalled, UPLOAD_IDLE_TIMEOUT_MS, type UploadOperation } from './uploadCancellation';
 import { isRetryableRequestError } from './connectivityService';
+import { assertReportUploadAccepted } from './reportUploadReceipt';
 
 const FileSystem = require('expo-file-system/legacy');
 
@@ -50,6 +51,9 @@ export type DirectUploadSessionResponse = {
   status?: string;
   resumed?: boolean;
   alreadyQueued?: boolean;
+  accepted?: boolean;
+  reportAvailable?: boolean;
+  canCreateSeparate?: boolean;
   processed?: boolean;
   readyToComplete?: boolean;
   files: Array<{
@@ -481,7 +485,7 @@ async function performReportUpload(args: {
   files: DirectUploadFile[];
   onProgress?: DirectUploadProgressCallback;
   operation?: UploadOperation;
-}): Promise<{ jobId: string; reportId: string; message: string; phase?: string; status?: string }> {
+}): Promise<{ jobId: string; reportId: string; message: string; phase?: string; status?: string; alreadyQueued?: boolean }> {
   const operation = args.operation || createUploadOperation();
   operation.assertActive();
   // Freeze the JSON request, including nested lot settings, before callbacks or
@@ -585,7 +589,8 @@ async function performReportUpload(args: {
     totalBytes,
   });
   let session = await createOrResumeUploadSession(operation, args.endpoint, details, manifest);
-  if (session.alreadyQueued && session.reportId) {
+  if (session.alreadyQueued) {
+    assertReportUploadAccepted(session);
     emitProgress(100, {
       stage: 'complete',
       message: 'Submission already received.',
@@ -597,6 +602,7 @@ async function performReportUpload(args: {
     return {
       jobId: session.jobId,
       reportId: session.reportId,
+      alreadyQueued: true,
       message: "Submission already accepted and is being processed.",
       phase: session.processed || session.status === "processed" ? "done" : "processing",
       status: session.status || "processing",
@@ -772,6 +778,7 @@ async function performReportUpload(args: {
       });
     }
   );
+  assertReportUploadAccepted(completeResponse.data);
   emitProgress(100, {
     stage: 'complete',
     message: 'Upload complete.',

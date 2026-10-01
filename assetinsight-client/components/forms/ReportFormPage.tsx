@@ -17,6 +17,7 @@ import {
 import styles from "./ReportFormPage.module.css";
 import type { AssetContinuationDetails } from "./AssetForm";
 import type { LotContinuationDetails } from "./LotListingForm";
+import { safeReportOperationError } from "@/services/reportTransferErrors";
 
 type ContinuationDetails = Partial<AssetContinuationDetails & LotContinuationDetails>;
 
@@ -119,7 +120,7 @@ export default function ReportFormPage({ kind }: Props) {
         setDraftSetup({
           key: draftSetupKey,
           state: "error",
-          message: error instanceof Error ? error.message : "Could not verify this draft's imported contract. Retry when your connection is available.",
+          message: safeReportOperationError(error, "Could not verify this draft's imported contract. Retry when your connection is available."),
         });
       }
     };
@@ -183,16 +184,10 @@ export default function ReportFormPage({ kind }: Props) {
       setFreshLotOpened(true);
       setContinuation(null);
     } catch (error) {
-      const responseMessage = (error as { response?: { data?: { message?: unknown } } })
-        ?.response?.data?.message;
       setContinuation({
         ...accepted,
         pending: false,
-        error: typeof responseMessage === "string"
-          ? responseMessage
-          : error instanceof Error
-            ? error.message
-            : "Could not open the next form. Retry when your connection is available.",
+        error: safeReportOperationError(error, "Could not open the next form. Retry when your connection is available. Your accepted report will not be submitted again."),
       });
     } finally {
       continuationLockRef.current = false;

@@ -35,7 +35,7 @@ beforeEach(() => {
   global.FormData = class { append() {} } as unknown as typeof FormData;
   jest.mocked(api.post).mockImplementation(async (url: any) => url.endsWith('/upload-session')
     ? { data: { data: session } }
-    : { data: { reportId: 'stable-report', jobId: 'stable-job', message: 'Accepted' } });
+    : { data: { reportId: 'stable-report', jobId: 'stable-job', message: 'Accepted', phase: 'processing' } });
 });
 afterAll(() => { Object.defineProperty(Platform, 'OS', { value: originalPlatform }); global.fetch = originalFetch; global.FormData = originalFormData; });
 
@@ -83,7 +83,7 @@ describe.each(['/asset', '/lot-listing'] as const)('%s video upload', endpoint =
     await firstFour.promise; pauseActiveUploads();
     expect(await result).toMatchObject({ code: 'ERR_CANCELED' });
     expect(cancel).toHaveBeenCalledTimes(4); expect(stream).toHaveBeenCalledTimes(4);
-    jest.mocked(api.post).mockResolvedValueOnce({ data: { data: { ...session, alreadyQueued: true } } });
+    jest.mocked(api.post).mockResolvedValueOnce({ data: { data: { ...session, alreadyQueued: true, accepted: true } } });
     await expect(upload()).resolves.toMatchObject({ reportId: 'stable-report', jobId: 'stable-job' });
     const requests = jest.mocked(api.post).mock.calls.filter(([url]) => String(url).endsWith('/upload-session'));
     expect(requests).toHaveLength(2); expect(requests[1][1]).toEqual(requests[0][1]);
@@ -96,7 +96,7 @@ describe.each(['/asset', '/lot-listing'] as const)('%s video upload', endpoint =
     jest.mocked(api.post).mockImplementation(async (url: any) => {
       if (url.endsWith('/upload-session')) return { data: { data: { ...session, files: [session.files[0]] } } };
       if (url.endsWith('/verify')) return { data: { data: { verified: false } } };
-      return { data: { reportId: 'stable-report', jobId: 'stable-job', message: 'Accepted' } };
+      return { data: { reportId: 'stable-report', jobId: 'stable-job', message: 'Accepted', phase: 'processing' } };
     });
     await expect(upload([{ ...clips[0], uri: 'file:///documents/camera-videos/clip.mp4' }])).resolves.toMatchObject({ reportId: 'stable-report' });
     expect(global.fetch).not.toHaveBeenCalled();

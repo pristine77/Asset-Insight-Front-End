@@ -50,6 +50,8 @@ import DuplicateDraftDialog from "./DuplicateDraftDialog";
 import { saveManualDraftOnly } from "./manualDraftSave";
 import AuctioneerContinueAction from "./AuctioneerContinueAction";
 import { acceptedAuctioneerReportId } from "./auctioneerContinuation";
+import { assertReportUploadAccepted, canSaveSeparateReportDraft, isPreviousReportReceipt, reportTransferErrorData, reportTransferErrorMessage, safeReportOperationError } from "@/services/reportTransferErrors";
+import SeparateReportDraftRecovery from "./SeparateReportDraftRecovery";
 import {
   auctioneerDateOnly,
   auctioneerDraftScope,
@@ -345,6 +347,8 @@ const AssetForm = forwardRef<AssetFormHandle, Props>(function AssetForm(
         : createReportDraftClientId("asset"))
   );
   const draftScopeId = draftClientIdRef.current;
+  const [unavailableSessionId, setUnavailableSessionId] = useState<string | null>(null);
+  const [separateDraftSaving, setSeparateDraftSaving] = useState(false);
   const draftStorageKey =
     getScopedDraftKey(userId, "asset", draftScopeId) || "";
   const importedEventDate =
@@ -745,9 +749,7 @@ const AssetForm = forwardRef<AssetFormHandle, Props>(function AssetForm(
       syncDuplicateDraftDialog(duplicateWarning);
       const message =
         duplicateWarning ||
-        (error instanceof Error
-          ? error.message
-          : "The draft could not be saved to your account. Keep this form open and try again.");
+        reportTransferErrorMessage(error, "save");
       setDraftSaveProgress(null);
       setDraftGuidance({ tone: duplicateWarning ? "warning" : "error", message });
       publishDraftStatus("error", "Draft not saved");
@@ -1192,7 +1194,7 @@ const AssetForm = forwardRef<AssetFormHandle, Props>(function AssetForm(
         toast.info("Your asset draft was restored.");
       })().catch((error: unknown) => {
         if (controller.signal.aborted) return;
-        setDraftGuidance({ tone: "error", message: `${error instanceof Error ? error.message : "The draft could not be restored."} Your saved draft is unchanged. Retry loading before editing or submitting.` });
+        setDraftGuidance({ tone: "error", message: `${safeReportOperationError(error, "The draft could not be loaded. Check your connection and account access.")} Your saved draft is unchanged. Retry loading before editing or submitting.` });
         publishDraftStatus("error", "Draft restore failed");
       }).finally(() => {
         if (!controller.signal.aborted) setRestoringAccountDraft(false);
@@ -1222,9 +1224,7 @@ const AssetForm = forwardRef<AssetFormHandle, Props>(function AssetForm(
           setDraftGuidance({
             tone: "error",
             message:
-              restoreError instanceof Error
-                ? restoreError.message
-                : "The draft could not be restored.",
+              safeReportOperationError(restoreError, "The draft could not be restored. Retry loading before editing or submitting."),
           });
           publishDraftStatus("error", "Draft restore failed");
         }
@@ -1990,6 +1990,12 @@ const AssetForm = forwardRef<AssetFormHandle, Props>(function AssetForm(
         },
         signal: controller.signal,
       });
+      assertReportUploadAccepted(response);
+      if (isPreviousReportReceipt(response)) {
+        setError("An earlier submission was already accepted. Your current edits have not been submitted again and remain in this form. Open My Reports in another tab to check the existing report before continuing.");
+        publishDraftStatus("dirty", "Existing report found · current form retained");
+        return;
+      }
 
       if (submitAbortRef.current === controller) submitAbortRef.current = null;
       setSubmissionFinalizing(true);
@@ -2056,9 +2062,9 @@ const AssetForm = forwardRef<AssetFormHandle, Props>(function AssetForm(
         submitError?.response?.status === 409 &&
         submitError?.response?.data?.code === "SUBMISSION_MANIFEST_CHANGED"
       ) {
-        if (auctioneer) {
+        if (auctioneer || reportTransferErrorData(submitError).data.canSupersede !== true || reportTransferErrorData(submitError).data.accepted !== false) {
           setError(
-            "This Auctioneer upload was started with different media. Restore the original media selection and retry; a replacement upload cannot safely reuse this contract's submission identity."
+            "This upload was started with different media. Its acceptance has not been ruled out. Check My Reports before retrying; your current form and media have not been cleared."
           );
         } else {
           setSubmissionManifestConflict(true);
@@ -2068,10 +2074,11 @@ const AssetForm = forwardRef<AssetFormHandle, Props>(function AssetForm(
         }
         publishDraftStatus("dirty", "New upload identity required");
       } else {
-        const message =
-          submitError?.response?.data?.message ||
-          submitError?.message ||
-          "Failed to create asset report";
+        if (!auctioneer && canSaveSeparateReportDraft(submitError)) {
+          const sessionId = reportTransferErrorData(submitError).data.sessionId;
+          if (typeof sessionId === "string" && sessionId.trim()) setUnavailableSessionId(sessionId);
+        }
+        const message = reportTransferErrorMessage(submitError, "submit");
         setError(message);
         toast.error(message);
         publishDraftStatus("dirty", "Submission failed · unsaved changes");
@@ -2113,7 +2120,7 @@ const AssetForm = forwardRef<AssetFormHandle, Props>(function AssetForm(
     { photos: 0, videos: 0 }
   );
   const draftSaving = draftSaveActive;
-  const transferActive = draftSaving || submitting;
+  const transferActive = draftSaving || submitting || separateDraftSaving;
   const locationHint = locationAttribution ? (
     <>
       {locationStatus} ·{" "}
@@ -2142,14 +2149,14 @@ const AssetForm = forwardRef<AssetFormHandle, Props>(function AssetForm(
   };
 
   useEffect(() => {
-    if (!draftSaving && !submitting) return;
+    if (!draftSaving && !submitting && !separateDraftSaving) return;
     const warnBeforeLeaving = (event: BeforeUnloadEvent) => {
       event.preventDefault();
       event.returnValue = "";
     };
     window.addEventListener("beforeunload", warnBeforeLeaving);
     return () => window.removeEventListener("beforeunload", warnBeforeLeaving);
-  }, [draftSaving, submitting]);
+  }, [draftSaving, submitting, separateDraftSaving]);
 
   return (
     <form
@@ -2187,6 +2194,7 @@ const AssetForm = forwardRef<AssetFormHandle, Props>(function AssetForm(
           onCancel={cancelActiveOperation}
         />
       ) : null}
+      {separateDraftSaving ? <p role="status" className="p-4 text-sm">Saving the separate draft and media. Keep this page open.</p> : null}
       <div
         className="contents"
         inert={transferActive ? true : undefined}
@@ -2199,6 +2207,11 @@ const AssetForm = forwardRef<AssetFormHandle, Props>(function AssetForm(
               {error}
             </FormAlert>
           ) : null}
+          {error ? <a href="/reports" target="_blank" rel="noopener noreferrer" className="text-sm font-semibold underline">Open My Reports (new tab)</a> : null}
+          {unavailableSessionId && !auctioneer ? <SeparateReportDraftRecovery userId={userId} kind="asset" sourceSessionId={unavailableSessionId} getSnapshot={() => {
+            const snapshot = makeSnapshot(saveRevisionRef.current);
+            return { formData: snapshot.formData, lots: snapshot.lots, contractNo: snapshot.formData.contractNo || "" };
+          }} onBusyChange={(busy) => { activeFormOperationRef.current = busy ? "draft-save" : null; setSeparateDraftSaving(busy); }} /> : null}
 
           {draftGuidance ? (
             <FormAlert
@@ -2743,7 +2756,6 @@ const AssetForm = forwardRef<AssetFormHandle, Props>(function AssetForm(
         onResume={() => {
           setActiveReportConflict(false);
           toast.info("The existing report is still processing. Check My Reports for its status.");
-          onSuccess?.("Existing report resumed. Open My Reports to follow its progress.");
         }}
         onCreateSeparate={() => {
           setActiveReportConflict(false);

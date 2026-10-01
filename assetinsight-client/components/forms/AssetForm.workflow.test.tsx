@@ -348,6 +348,81 @@ describe("AssetForm manual save and submission workflow", () => {
     }
   });
 
+  it.each([
+    { failure: new Error("Network Error"), expected: /connection|network/i },
+    { failure: Object.assign(new Error("Request failed with status code 409"), { response: { status: 409, data: { code: "DRAFT_REVISION_CONFLICT", message: "This draft changed on another device. Review the latest saved version." } } }), expected: /version already saved/i },
+  ])("keeps an unsuccessful draft save open with actionable guidance", async ({ failure, expected }) => {
+    mocks.upsertWithMedia.mockRejectedValue(failure);
+    render(<AssetForm />);
+    await waitForResolvedAssetLocation();
+    fillRequiredReportFields();
+    addTestMedia();
+    fireEvent.click(screen.getByRole("button", { name: /Save draft/i }));
+    await waitFor(() => expect(screen.getByText(expected)).toBeVisible());
+    expect(screen.queryByText("Network Error")).not.toBeInTheDocument();
+    expect(screen.queryByText(/Request failed with status code/)).not.toBeInTheDocument();
+    expect(screen.getByLabelText(/Client name/i)).toHaveValue("Workflow Client");
+    expect(screen.getByTestId("selected-asset-media")).toHaveTextContent("asset-photo.jpg");
+    expect(mocks.deleteScopedDraft).not.toHaveBeenCalled();
+    expect(mocks.deleteDraftByClientId).not.toHaveBeenCalled();
+    expect(mocks.toastSuccess).not.toHaveBeenCalled();
+  });
+
+  it.each([{}, { reportId: "unaccepted-placeholder", phase: "upload", status: "uploading" }])("does not clear a form for an incomplete acceptance receipt %j", async (receipt) => {
+    const onSuccess = vi.fn();
+    mocks.createAsset.mockResolvedValue(receipt);
+    render(<AssetForm onSuccess={onSuccess} />);
+    await waitForResolvedAssetLocation();
+    fillRequiredReportFields();
+    addTestMedia();
+    fireEvent.click(screen.getByRole("button", { name: "Create report" }));
+    await waitFor(() => expect(mocks.createAsset).toHaveBeenCalledOnce());
+    await waitFor(() => expect(screen.getByRole("button", { name: "Create report" })).toBeEnabled());
+    expect(onSuccess).not.toHaveBeenCalled();
+    expect(mocks.deleteScopedDraft).not.toHaveBeenCalled();
+    expect(mocks.deleteDraftByClientId).not.toHaveBeenCalled();
+    expect(screen.getByLabelText(/Client name/i)).toHaveValue("Workflow Client");
+    expect(screen.getByTestId("selected-asset-media")).toHaveTextContent("asset-photo.jpg");
+  });
+
+  it("keeps current data when an earlier accepted report is found", async () => {
+    const onSuccess = vi.fn();
+    mocks.createAsset.mockResolvedValue({ reportId: "old-report", jobId: "old-job", status: "processed", reusedAcceptance: true });
+    render(<AssetForm onSuccess={onSuccess} />);
+    await waitForResolvedAssetLocation(); fillRequiredReportFields(); addTestMedia();
+    fireEvent.click(screen.getByRole("button", { name: "Create report" }));
+    await screen.findByText(/earlier submission was already accepted/);
+    expect(onSuccess).not.toHaveBeenCalled();
+    expect(mocks.deleteDraftByClientId).not.toHaveBeenCalled();
+    expect(mocks.deleteScopedDraft).not.toHaveBeenCalled();
+    expect(screen.getByTestId("selected-asset-media")).toHaveTextContent("asset-photo.jpg");
+  });
+
+  it.each([true, false])("offers separate saved recovery only for authoritative eligibility %s", async (canCreateSeparate) => {
+    mocks.createAsset.mockRejectedValue({ response: { status: 409, data: { code: "UPLOAD_SESSION_REPORT_UNAVAILABLE", data: { sessionId: "old-session", accepted: true, reportAvailable: false, canCreateSeparate } } } });
+    render(<AssetForm />);
+    await waitForResolvedAssetLocation(); fillRequiredReportFields(); addTestMedia();
+    fireEvent.click(screen.getByRole("button", { name: "Create report" }));
+    await screen.findByText(/old submission cannot be reused/);
+    expect(Boolean(screen.queryByRole("button", { name: "Save separate draft" }))).toBe(canCreateSeparate);
+    expect(mocks.upsertWithMedia).not.toHaveBeenCalled();
+    expect(mocks.deleteDraftByClientId).not.toHaveBeenCalled();
+    expect(screen.getByTestId("selected-asset-media")).toHaveTextContent("asset-photo.jpg");
+  });
+
+  it("checks an existing report in another tab without closing the unsent form", async () => {
+    const onSuccess = vi.fn();
+    mocks.createAsset.mockRejectedValue({ response: { status: 409, data: { code: "ACTIVE_REPORT_EXISTS" } } });
+    render(<AssetForm onSuccess={onSuccess} />);
+    await waitForResolvedAssetLocation(); fillRequiredReportFields(); addTestMedia();
+    fireEvent.click(screen.getByRole("button", { name: "Create report" }));
+    const dialog = await screen.findByRole("dialog", { name: "Report already processing" });
+    const link = within(dialog).getByRole("link", { name: "Open My Reports (new tab)" });
+    expect(link).toHaveAttribute("target", "_blank"); fireEvent.click(link);
+    expect(onSuccess).not.toHaveBeenCalled(); expect(mocks.deleteDraftByClientId).not.toHaveBeenCalled();
+    expect(screen.getByLabelText(/Client name/i)).toHaveValue("Workflow Client");
+  });
+
   it.each([["Smart Upload", "black_divider"], ["Lot Number Upload", "lot_number"]])("opens %s with its own method", async (label, method) => {
     render(<AssetForm />);
     fillRequiredReportFields();
@@ -407,7 +482,7 @@ describe("AssetForm manual save and submission workflow", () => {
         })));
       }
 
-      await act(async () => upload.resolve({ reportId: "accepted-asset-report", status: "processing" }));
+      await act(async () => upload.resolve({ reportId: "accepted-asset-report", jobId: "accepted-job", status: "processing" }));
       await waitFor(() => expect(mocks.deleteDraftByClientId).toHaveBeenCalledExactlyOnceWith(auctioneer.clientSubmissionId, "asset"));
       expect(onAcceptedAndContinue).toHaveBeenCalledExactlyOnceWith("accepted-asset-report", expect.objectContaining({ contractNo: auctioneer.contract.contractNo }));
       expect(onSuccess).not.toHaveBeenCalled();
@@ -426,7 +501,7 @@ describe("AssetForm manual save and submission workflow", () => {
     const onSuccess = vi.fn();
     mocks.createAsset
       .mockRejectedValueOnce(new Error("Connection interrupted"))
-      .mockResolvedValueOnce({ reportId: "accepted-after-retry" });
+      .mockResolvedValueOnce({ reportId: "accepted-after-retry", jobId: "accepted-job", status: "processing" });
     render(<AssetForm auctioneer={makeAuctioneerSetup()} onAcceptedAndContinue={onAcceptedAndContinue} onSuccess={onSuccess} />);
     addTestMedia();
     fireEvent.click(screen.getByRole("button", { name: "Create Lot & Continue" }));
@@ -475,7 +550,7 @@ describe("AssetForm manual save and submission workflow", () => {
         await waitFor(() => expect(mocks.createAsset).toHaveBeenCalledOnce());
         expect(mocks.upsertWithMedia).not.toHaveBeenCalled();
       }
-      await act(async () => pending.resolve({ _id: "saved-draft", media: [], reportId: "accepted-single-flight" }));
+      await act(async () => pending.resolve({ _id: "saved-draft", media: [], reportId: "accepted-single-flight", jobId: "accepted-job", status: "processing" }));
       if (first === "continue") {
         await waitFor(() => expect(onAcceptedAndContinue).toHaveBeenCalledExactlyOnceWith("accepted-single-flight", expect.objectContaining({ contractNo: "IMPORTED-100" })));
         expect(onSuccess).not.toHaveBeenCalled();
@@ -492,7 +567,7 @@ describe("AssetForm manual save and submission workflow", () => {
   it("continues accepted imported work even when old-draft cleanup fails", async () => {
     const onAcceptedAndContinue = vi.fn();
     const onSuccess = vi.fn();
-    mocks.createAsset.mockResolvedValueOnce({ reportId: "accepted-cleanup-failure" });
+    mocks.createAsset.mockResolvedValueOnce({ reportId: "accepted-cleanup-failure", jobId: "accepted-job", status: "processing" });
     mocks.deleteScopedDraft.mockRejectedValueOnce(new Error("Local storage unavailable"));
     render(<AssetForm auctioneer={makeAuctioneerSetup()} onAcceptedAndContinue={onAcceptedAndContinue} onSuccess={onSuccess} />);
     addTestMedia();
@@ -542,7 +617,7 @@ describe("AssetForm manual save and submission workflow", () => {
     };
     mocks.restoreLots.mockResolvedValueOnce(lots);
     mocks.deleteScopedDraft.mockClear();
-    mocks.createAsset.mockResolvedValueOnce({ reportId: "successor-accepted" });
+    mocks.createAsset.mockResolvedValueOnce({ reportId: "successor-accepted", jobId: "accepted-job", status: "processing" });
     render(<AssetForm auctioneer={next} resumeDraft={resumeDraft} onSuccess={onSuccess} />);
     await waitFor(() => expect(screen.getByTestId("selected-asset-media")).toHaveTextContent("asset-photo.jpg"));
     fireEvent.click(screen.getByRole("button", { name: "Create report" }));
@@ -569,7 +644,7 @@ describe("AssetForm manual save and submission workflow", () => {
   });
 
   it("submits sparse per-lot video counts with every selected clip in lot order", async () => {
-    mocks.createAsset.mockResolvedValueOnce({ reportId: "video-report", status: "processing" });
+    mocks.createAsset.mockResolvedValueOnce({ reportId: "video-report", jobId: "accepted-job", status: "processing" });
     render(<AssetForm />);
     await waitForResolvedAssetLocation();
     fillRequiredReportFields();
@@ -874,7 +949,7 @@ describe("AssetForm manual save and submission workflow", () => {
       .mockRejectedValueOnce({
         response: {
           status: 409,
-          data: { code: "SUBMISSION_MANIFEST_CHANGED" },
+          data: { code: "SUBMISSION_MANIFEST_CHANGED", data: { accepted: false, canSupersede: true } },
         },
       })
       .mockImplementationOnce(
@@ -946,7 +1021,7 @@ describe("AssetForm manual save and submission workflow", () => {
           data: { code: "ACTIVE_REPORT_EXISTS" },
         },
       })
-      .mockResolvedValueOnce({ message: "Accepted" });
+      .mockResolvedValueOnce({ message: "Accepted", reportId: "accepted-report", jobId: "accepted-job", status: "processing" });
     render(<AssetForm />);
     await waitForResolvedAssetLocation();
     fillRequiredReportFields();
@@ -977,7 +1052,7 @@ describe("AssetForm manual save and submission workflow", () => {
 
   it("removes cancellation after acceptance while final cleanup is pending", async () => {
     const cleanup = deferred<void>();
-    mocks.createAsset.mockResolvedValueOnce({ message: "Accepted" });
+    mocks.createAsset.mockResolvedValueOnce({ message: "Accepted", reportId: "accepted-report", jobId: "accepted-job", status: "processing" });
     mocks.deleteDraftByClientId.mockReturnValueOnce(cleanup.promise);
     render(<AssetForm />);
     await waitForResolvedAssetLocation();

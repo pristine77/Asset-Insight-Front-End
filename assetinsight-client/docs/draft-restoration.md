@@ -46,7 +46,43 @@ starts a fresh cancellable restore rather than consuming a one-shot guard.
 compatible with other callers. A failed original rejects the whole restoration;
 it does not silently drop photos. Main, extra and video slots remain separate.
 
-## Current verification (2026-09-29)
+## Upload and failed-save retention (2026-10-01)
+
+Asset/Lot final create/complete responses now require a real report ID and an
+explicit acceptance or documented final job/status receipt before clearing form
+state. Upload placeholders, malformed receipts and prior accepted report receipts
+leave current details/media and saved drafts intact. Existing-report status opens
+in another tab rather than invoking the current form's successful-submit handler.
+Network/409 messages explain the next step without displaying raw Axios errors,
+provider HTML, tokens, signed URLs or stacks. Retry retains the same upload ID;
+neither a timeout nor a report ID alone authorizes another submission.
+
+The additive backend `UPLOAD_SESSION_REPORT_UNAVAILABLE` response offers **Save
+separate draft** only with `accepted:true`, `reportAvailable:false` and
+`canCreateSeparate:true` on an ordinary report. Incoming identities are excluded.
+This explicit operation persists a stable fresh ID before saving the current
+complete form/media using existing File references. No original draft is deleted,
+no report is submitted automatically, and no supersession alias is sent. On
+success, the user opens Drafts in another tab to review and submit the new draft.
+Uncertain saves reuse that fresh identity; failed saves leave the original form
+open. Cloud media may need uploading into the independent new draft; no duplicate
+browser-original bytes are made. Local recovery metadata contains IDs/revision
+only, not notes or images.
+
+All multi-step draft-save API calls retain one captured account session. The
+separate recovery controller aborts on owner/source/unmount and suppresses stale
+progress/receipts; a changed session cannot save old form details for a new owner.
+Manifest replacement requires authoritative unaccepted/supersedable evidence,
+not a placeholder report ID. Supporting backend must be released before web.
+
+Regression coverage includes missing/placeholder/historical acceptance, failed
+save/submit retention, safe error shapes, separate-draft receipt/retry identity,
+owner changes and cancellation. Final isolated web gate: 108 files / 1,154 tests,
+lint, typecheck and production build passed. Isolated fixtures do not certify real 992-photo
+network endurance or a particular customer's storage completeness. No production
+report/draft repair or submission is part of these source changes.
+
+## Previous verification (2026-09-29)
 
 - Final web gates: 104 files / 1,002 tests, typecheck, lint and production build.
 - Six isolated production Chromium flows: Asset and Lot Listing at 320px, 390px

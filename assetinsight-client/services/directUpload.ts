@@ -1,4 +1,5 @@
 import API from "@/lib/api";
+import { assertReportUploadAccepted } from "./reportTransferErrors";
 
 export type DirectUploadFile = {
   file: File;
@@ -219,14 +220,6 @@ function postWithSignal<T>(
     : API.post<T>(url, data);
 }
 
-const uploadErrorMessage = (error: unknown, fallback: string) => {
-  const responseMessage = (error as any)?.response?.data?.message;
-  if (typeof responseMessage === "string" && responseMessage.trim()) {
-    return responseMessage.trim();
-  }
-  return error instanceof Error && error.message ? error.message : fallback;
-};
-
 const isRetryableServerUploadError = (error: unknown) => {
   const status = Number((error as any)?.response?.status || 0);
   return status === 0 || status === 408 || status === 425 || status === 429 || status >= 500;
@@ -318,8 +311,7 @@ export function putFileWithProgress(
         if (delta) onDelta?.(delta);
         resolveOnce();
       } else {
-        const detail = xhr.responseText?.trim().replace(/\s+/g, " ").slice(0, 180);
-        rejectOnce(new Error(`R2 upload failed for ${file.name} (${xhr.status})${detail ? `: ${detail}` : ""}`));
+        rejectOnce(new Error(`The photo upload failed for ${file.name} (${xhr.status}).`));
       }
     };
     xhr.onerror = () =>
@@ -480,15 +472,9 @@ export async function uploadFileToReportSession(args: {
       if (args.signal?.aborted) {
         throw abortReason(args.signal);
       }
-      const directMessage = uploadErrorMessage(
-        directUploadError,
-        "Direct R2 upload failed"
-      );
-      const fallbackMessage = uploadErrorMessage(
-        fallbackError,
-        "Server fallback upload failed"
-      );
-      throw new Error(`${directMessage}. ${fallbackMessage}`);
+      // Keep the API code/receipt for safe conflict recovery. Do not combine
+      // provider response text, signed URLs or an Axios transport message.
+      throw fallbackError;
     }
   }
 }
@@ -601,7 +587,8 @@ export async function uploadReportFilesDirectToR2(args: {
     throw error;
   }
   const session = sessionEnvelope.data;
-  if (session.alreadyQueued && session.reportId) {
+  if (session.alreadyQueued === true && session.reportId) {
+    assertReportUploadAccepted(session);
     args.onUploadProgress?.(1);
     return {
       message: "Submission already accepted and is being processed.",
@@ -610,6 +597,7 @@ export async function uploadReportFilesDirectToR2(args: {
       status: session.status || "processing",
       phase: session.processed || session.status === "processed" ? "done" : "processing",
       resumed: true,
+      reusedAcceptance: true,
     };
   }
   throwIfAborted(args.signal);
@@ -681,6 +669,7 @@ export async function uploadReportFilesDirectToR2(args: {
     session.sessionId,
     args.signal
   );
+  assertReportUploadAccepted(data);
   args.onUploadProgress?.(1);
   return data;
 }

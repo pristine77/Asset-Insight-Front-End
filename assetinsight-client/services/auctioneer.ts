@@ -146,6 +146,12 @@ function contactName(...values: unknown[]): string | undefined {
   )?.trim();
 }
 
+function contractDescription(...values: unknown[]): string | undefined {
+  return values.find((value): value is string =>
+    typeof value === "string" && Boolean(value.trim())
+  )?.trim();
+}
+
 function normalizeKind(value: unknown, record: UnknownRecord): AuctioneerIncomingKind {
   const kind = textValue(value).toLowerCase();
   if (kind.includes("unknown")) return "unknown";
@@ -228,6 +234,7 @@ function normalizeIncomingItem(value: unknown): AuctioneerIncomingItem {
       item.salespersonName, item.salesperson_name,
       contract.salespersonName, contract.salesperson_name
     ),
+    description: contractDescription(item.description, contract.description),
     eventId:
       textValue(item.eventId, item.event_id, contract.eventId, event.id, event._id) ||
       undefined,
@@ -399,6 +406,7 @@ function normalizeSetup(value: unknown): AuctioneerWorkItemSetup {
         raw.salespersonName, raw.salesperson_name,
         contract.salespersonName, contract.salesperson_name
       ),
+      description: contractDescription(raw.description, contract.description),
       eventId:
         textValue(raw.eventId, contract.eventId, event.id, event._id) || undefined,
       eventTitle: textValue(

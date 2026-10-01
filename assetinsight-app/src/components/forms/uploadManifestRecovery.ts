@@ -8,19 +8,33 @@ export function uploadConflictSource(error: any, fallback: string): string {
 }
 
 /** Recovery is an explicit action, never an automatic identity change/retry. */
-export function showUploadManifestRecovery(error: any, replace?: () => void): boolean {
-  if (error?.response?.status !== 409 || error?.response?.data?.code !== 'SUBMISSION_MANIFEST_CHANGED') return false;
-  if (error.response.data.data?.reportId) {
-    Alert.alert('Existing report found', 'This upload already belongs to a report. Your current draft is saved. Open Reports or Previews to review the existing report, or contact support; it will not be replaced or submitted again.');
+export function showUploadManifestRecovery(error: any, actions: { replace?: () => void; startSeparate?: () => void } = {}): boolean {
+  const code = error?.response?.data?.code;
+  if (error?.response?.status !== 409 || !['SUBMISSION_MANIFEST_CHANGED', 'UPLOAD_SESSION_REPORT_UNAVAILABLE'].includes(code)) return false;
+  const receipt = error.response.data.data;
+  const keepDraft = { text: 'Keep Draft', style: 'cancel' as const };
+  if (code === 'UPLOAD_SESSION_REPORT_UNAVAILABLE' && receipt?.accepted === true && receipt?.reportAvailable === false) {
+    const startSeparate = receipt.canCreateSeparate === true ? actions.startSeparate : undefined;
+    Alert.alert('Earlier report unavailable', startSeparate
+      ? 'The earlier upload was accepted, but its report is no longer available. Keep this draft, or explicitly submit these photos as a new report. The earlier submission will not be retried or replaced, and its saved history will be kept.'
+      : 'The earlier upload was accepted, but its report is no longer available. Keep this draft and its originals. For Incoming work, contact support to recover the assigned upload; do not create an unrelated report.',
+    [keepDraft, ...(startSeparate ? [{ text: 'Start separate report', onPress: startSeparate }] : [])]);
     return true;
   }
+  if (receipt?.accepted === true && receipt?.reportAvailable === true) {
+    Alert.alert('Existing report found', 'The server confirms the earlier upload was accepted. Keep your draft and open Reports or Previews to review it. It will not be replaced or submitted again.', [keepDraft]);
+    return true;
+  }
+  // A reserved report ID is not proof of acceptance, and missing legacy fields
+  // are not permission to rotate identities. The server rechecks on replacement.
+  const replace = code === 'SUBMISSION_MANIFEST_CHANGED' && receipt?.accepted === false && receipt?.canSupersede === true ? actions.replace : undefined;
   Alert.alert(
-    'Upload needs updating',
+    replace ? 'Upload needs updating' : 'Upload needs checking',
     replace
-      ? 'The photos or lot grouping differ from the earlier upload. Your draft is saved. Upload the current version? The server will replace only an unfinished upload; an already-accepted report will not be replaced or duplicated.'
-      : 'The photos or lot grouping differ from the earlier Incoming upload. Your draft is saved. Keep this draft and contact support to recover the same assigned upload; do not create a separate report for it.',
+      ? 'The photos or lot grouping differ from the earlier upload. Upload the current version? Your draft and originals are kept. The server will replace only an unfinished upload; an already-accepted report will not be replaced or duplicated.'
+      : 'The earlier upload cannot safely be replaced yet. Keep this draft and its originals. Try Resume upload to check the same submission, or contact support if this continues. Incoming work must keep its assigned upload.',
     [
-      { text: 'Keep Draft', style: 'cancel' },
+      keepDraft,
       ...(replace ? [{ text: 'Upload updated version', onPress: replace }] : []),
     ],
   );

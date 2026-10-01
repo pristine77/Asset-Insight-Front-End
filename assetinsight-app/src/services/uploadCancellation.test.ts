@@ -46,7 +46,7 @@ beforeEach(() => {
   jest.mocked(api.post).mockImplementation(async (url: any) => {
     if (url.endsWith('/upload-session')) return { data: { data: session } };
     if (url.endsWith('/verify')) return { data: { data: { verified: false } } };
-    return { data: { reportId: 'same-report', jobId: 'same-job', message: 'Accepted' } };
+    return { data: { reportId: 'same-report', jobId: 'same-job', message: 'Accepted', phase: 'processing' } };
   });
 });
 afterEach(() => warning.mockRestore());
@@ -143,7 +143,7 @@ it('an uncertain completed upload resumes the same session/submission instead of
   const result = upload().catch((error) => error); const signal = await entered.promise;
   pauseActiveUploads(); completed.resolve({ data: { reportId: 'same-report', jobId: 'same-job' } });
   expect(signal.aborted).toBe(true); expect(await result).toMatchObject({ code: 'ERR_CANCELED', acceptanceUncertain: true });
-  jest.mocked(api.post).mockResolvedValueOnce({ data: { data: { ...session, alreadyQueued: true } } });
+  jest.mocked(api.post).mockResolvedValueOnce({ data: { data: { ...session, alreadyQueued: true, accepted: true } } });
   expect(await upload()).toMatchObject({ reportId: 'same-report', jobId: 'same-job' });
   const creation = jest.mocked(api.post).mock.calls.filter(([url]) => String(url).endsWith('/upload-session'));
   expect(creation).toHaveLength(2); expect(creation[0][1]).toEqual(creation[1][1]);

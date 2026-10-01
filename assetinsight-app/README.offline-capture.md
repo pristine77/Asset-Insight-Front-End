@@ -146,6 +146,25 @@ this does not delete device files or report records. See
 
 ## Verification and rollout
 
+### Authoritative acceptance recovery (2026-10-01)
+
+A report ID by itself is not acceptance. Manifest replacement now requires
+explicit server permission, and uncertain or malformed receipts keep the draft
+visible. If the server proves an earlier accepted report is unavailable and
+authorizes separate creation, an ordinary draft offers **Start separate report**.
+Only confirmation creates and saves fresh capture/submission IDs. Originals, lot
+order and the previous draft/history stay intact; this is not replacement of the
+accepted submission and does not use force-new or a supersedes pointer. Incoming
+work cannot use this action. Account/form changes and local-save failures block
+delayed confirmations.
+
+Replayed acceptance keeps the current draft: the server's matching photo manifest
+does not prove later text/settings were accepted. Review the earlier report in
+Reports/Previews; do not erase drafts or originals to bypass an uncertain upload.
+No reconnect submission or automatic identity rotation was added. Backend receipt
+and draft-cleanup safeguards precede the updated mobile binary. See
+README.android.md for local verification scope and device limitations.
+
 ### Mobile draft and upload recovery (2026-09-30)
 
 Cloud Save Draft/Create Preview supports both draft target modes. When the API

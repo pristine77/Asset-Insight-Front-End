@@ -16,6 +16,24 @@ needed. Form fields, report layouts and delivery permissions are unchanged.
 See the backend integration guide for upstream names and compatibility aliases;
 live provider field availability is not established by the isolated fixtures.
 
+### Contract description (Pristine refresh, 2026-10-01)
+
+The queue and selected-contract panel also display the office's contract
+`description` as plain text, with **Not supplied** for missing values. The
+description wraps within the existing responsive table/cards and detail panel;
+it is not copied into lot descriptions or used to change report content. This
+uses the same additive backend Incoming/setup response and makes no extra
+requests. No form, report layout, accounting or Continue behavior changes.
+The client adapter preserves complete nonblank string descriptions from root or
+saved contract metadata on Incoming, claim, setup and continuation responses.
+Verification: 1,098 tests, typecheck, lint and the production build passed.
+Isolated production-browser checks at 1366px/light and 320px/dark verified
+short, long HTML-like plain text and missing descriptions, keyboard Review,
+complete detail text, no page overflow and no console errors. Requests were
+limited to fixture authentication and metadata reads; no claim or report was
+submitted. Actual Auctioneer field availability still depends on its response.
+Missing/malformed values remain unknown; customer and lot text are not fallbacks.
+
 ## Submission and continuation
 
 For imported Asset and Lot Listing forms, Continue submits the current capture

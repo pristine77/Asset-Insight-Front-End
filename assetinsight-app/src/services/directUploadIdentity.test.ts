@@ -12,7 +12,7 @@ const fs = require('expo-file-system/legacy');
 const originalPlatform = Platform.OS;
 const details = { client_submission_id: 'same-submission', capture_id: 'same-capture', contract_no: '185-photos' };
 const file: DirectUploadFile = { uri: 'file:///original.jpg', name: 'original.jpg', type: 'image/jpeg' };
-const accepted = { reportId: 'same-report', jobId: 'same-job', message: 'Accepted' };
+const accepted = { reportId: 'same-report', jobId: 'same-job', message: 'Accepted', phase: 'processing' };
 
 beforeEach(() => {
   pauseActiveUploads();
@@ -31,6 +31,40 @@ beforeEach(() => {
 afterAll(() => Object.defineProperty(Platform, 'OS', { value: originalPlatform }));
 
 describe.each(['/asset', '/lot-listing'] as const)('%s submission manifest identity', (endpoint) => {
+  it('preserves the submission and media when the server reports an accepted report is unavailable', async () => {
+    const receipt = { accepted: true, reportAvailable: false, canCreateSeparate: true, reportId: 'removed-report', jobId: 'same-submission' };
+    const error = Object.assign(new Error('Earlier report unavailable'), { response: { status: 409, data: { code: 'UPLOAD_SESSION_REPORT_UNAVAILABLE', data: receipt } } });
+    jest.mocked(api.post).mockRejectedValueOnce(error);
+    const progress = jest.fn();
+    await expect(uploadReportFilesDirectToR2({ endpoint, details, files: [{ ...file, size: 321 }], onProgress: progress })).rejects.toBe(error);
+    expect(api.post).toHaveBeenCalledTimes(1);
+    expect(jest.mocked(api.post).mock.calls[0][1]).toMatchObject({ details, files: [{ name: file.name, size: 321 }] });
+    expect(fs.createUploadTask).not.toHaveBeenCalled();
+    expect(progress.mock.calls.some(([percent]) => percent === 100)).toBe(false);
+  });
+
+  it('rejects an unavailable already-queued success-shaped response without sending media', async () => {
+    jest.mocked(api.post).mockResolvedValueOnce({ data: { data: { ...accepted, sessionId: 'same-session', alreadyQueued: true, accepted: true, reportAvailable: false, canCreateSeparate: true, files: [] } } });
+    await expect(uploadReportFilesDirectToR2({ endpoint, details, files: [{ ...file, size: 321 }] })).rejects.toMatchObject({ response: { data: { code: 'UPLOAD_SESSION_REPORT_UNAVAILABLE' } } });
+    expect(api.post).toHaveBeenCalledTimes(1);
+    expect(fs.createUploadTask).not.toHaveBeenCalled();
+  });
+  it('marks an earlier acceptance explicitly so the form cannot discard later editable fields', async () => {
+    jest.mocked(api.post).mockResolvedValueOnce({ data: { data: { ...accepted, sessionId: 'same-session', alreadyQueued: true, accepted: true, reportAvailable: true, files: [] } } });
+    await expect(uploadReportFilesDirectToR2({ endpoint, details: { ...details, client_name: 'Newly edited client' }, files: [{ ...file, size: 321 }] })).resolves.toMatchObject({ ...accepted, alreadyQueued: true, message: expect.any(String) });
+    expect(api.post).toHaveBeenCalledTimes(1);
+    expect(fs.createUploadTask).not.toHaveBeenCalled();
+  });
+
+  it('does not announce completion when the final receipt is missing its report identity', async () => {
+    const defaultPost = jest.mocked(api.post).getMockImplementation()!;
+    jest.mocked(api.post).mockImplementation(async (...args: any[]) => args[0].endsWith('/complete') ? { data: { jobId: 'same-submission' } } : (defaultPost as any)(...args));
+    const progress = jest.fn();
+    await expect(uploadReportFilesDirectToR2({ endpoint, details, files: [{ ...file, size: 321 }], onProgress: progress })).rejects.toMatchObject({ code: 'UPLOAD_RECEIPT_UNCONFIRMED' });
+    expect(progress.mock.calls.some(([percent]) => percent === 100)).toBe(false);
+    expect(jest.mocked(api.post).mock.calls.filter(([url]) => String(url).endsWith('/upload-session'))).toHaveLength(1);
+  });
+
   it.each([{ exists: false }, { exists: true, size: 0 }, { exists: true, size: Number.NaN }])(
     'does not reserve an unknown-size session when local metadata is unavailable: %j', async (info) => {
       fs.getInfoAsync.mockResolvedValue(info);

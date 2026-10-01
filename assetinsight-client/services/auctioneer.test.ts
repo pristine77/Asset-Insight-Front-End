@@ -135,7 +135,30 @@ describe("AuctioneerService incoming", () => {
     }
   });
 
-  describe.each(["getSetup", "claim", "continueWorkItem"] as const)("%s contact metadata", (operation) => {
+  it.each(["root", "contract", "contractSnapshot"])("preserves the complete incoming description from %s", async (source) => {
+    const description = `Equipment <img src=x> ${"A".repeat(5000)}`;
+    const fields = source === "root" ? { description: `  ${description}  ` } : { [source]: { description: `  ${description}  ` } };
+    vi.mocked(API.get).mockResolvedValueOnce({ data: { data: { items: [{ cycleKey: "cycle-1", contractId: "contract-1", ...fields }] } } });
+
+    const [item] = await AuctioneerService.getIncoming();
+
+    expect(item.description).toBe(description);
+  });
+
+  it("keeps missing and malformed descriptions unknown rather than borrowing customer or lot text", async () => {
+    const malformed = [undefined, null, "", " \t ", 42, false, ["Wrong description"], { text: "Wrong description" }];
+    vi.mocked(API.get).mockResolvedValueOnce({ data: { data: { items: malformed.map((description, index) => ({
+      cycleKey: `description-${index}`, contractId: `contract-${index}`, description,
+      customerName: "Independent customer", contract: { description }, lots: [{ description: "Lot description" }],
+    })) } } });
+
+    const items = await AuctioneerService.getIncoming();
+
+    expect(items).toHaveLength(malformed.length);
+    items.forEach((item) => expect(item.description).toBeUndefined());
+  });
+
+  describe.each(["getSetup", "claim", "continueWorkItem"] as const)("%s contract metadata", (operation) => {
     async function readSetup(fields: Record<string, unknown>) {
       const response = {
         data: { data: {
@@ -165,6 +188,24 @@ describe("AuctioneerService incoming", () => {
         consignorName: "Northfield Consignor",
         salespersonName: "Sam Sales",
       });
+    });
+
+    it.each(["root", "contract", "snapshot"])("preserves the complete description from %s", async (source) => {
+      const description = `Farm equipment <b>plain text</b> ${"B".repeat(5000)}`;
+      const contract = { description: `  ${description}  ` };
+      const fields = source === "root" ? contract : source === "contract" ? { contract } : { snapshot: { contract } };
+
+      const setup = await readSetup(fields);
+
+      expect(setup.contract.description).toBe(description);
+      expect(setup.lots).toEqual([]);
+    });
+
+    it("does not stringify malformed or infer absent descriptions", async () => {
+      for (const description of [undefined, null, "", " \t ", 42, false, ["Wrong description"], { text: "Wrong description" }]) {
+        const setup = await readSetup({ description, contract: { description }, customerName: "Independent customer" });
+        expect(setup.contract.description).toBeUndefined();
+      }
     });
 
     it("does not infer missing contacts or stringify malformed canonical values", async () => {

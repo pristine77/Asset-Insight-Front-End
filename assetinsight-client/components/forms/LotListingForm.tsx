@@ -54,6 +54,8 @@ import DuplicateDraftDialog from "./DuplicateDraftDialog";
 import { saveManualDraftOnly } from "./manualDraftSave";
 import AuctioneerContinueAction from "./AuctioneerContinueAction";
 import { acceptedAuctioneerReportId } from "./auctioneerContinuation";
+import { assertReportUploadAccepted, canSaveSeparateReportDraft, isPreviousReportReceipt, reportTransferErrorData, reportTransferErrorMessage, safeReportOperationError } from "@/services/reportTransferErrors";
+import SeparateReportDraftRecovery from "./SeparateReportDraftRecovery";
 import {
   auctioneerDateOnly,
   auctioneerDraftScope,
@@ -279,9 +281,8 @@ function draftFailureGuidance(error: unknown): DraftIssue {
 
   return {
     tone: "warning",
-    title: "Draft media was not fully saved",
-    message:
-        "Your previous valid draft was preserved. Keep this form open and try Save draft again.",
+    title: "Draft save needs attention",
+    message: reportTransferErrorMessage(error, "save"),
   };
 }
 
@@ -309,6 +310,8 @@ export default function LotListingForm({
         : createReportDraftClientId("lot-listing"))
   );
   const draftScopeId = draftClientIdRef.current;
+  const [unavailableSessionId, setUnavailableSessionId] = useState<string | null>(null);
+  const [separateDraftSaving, setSeparateDraftSaving] = useState(false);
   const draftKey = useMemo(
     () => getScopedDraftKey(userId, "lot-listing", draftScopeId),
     [draftScopeId, userId]
@@ -1014,9 +1017,7 @@ export default function LotListingForm({
       toast.success("Draft restored");
     } catch (restoreError) {
       const message =
-        restoreError instanceof Error
-          ? restoreError.message
-          : "The saved draft could not be restored.";
+        safeReportOperationError(restoreError, "The saved draft could not be restored. Check your connection and account access.");
       setDraftIssue({
         tone: "error",
         title: "Draft restore failed",
@@ -1115,9 +1116,7 @@ export default function LotListingForm({
       .catch((restoreError) => {
         if (controller.signal.aborted) return;
         const message =
-          restoreError instanceof Error
-            ? restoreError.message
-            : "The saved draft could not be restored.";
+          safeReportOperationError(restoreError, "The saved draft could not be restored. Check your connection and account access.");
         setDraftIssue({ tone: "error", title: "Draft restore failed", message: `${message} Your saved draft is unchanged. Retry loading before editing or submitting.` });
         reportDraftStatus("error", "Draft restore failed");
         // Keep the error beside Retry. A separate toast can obscure the mobile
@@ -1613,6 +1612,10 @@ export default function LotListingForm({
           });
           responseData = response.data;
         }
+        assertReportUploadAccepted(responseData);
+        if (isPreviousReportReceipt(responseData)) {
+          throw new Error("An earlier submission was already accepted. Your current edits have not been submitted again. Open My Reports in another tab to check the existing report before continuing.");
+        }
 
         if (submitAbortRef.current === controller) submitAbortRef.current = null;
         setSubmissionFinalizing(true);
@@ -1674,9 +1677,9 @@ export default function LotListingForm({
         }
 
         if (isManifestConflict) {
-          if (auctioneer) {
+          if (auctioneer || reportTransferErrorData(submitError).data.canSupersede !== true || reportTransferErrorData(submitError).data.accepted !== false) {
             setError(
-              "This Auctioneer upload was started with different media. Restore the original media selection and retry; a replacement upload cannot safely reuse this contract's submission identity."
+              "This upload was started with different media. Its acceptance has not been ruled out. Check My Reports before retrying; your current form and media have not been cleared."
             );
           } else {
             setSubmissionManifestConflict(true);
@@ -1688,10 +1691,11 @@ export default function LotListingForm({
           return;
         }
 
-        const message =
-          submitError?.response?.data?.message ||
-          submitError?.message ||
-          "Failed to create lot listing.";
+        if (!auctioneer && canSaveSeparateReportDraft(submitError)) {
+          const sessionId = reportTransferErrorData(submitError).data.sessionId;
+          if (typeof sessionId === "string" && sessionId.trim()) setUnavailableSessionId(sessionId);
+        }
+        const message = reportTransferErrorMessage(submitError, "submit");
         setError(message);
         reportDraftStatus("dirty", "Submission failed · unsaved changes");
         toast.error(message);
@@ -1793,14 +1797,14 @@ export default function LotListingForm({
   };
 
   useEffect(() => {
-    if (!draftSaving && !submitting) return;
+    if (!draftSaving && !submitting && !separateDraftSaving) return;
     const warnBeforeLeaving = (event: BeforeUnloadEvent) => {
       event.preventDefault();
       event.returnValue = "";
     };
     window.addEventListener("beforeunload", warnBeforeLeaving);
     return () => window.removeEventListener("beforeunload", warnBeforeLeaving);
-  }, [draftSaving, submitting]);
+  }, [draftSaving, submitting, separateDraftSaving]);
 
   return (
     <form
@@ -1838,10 +1842,11 @@ export default function LotListingForm({
           onCancel={cancelActiveOperation}
         />
       ) : null}
+      {separateDraftSaving ? <p role="status" className="p-4 text-sm">Saving the separate draft and media. Keep this page open.</p> : null}
       <div
         className="contents"
-        inert={transferActive ? true : undefined}
-        aria-hidden={transferActive ? true : undefined}
+        inert={transferActive || separateDraftSaving ? true : undefined}
+        aria-hidden={transferActive || separateDraftSaving ? true : undefined}
       >
         <div className="min-h-0 min-w-0 flex-1 overflow-y-auto overscroll-contain px-4 py-5 sm:px-6 sm:py-6">
         <div className="mx-auto grid w-full max-w-[920px] gap-4 sm:gap-5">
@@ -1850,6 +1855,12 @@ export default function LotListingForm({
               {error}
             </FormAlert>
           ) : null}
+
+          {error ? <a href="/reports" target="_blank" rel="noopener noreferrer" className="text-sm font-semibold underline">Open My Reports (new tab)</a> : null}
+          {unavailableSessionId && !auctioneer ? <SeparateReportDraftRecovery userId={userId || ""} kind="lot-listing" sourceSessionId={unavailableSessionId} getSnapshot={() => {
+            const { lots, ...formData } = snapshotRef.current!;
+            return { formData, lots, contractNo: formData.contractNo };
+          }} onBusyChange={(busy) => { activeFormOperationRef.current = busy ? "draft-save" : null; setSeparateDraftSaving(busy); }} /> : null}
 
           {draftSaveProgress ? (
             <DraftSaveProgressPanel progress={draftSaveProgress} />
@@ -2328,9 +2339,6 @@ export default function LotListingForm({
           setActiveReportConflict(false);
           toast.info(
             "The existing report is still processing. Check My Reports for its status."
-          );
-          onSuccess?.(
-            "Existing report resumed. Open My Reports to follow its progress."
           );
         }}
         onCreateSeparate={() => {

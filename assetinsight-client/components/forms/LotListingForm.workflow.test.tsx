@@ -305,6 +305,52 @@ describe("LotListingForm explicit save and upload workflow", () => {
     window.localStorage.clear();
   });
 
+  it.each([{}, { reportId: "placeholder", jobId: "j", phase: "upload", status: "uploading" }, { reportId: "old-report", jobId: "old-job", status: "processed", reusedAcceptance: true }])("keeps current data for an unproven or historical receipt %j", async (receipt) => {
+    const onSuccess = vi.fn();
+    mocks.uploadReportFilesDirectToR2.mockResolvedValue(receipt);
+    render(<LotListingForm onSuccess={onSuccess} />);
+    await waitForResolvedLotLocation(); addValidListing();
+    fireEvent.click(screen.getByRole("button", { name: "Create Lot Listing" }));
+    await screen.findByText(/did not confirm report acceptance|earlier submission was already accepted/);
+    expect(onSuccess).not.toHaveBeenCalled(); expect(mocks.deleteByClientId).not.toHaveBeenCalled(); expect(mocks.deleteScopedDraft).not.toHaveBeenCalled();
+    expect(screen.getByTestId("selected-listing-media")).toHaveTextContent("lot-photo.jpg");
+  });
+
+  it.each([true, false])("offers separate saved recovery only for authoritative eligibility %s", async (canCreateSeparate) => {
+    mocks.uploadReportFilesDirectToR2.mockRejectedValue({ response: { status: 409, data: { code: "UPLOAD_SESSION_REPORT_UNAVAILABLE", data: { sessionId: "old-session", accepted: true, reportAvailable: false, canCreateSeparate } } } });
+    render(<LotListingForm />);
+    await waitForResolvedLotLocation(); addValidListing();
+    fireEvent.click(screen.getByRole("button", { name: "Create Lot Listing" }));
+    await screen.findByText(/old submission cannot be reused/);
+    expect(Boolean(screen.queryByRole("button", { name: "Save separate draft" }))).toBe(canCreateSeparate);
+    expect(mocks.upsertWithMedia).not.toHaveBeenCalled(); expect(mocks.deleteByClientId).not.toHaveBeenCalled();
+    expect(screen.getByTestId("selected-listing-media")).toHaveTextContent("lot-photo.jpg");
+  });
+
+  it.each([new Error("Network Error"), { response: { status: 409, data: { code: "DRAFT_REVISION_CONFLICT" } } }])("keeps an unsuccessful draft save open with actionable guidance %j", async (failure) => {
+    mocks.upsertWithMedia.mockRejectedValue(failure);
+    render(<LotListingForm />);
+    await waitForResolvedLotLocation(); addValidListing();
+    fireEvent.click(screen.getAllByRole("button", { name: "Save Draft" })[0]);
+    await screen.findByText(/connection was interrupted|version already saved/);
+    expect(screen.queryByText(/^Network Error$/)).not.toBeInTheDocument(); expect(screen.queryByText(/status code 409/)).not.toBeInTheDocument();
+    expect(mocks.deleteByClientId).not.toHaveBeenCalled(); expect(mocks.deleteScopedDraft).not.toHaveBeenCalled();
+    expect(screen.getByTestId("selected-listing-media")).toHaveTextContent("lot-photo.jpg");
+  });
+
+  it("opens existing-report status separately without closing the current listing", async () => {
+    const onSuccess = vi.fn();
+    mocks.uploadReportFilesDirectToR2.mockRejectedValue({ response: { status: 409, data: { code: "ACTIVE_REPORT_EXISTS" } } });
+    render(<LotListingForm onSuccess={onSuccess} />);
+    await waitForResolvedLotLocation(); addValidListing();
+    fireEvent.click(screen.getByRole("button", { name: "Create Lot Listing" }));
+    const dialog = await screen.findByRole("dialog", { name: "Report already processing" });
+    const link = within(dialog).getByRole("link", { name: "Open My Reports (new tab)" });
+    expect(link).toHaveAttribute("target", "_blank"); fireEvent.click(link);
+    expect(onSuccess).not.toHaveBeenCalled(); expect(mocks.deleteByClientId).not.toHaveBeenCalled();
+    expect(screen.getByTestId("selected-listing-media")).toHaveTextContent("lot-photo.jpg");
+  });
+
   it.each([["Smart Upload", "black_divider"], ["Lot Number Upload", "lot_number"]])("opens %s with its own method", async (label, method) => {
     render(<LotListingForm />);
     fireEvent.change(screen.getByRole("textbox", { name: /contract number/i }), { target: { value: "93257" } });
@@ -444,7 +490,7 @@ describe("LotListingForm explicit save and upload workflow", () => {
         })));
       }
 
-      await act(async () => upload.resolve({ reportId: "accepted-listing-report", status: "processing" }));
+      await act(async () => upload.resolve({ reportId: "accepted-listing-report", jobId: "accepted-job", status: "processing" }));
       await waitFor(() => expect(mocks.deleteByClientId).toHaveBeenCalledExactlyOnceWith(auctioneer.clientSubmissionId, "lot-listing"));
       expect(onAcceptedAndContinue).toHaveBeenCalledExactlyOnceWith("accepted-listing-report", expect.objectContaining({ contractNo: auctioneer.contract.contractNo }));
       expect(onSuccess).not.toHaveBeenCalled();
@@ -462,7 +508,7 @@ describe("LotListingForm explicit save and upload workflow", () => {
     const onSuccess = vi.fn();
     mocks.uploadReportFilesDirectToR2
       .mockRejectedValueOnce(new Error("Connection interrupted"))
-      .mockResolvedValueOnce({ reportId: "accepted-after-retry" });
+      .mockResolvedValueOnce({ reportId: "accepted-after-retry", jobId: "accepted-job", status: "processing" });
     render(<LotListingForm auctioneer={makeAuctioneerSetup()} onAcceptedAndContinue={onAcceptedAndContinue} onSuccess={onSuccess} />);
     fireEvent.click(screen.getByRole("button", { name: "Add test media" }));
     fireEvent.click(screen.getByRole("button", { name: "Create Lot & Continue" }));
@@ -512,7 +558,7 @@ describe("LotListingForm explicit save and upload workflow", () => {
         await waitFor(() => expect(mocks.uploadReportFilesDirectToR2).toHaveBeenCalledOnce());
         expect(mocks.upsertWithMedia).not.toHaveBeenCalled();
       }
-      await act(async () => pending.resolve({ _id: "saved-draft", media: [], reportId: "accepted-single-flight" }));
+      await act(async () => pending.resolve({ _id: "saved-draft", media: [], reportId: "accepted-single-flight", jobId: "accepted-job", status: "processing" }));
       if (first === "continue") {
         await waitFor(() => expect(onAcceptedAndContinue).toHaveBeenCalledExactlyOnceWith("accepted-single-flight", expect.objectContaining({ contractNo: "IMPORTED-100" })));
         expect(onSuccess).not.toHaveBeenCalled();
@@ -529,7 +575,7 @@ describe("LotListingForm explicit save and upload workflow", () => {
   it("continues accepted imported work even when old-draft cleanup fails", async () => {
     const onAcceptedAndContinue = vi.fn();
     const onSuccess = vi.fn();
-    mocks.uploadReportFilesDirectToR2.mockResolvedValueOnce({ reportId: "accepted-cleanup-failure" });
+    mocks.uploadReportFilesDirectToR2.mockResolvedValueOnce({ reportId: "accepted-cleanup-failure", jobId: "accepted-job", status: "processing" });
     mocks.deleteScopedDraft.mockRejectedValueOnce(new Error("Local storage unavailable"));
     render(<LotListingForm auctioneer={makeAuctioneerSetup()} onAcceptedAndContinue={onAcceptedAndContinue} onSuccess={onSuccess} />);
     fireEvent.click(screen.getByRole("button", { name: "Add test media" }));
@@ -579,7 +625,7 @@ describe("LotListingForm explicit save and upload workflow", () => {
     };
     mocks.restoreLots.mockResolvedValueOnce(lots);
     mocks.deleteScopedDraft.mockClear();
-    mocks.uploadReportFilesDirectToR2.mockResolvedValueOnce({ reportId: "successor-accepted" });
+    mocks.uploadReportFilesDirectToR2.mockResolvedValueOnce({ reportId: "successor-accepted", jobId: "accepted-job", status: "processing" });
     render(<LotListingForm auctioneer={next} resumeDraft={resumeDraft} onSuccess={onSuccess} />);
     await waitFor(() => expect(screen.getByTestId("selected-listing-media")).toHaveTextContent("lot-photo.jpg"));
     fireEvent.click(screen.getByRole("button", { name: "Create Lot Listing" }));
@@ -865,7 +911,7 @@ describe("LotListingForm explicit save and upload workflow", () => {
       .mockRejectedValueOnce({
         response: {
           status: 409,
-          data: { code: "SUBMISSION_MANIFEST_CHANGED" },
+          data: { code: "SUBMISSION_MANIFEST_CHANGED", data: { accepted: false, canSupersede: true } },
         },
       })
       .mockImplementationOnce(({ signal }: { signal: AbortSignal }) => {
@@ -978,6 +1024,7 @@ describe("LotListingForm explicit save and upload workflow", () => {
     const cleanup = deferred<void>();
     mocks.uploadReportFilesDirectToR2.mockResolvedValueOnce({
       message: "Accepted",
+      reportId: "accepted-report", jobId: "accepted-job", status: "processing",
     });
     mocks.deleteByClientId.mockReturnValueOnce(cleanup.promise);
     render(<LotListingForm />);
@@ -1086,7 +1133,7 @@ describe("LotListingForm explicit save and upload workflow", () => {
     await waitFor(() =>
       expect(mocks.uploadReportFilesDirectToR2).toHaveBeenCalledOnce()
     );
-    await screen.findByText("Failed to create lot listing.");
+    await screen.findByText(/upload could not be confirmed/i);
     expect(mocks.apiPost).not.toHaveBeenCalled();
     expect(screen.getByTestId("test-lot-count")).toHaveTextContent("1");
   });

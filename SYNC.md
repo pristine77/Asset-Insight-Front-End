@@ -1,13 +1,19 @@
 # Sanitized application synchronization
 
-1 October 2026 content-only synchronization, retaining the existing Pristine77
-history through `1efb91f06b92c980e4d25f07db0c4c7929a31f25`:
+1 October 2026 follow-up content-only synchronization, retaining the existing
+Pristine77 history through `7092671`. Source Git history is not imported.
 
 | Application | Source revision |
 | --- | --- |
 | Admin | `a3bb1151739674e06b8b0fee4561962edca5ee53` |
-| Web | `dee79834331ff9bae5a61da57fa392e142bb71d2` |
-| Native | `2f6a839` plus the reviewed local authentication, camera handoff and upload-recovery changes |
+| Web | `7f51fc78a343ed9d2c40c2e212c58178aaa351ba` |
+| Native | `2f6a839` plus reviewed local authentication, camera handoff, upload-recovery and acceptance-receipt changes |
+
+The latest follow-up preserves Pristine77's Incoming description and preview bulk
+selection updates. It adds actionable transfer errors, revision-aware draft saves,
+authoritative upload acceptance checks and explicit separate-report recovery.
+Replayed acceptance does not erase newer local edits. Admin is already current
+and its application files are unchanged by this follow-up.
 
 Includes Incoming consignor/salesperson names, authentication recovery, draft
 restoration safeguards, report queue and Schedule A updates, corrected
@@ -33,13 +39,12 @@ Verification commands are in the root README. Deploy the compatible backend
 before these applications; this synchronization does not deploy or modify
 production reports, databases, videos or Google authorization.
 
-This sanitized release copy passed all five export-boundary checks; admin's 89
-policy tests, lint, typecheck and production build; web's 1,081 tests across 106
-files, lint, typecheck and production build; and native's 778 tests across 79
-suites plus typecheck. Both restored runtime routes appear in the compiled web
-and admin route manifests. Secret/configuration-path scans and whitespace checks
-passed. Dependency lockfiles are unchanged. Provider calls and production
-environment access were excluded from verification.
+This follow-up release copy passed all five export-boundary checks, unchanged
+admin's 89 policy tests, web's 1,154 tests across 108 files plus lint, typecheck and
+production build, and native's 867 tests across 82 suites plus typecheck.
+Secret/configuration-path scans and whitespace checks passed. Dependency lockfiles
+are unchanged. Verification used fresh staging checkouts without production
+environment files or provider credentials.
 No new APK/AAB, physical-device test, live upload, customer draft recovery or
 deployment is implied by this synchronization. In particular, this source sync
 does not claim to resolve an unverified customer camera session or increase the

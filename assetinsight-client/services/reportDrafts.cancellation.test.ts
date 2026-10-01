@@ -22,6 +22,7 @@ vi.mock("@/services/directUpload", () => ({
 }));
 
 import { ReportDraftService } from "./reportDrafts";
+import { advanceAuthSession } from "@/lib/auth-storage";
 
 const input = {
   clientDraftId: "draft-client-1",
@@ -63,6 +64,22 @@ function mediaLots() {
 }
 
 describe("ReportDraftService draft-save cancellation", () => {
+  it("stops after metadata receipt when the account session changes", async () => {
+    mocks.apiPost.mockImplementation(async () => { advanceAuthSession(); return { data: { data: draftRecord() } }; });
+    await expect(ReportDraftService.upsertWithMedia(input, mediaLots())).rejects.toMatchObject({ code: "ERR_CANCELED" });
+    expect(mocks.apiPost).toHaveBeenCalledTimes(1);
+    expect(mocks.apiPost.mock.calls[0][2]._authSession).toHaveProperty("revision");
+    expect(mocks.apiGet).not.toHaveBeenCalled();
+  });
+
+  it("does not mark a draft saved without a server identifier", async () => {
+    mocks.apiPost.mockResolvedValue({ data: { data: { ...draftRecord(), _id: undefined, id: undefined } } });
+    const progress = vi.fn();
+    await expect(ReportDraftService.upsertWithMedia(input, mediaLots(), progress)).rejects.toThrow(/did not confirm the draft save/);
+    expect(progress.mock.calls.some(([, , details]) => details.phase === "complete")).toBe(false);
+    expect(mocks.apiPost).toHaveBeenCalledTimes(1);
+  });
+
   beforeEach(() => {
     Object.values(mocks).forEach((mock) => mock.mockReset());
   });
@@ -99,10 +116,10 @@ describe("ReportDraftService draft-save cancellation", () => {
     );
 
     await vi.waitFor(() => expect(mocks.apiPost).toHaveBeenCalledTimes(2));
-    expect(mocks.apiPost.mock.calls[0][2]).toEqual({
+    expect(mocks.apiPost.mock.calls[0][2]).toMatchObject({
       signal: controller.signal,
     });
-    expect(mocks.apiPost.mock.calls[1][2]).toEqual({
+    expect(mocks.apiPost.mock.calls[1][2]).toMatchObject({
       signal: controller.signal,
     });
 

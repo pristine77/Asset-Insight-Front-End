@@ -1,5 +1,41 @@
 # Android local development
 
+## Upload acceptance and recovery — 2026-10-01 (local)
+
+Asset/Lot recovery distinguishes a reserved report ID from an accepted report.
+Manifest replacement requires the API's explicit `accepted: false` and
+`canSupersede: true`; missing/legacy authority never rotates submission IDs.
+A confirmed unavailable accepted report offers ordinary drafts an explicit
+**Start separate report** only when the API grants `canCreateSeparate`. This
+saves a new capture/submission identity before transport, reuses every original
+media reference, retains the prior draft/history, and sends neither a supersedes
+pointer nor force-new permission. Incoming work remains on its assignment.
+
+Missing, malformed or pre-acceptance receipts cannot hide a draft. An earlier
+acceptance (`alreadyQueued`/`reusedAcceptance`) also keeps the current draft and
+its newer field edits for review; matching photos do not prove those edits were
+accepted. The first successful completion can still finish normally when a fast
+worker has already processed it. Failed local saves cannot claim the latest
+changes were saved. Network/HTTP/proxy failures use actionable guidance without
+raw status codes or HTML, including explicit cloud draft preview failures.
+
+Tests use isolated metadata and mocked transports, including interruption at
+85% with 992 and 5,000 references, exact same-identity/manual resume, bounded four
+workers, owner/unmount fences and rejected fresh-draft saves. These checks do not
+diagnose a physical-device crash, prove real 992-photo memory endurance, or prove
+recovery of the reported customer data.
+The backend receipt/cleanup safeguards must deploy before the updated mobile
+binary. No production data, APK release, push or deployment is part of this work.
+Final local gate: 82 Jest suites / 867 tests, 228 focused recovery checks,
+TypeScript and Android/iOS production-mode Hermes exports pass. Scoped ESLint
+has zero errors (existing style/import warnings remain). Bundles use an isolated
+loopback API and live outside the repository. The final source also passes an
+offline JDK17 `:app:assembleDebug` build using existing dependencies and SDK
+caches, with SDK downloads disabled. This verifies native debug integration;
+the Hermes exports separately verify JavaScript bundling. No APK was installed,
+release artifact built, or physical-device run made for this acceptance/recovery
+task.
+
 ## Stalled Asset/Lot uploads — 2026-09-30 (local)
 
 The reported "Uploading Images" hang exposed unbounded waits in native socket

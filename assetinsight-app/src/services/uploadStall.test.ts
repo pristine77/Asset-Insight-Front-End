@@ -16,7 +16,7 @@ const files: DirectUploadFile[] = Array.from({ length: 160 }, (_, i) => ({
   uri: `file:///original-${i}.jpg`, name: `original-${i}.jpg`, type: 'image/jpeg', size: 1000,
   lotIndex: Math.floor(i / 80), imageIndex: i % 80, role: 'main',
 }));
-const accepted = { reportId: 'same-report', jobId: 'same-job', message: 'Accepted' };
+const accepted = { reportId: 'same-report', jobId: 'same-job', message: 'Accepted', phase: 'processing' };
 const never = () => new Promise<any>(() => {});
 const flush = async () => { for (let i = 0; i < 40; i++) await Promise.resolve(); };
 
@@ -103,12 +103,12 @@ describe.each(['/asset', '/lot-listing'] as const)('%s stalled uploads', endpoin
     expect(api.post).toHaveBeenCalledTimes(1);
   });
 
-  it('stops an unresponsive Android gallery upload and never sends queued photos or a fallback', async () => {
+  it.each([992, 5000])('stops an unresponsive Android gallery upload of %s references and never sends queued photos or a fallback', async count => {
     Object.defineProperty(Platform, 'OS', { value: 'android' });
     const cancel = jest.fn(never);
     const stream = jest.fn(never);
     jest.mocked(loadNativeAuctionCamera).mockResolvedValue({ openAuctionCamera: jest.fn(), streamContentUriUpload: stream, cancelContentUriUpload: cancel });
-    const selected = Array.from({ length: 5000 }, (_, i) => ({ ...files[0], uri: `content://media/external/images/media/${i}`, name: `photo-${i}.jpg`, lotIndex: Math.floor(i / 200), imageIndex: i % 200 }));
+    const selected = Array.from({ length: count }, (_, i) => ({ ...files[0], uri: `content://media/external/images/media/${i}`, name: `photo-${i}.jpg`, lotIndex: Math.floor(i / 200), imageIndex: i % 200 }));
     const result = upload(selected).catch(error => error);
     await jest.advanceTimersByTimeAsync(0);
     expect(stream).toHaveBeenCalledTimes(4);
@@ -116,6 +116,10 @@ describe.each(['/asset', '/lot-listing'] as const)('%s stalled uploads', endpoin
     expect(await result).toMatchObject({ code: 'UPLOAD_STALLED' });
     expect(stream).toHaveBeenCalledTimes(4); expect(cancel).toHaveBeenCalledTimes(4);
     expect(global.fetch).not.toHaveBeenCalled(); expect(api.post).toHaveBeenCalledTimes(1);
+    const manifest = (jest.mocked(api.post).mock.calls[0][1] as any).files;
+    expect(manifest).toHaveLength(count);
+    expect(manifest.map((entry: any) => [entry.lotIndex, entry.imageIndex])).toEqual(selected.map(entry => [entry.lotIndex, entry.imageIndex]));
+    expect((jest.mocked(api.post).mock.calls[0][1] as any).details).toEqual(details);
   });
 
   it('times out file metadata preparation before reserving a report and can be paused without its callback', async () => {

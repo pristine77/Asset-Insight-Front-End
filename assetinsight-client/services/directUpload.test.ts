@@ -141,6 +141,7 @@ describe("report-session upload transport", () => {
           jobId: "job-manifest",
           reportId: "report-manifest",
           alreadyQueued: true,
+          status: "processing",
           files: [],
         },
       },
@@ -359,7 +360,7 @@ describe("report-session upload transport", () => {
     await vi.runAllTimersAsync();
 
     await expect(uploadError).resolves.toMatchObject({
-      message: expect.stringContaining("R2 upload failed for first.jpg"),
+      response: { status: 400 },
     });
     expect(MixedOutcomeDirectUploadRequest.abortCount).toBe(1);
     expect(apiPost.mock.calls.map(([url]) => url)).not.toContain(

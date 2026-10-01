@@ -20,6 +20,7 @@ import useDeviceDraftSave from './useDeviceDraftSave';
 import DraftStorageStatus from './DraftStorageStatus';
 import OfflineCaptureStore from '../../services/offlineCaptureStore';
 import { prepareOfflineSubmission } from '../../services/offlineSubmissionService';
+import { assertReportUploadAccepted, isExistingReportUploadReceipt } from '../../services/reportUploadReceipt';
 import { showUploadManifestRecovery, uploadConflictSource } from './uploadManifestRecovery';
 import { createUploadOperation, pauseActiveUploads } from '../../services/uploadCancellation';
 import { needsExplicitUploadResume, setDraftCaptureMode } from '../../services/offlineDraftPolicy';
@@ -32,6 +33,7 @@ import reportDraftService, {
 } from '../../services/reportDraftService';
 import AutoSaveService, { AutoSaveData, AutoSaveFormData } from '../../services/autoSaveService';
 import OfflineQueueService from '../../services/offlineQueueService';
+import { getSubmissionError } from '../../services/connectivityService';
 import type { DirectUploadProgress } from '../../services/directR2UploadService';
 import { getPhotoUploadUri, normalizePhotoFile } from '../../utils/photoFileUtils';
 import { DEFAULT_IMAGE_WATERMARK, restoreImageWatermarkPreference } from '../../utils/watermarkPreference';
@@ -620,10 +622,7 @@ const LotListingFormSheet = ({
       const duplicateWarning = getDuplicateLotWarning(error);
       Alert.alert(
         duplicateWarning ? 'Duplicate Lot Detected' : 'Draft Preview Not Started',
-        duplicateWarning ||
-          error?.response?.data?.message ||
-          error?.message ||
-          'Your local draft is still safe. Check your connection and try Save Draft again.'
+        duplicateWarning || getSubmissionError(error, 'Save Draft').message
       );
     } finally {
       setSavingDraftPreview(false);
@@ -812,13 +811,14 @@ const LotListingFormSheet = ({
 
   const handleSubmit = async (
     destination: AuctionManagementDestination = 'LottingBoard',
-    options: { forceNew?: boolean; nextLot?: boolean; replaceSubmissionId?: string; replacementSourceId?: string } = {}
+    options: { forceNew?: boolean; nextLot?: boolean; replaceSubmissionId?: string; replacementSourceId?: string; newSubmissionFromId?: string } = {}
   ) => {
     if (submissionLockRef.current || saveLock.current || awaitingDraft || submitting || auctioneerControl?.accepted) return;
     if (options.nextLot && captureMode === 'offline') return;
     if (saveOnly) { await handleSaveOfflineAndClose(); return; }
     if (auctioneer && (options.forceNew || !hasValidAuctioneerLotStructure(auctioneer, lots))) return;
     if (options.replaceSubmissionId && (auctioneer || submissionIdRef.current !== options.replaceSubmissionId)) return;
+    if (options.newSubmissionFromId && (auctioneer || submissionIdRef.current !== options.newSubmissionFromId)) return;
     if (!validateForm()) {
       Alert.alert('Validation Error', 'Please fix the required fields');
       return;
@@ -852,10 +852,13 @@ const LotListingFormSheet = ({
     let serviceLots: LotListingLot[] | null = null;
     let attemptDraftId = currentDraftId || draftIdentityRef.current;
     let uploadAccepted = false;
+    let draftSaved = false;
+    const previousSubmissionId = submissionIdRef.current;
+    const previousSupersedesId = supersedesSubmissionIdRef.current;
 
     try {
       if (autoSaveTimeoutRef.current) clearTimeout(autoSaveTimeoutRef.current);
-      const separateDraftId = options.forceNew ? randomUUID() : undefined;
+      const separateDraftId = options.forceNew || options.newSubmissionFromId ? randomUUID() : undefined;
       if (separateDraftId) {
         submissionIdRef.current = randomUUID();
         supersedesSubmissionIdRef.current = undefined;
@@ -868,6 +871,7 @@ const LotListingFormSheet = ({
       const localDraft = await saveCurrentDraftNow(lots, activeLotIdx, separateDraftId);
       operation.assertActive();
       if (!localDraft) throw new Error('Save this draft before submitting.');
+      draftSaved = true;
       attemptDraftId = localDraft.id;
       await prepareOfflineSubmission(localDraft);
       operation.assertActive();
@@ -973,8 +977,15 @@ const LotListingFormSheet = ({
         if (detail) setUploadStatus(detail);
       });
       operation.assertActive();
+      assertReportUploadAccepted(acceptedResponse);
       uploadAccepted = true;
       uploadAcceptedRef.current = true;
+      if (isExistingReportUploadReceipt(acceptedResponse)) {
+        setSubmitting(false);
+        setUploadPaused(true);
+        Alert.alert('Earlier upload accepted', 'The server returned the earlier report, not confirmation of your current edits. This draft and its originals are kept. Open Reports or Previews to review the earlier report before making further changes.');
+        return;
+      }
       await OfflineCaptureStore.setSubmissionState(localDraft.id, 'accepted', (acceptedResponse as any).reportId);
 
       if (options.nextLot && auctioneerControl) {
@@ -1005,25 +1016,27 @@ const LotListingFormSheet = ({
         Alert.alert('Upload accepted', 'The server accepted this report. Open Previews to check its progress; local confirmation could not be refreshed.');
         return;
       }
+      if (!draftSaved) {
+        submissionIdRef.current = previousSubmissionId;
+        supersedesSubmissionIdRef.current = previousSupersedesId;
+        setSubmitting(false);
+        Alert.alert('Draft not saved', 'Your latest changes could not be saved on this device. Keep this form and its originals open. Check device storage, then use Save on device before trying again. No upload was started.');
+        return;
+      }
+      const conflictedSubmissionId = submissionIdRef.current;
+      const canAct = () => operation.isActive() && recoveryScopeRef.current === attemptRecoveryScope && OfflineCaptureStore.getOwnerId() === attemptOwner && submissionIdRef.current === conflictedSubmissionId;
 
       if (!auctioneer && !supersedesSubmissionIdRef.current && e?.response?.status === 409 && e?.response?.data?.code === 'ACTIVE_REPORT_EXISTS') {
         setSubmitting(false);
         Alert.alert(
           'Report Already Processing',
-          'A report for this contract is already queued or processing.',
+          'A report for this contract is already queued or processing. Keep this draft and review it in Reports or Previews, or explicitly create a separate report with these photos.',
           [
-            {
-              text: 'Resume Existing',
-              onPress: () => {
-                void handleClose();
-                onSuccess?.();
-              },
-            },
+            { text: 'Keep Draft', style: 'cancel' },
             {
               text: 'Create Separate',
-              onPress: () => void handleSubmit(destination, { forceNew: true }),
+              onPress: () => { if (canAct()) void handleSubmit(destination, { forceNew: true }); },
             },
-            { text: 'Cancel', style: 'cancel' },
           ]
         );
         return;
@@ -1032,10 +1045,13 @@ const LotListingFormSheet = ({
       setUploadPaused(true);
       await OfflineCaptureStore.setSubmissionState(attemptDraftId, 'paused', undefined, e?.message).catch(() => undefined);
       setSubmitting(false);
-      const conflictedSubmissionId = submissionIdRef.current;
-      if (showUploadManifestRecovery(e, !auctioneer && conflictedSubmissionId ? () => {
-        if (!operation.isActive() || recoveryScopeRef.current !== attemptRecoveryScope || OfflineCaptureStore.getOwnerId() !== attemptOwner) return;
-        void handleSubmit(destination, { replaceSubmissionId: conflictedSubmissionId, replacementSourceId: uploadConflictSource(e, conflictedSubmissionId) });
+      if (showUploadManifestRecovery(e, !auctioneer && conflictedSubmissionId ? {
+        replace: () => {
+          if (canAct()) void handleSubmit(destination, { replaceSubmissionId: conflictedSubmissionId, replacementSourceId: uploadConflictSource(e, conflictedSubmissionId) });
+        },
+        startSeparate: () => {
+          if (canAct()) void handleSubmit(destination, { newSubmissionFromId: conflictedSubmissionId });
+        },
       } : undefined)) return;
       const feedback = OfflineQueueService.getSubmissionError(e);
       Alert.alert(feedback.title, feedback.message);
