@@ -102,6 +102,44 @@ function makePreviewResponse() {
   };
 }
 
+/*
+ * WHERE A CONTROL LIVES, SO A QUERY SEARCHES ONLY THERE.
+ *
+ * The bulk-selection tests render 100–205 lots, and a page of 20 carries about
+ * 370 buttons and 60 selects. A role query over the whole modal checks the
+ * visibility of every candidate by walking computed styles, which jsdom
+ * recomputes after every change: one unscoped button query cost about 9 s
+ * after a re-render, an unscoped select query over 1 s (measured 2026-09-30).
+ * Three tests here timed out on nothing else — the assertions were never the
+ * problem. Scoped to the control's own container, the same query keeps its
+ * visibility check and costs milliseconds.
+ */
+const pagination = () =>
+  within(screen.getByRole("navigation", { name: "Asset lots pagination" }));
+const lotSelection = () =>
+  within(screen.getByRole("group", { name: "Select lots for bulk required selections" }));
+/** The table row of one lot, found through its own selection checkbox. */
+const lotRow = (lot: number) => {
+  const row = screen
+    .getByRole("checkbox", { name: `Select lot ${lot}, row ${lot}` })
+    .closest("tr");
+  if (!row) throw new Error(`No table row for lot ${lot}`);
+  return within(row as HTMLElement);
+};
+/*
+ * The Save button sits in the modal's action bar, which has no landmark to
+ * scope to, and a role query for it works out the name of every button on the
+ * page — about 10 s after a re-render, even with the visibility check off. It
+ * is found by its visible label instead, and then held to its accessible name,
+ * so the lookup cannot drift onto some other button that says the same thing.
+ */
+const saveChangesButton = () => {
+  const button = screen.getByText("Save Changes").closest("button");
+  if (!button) throw new Error('"Save Changes" is not inside a button');
+  expect(button).toHaveAccessibleName("Save changes");
+  return button;
+};
+
 describe("PreviewModal valuation methods", () => {
   it("resubmits a failed saved Asset preview instead of calling the preview-only submit endpoint", async () => {
     const response = makePreviewResponse();
@@ -292,7 +330,7 @@ describe("PreviewModal valuation methods", () => {
     );
 
     await screen.findByDisplayValue("Asset 1");
-    const saveButton = screen.getByRole("button", { name: "Save changes" });
+    const saveButton = saveChangesButton();
     const applyControl = screen.getByRole("group", {
       name: "Apply Legal value to selected lots",
     });
@@ -328,16 +366,16 @@ describe("PreviewModal valuation methods", () => {
     for (const [group, option] of [["Running Condition", "Starts and Runs with Boost"], ["Completeness", "Has Keys"]]) {
       fireEvent.click(within(screen.getByRole("group", { name: `Apply ${group} value to selected lots` })).getByRole("button", { name: `Apply ${option} to 3 selected lots` }));
     }
-    expect(screen.getByRole("combobox", { name: "Legal for lot 1, row 1" })).toHaveValue("");
+    expect(lotRow(1).getByRole("combobox", { name: "Legal for lot 1, row 1" })).toHaveValue("");
     for (const index of [3, 7, 8]) {
       expect(
-        screen.getByRole("combobox", { name: `Legal for lot ${index + 1}, row ${index + 1}` })
+        lotRow(index + 1).getByRole("combobox", { name: `Legal for lot ${index + 1}, row ${index + 1}` })
       ).toHaveValue("N/A");
     }
 
-    fireEvent.change(screen.getByRole("combobox", { name: "Legal for lot 8, row 8" }), { target: { value: "No Title" } });
-    fireEvent.change(screen.getByRole("combobox", { name: "Running Condition for lot 4, row 4" }), { target: { value: "Does not Start or Run" } });
-    fireEvent.change(screen.getByRole("combobox", { name: "Completeness for lot 9, row 9" }), { target: { value: "Missing Parts" } });
+    fireEvent.change(lotRow(8).getByRole("combobox", { name: "Legal for lot 8, row 8" }), { target: { value: "No Title" } });
+    fireEvent.change(lotRow(4).getByRole("combobox", { name: "Running Condition for lot 4, row 4" }), { target: { value: "Does not Start or Run" } });
+    fireEvent.change(lotRow(9).getByRole("combobox", { name: "Completeness for lot 9, row 9" }), { target: { value: "Missing Parts" } });
     fireEvent.click(saveButton);
 
     await waitFor(() => expect(updatePreview).toHaveBeenCalledTimes(1));
@@ -365,9 +403,10 @@ describe("PreviewModal valuation methods", () => {
     ).toBeDisabled();
     view.unmount();
     render(<PreviewModal isOpen reportId="report-selected-lots" onClose={vi.fn()} loadPreviewDataOverride={vi.fn().mockResolvedValue({ data: { ...response.data, preview_data: savedPreview } })} />);
-    expect(await screen.findByRole("combobox", { name: "Running Condition for lot 4, row 4" })).toHaveValue("Does not Start or Run");
-    expect(screen.getByRole("combobox", { name: "Completeness for lot 9, row 9" })).toHaveValue("Missing Parts");
-    expect(screen.getByRole("combobox", { name: "Legal for lot 8, row 8" })).toHaveValue("No Title");
+    await screen.findByDisplayValue("Asset 1");
+    expect(lotRow(4).getByRole("combobox", { name: "Running Condition for lot 4, row 4" })).toHaveValue("Does not Start or Run");
+    expect(lotRow(9).getByRole("combobox", { name: "Completeness for lot 9, row 9" })).toHaveValue("Missing Parts");
+    expect(lotRow(8).getByRole("combobox", { name: "Legal for lot 8, row 8" })).toHaveValue("No Title");
     expect(screen.getByRole("checkbox", { name: "Select lot 8, row 8" })).not.toBeChecked();
   }, 20_000);
 
@@ -426,11 +465,11 @@ describe("PreviewModal valuation methods", () => {
         name: "Apply N/A to 205 selected lots",
       })
     );
-    const firstLegalControl = screen.getByRole("combobox", { name: "Legal for lot 1, row 1" });
+    const firstLegalControl = lotRow(1).getByRole("combobox", { name: "Legal for lot 1, row 1" });
     expect(firstLegalControl).toHaveValue("N/A");
 
     fireEvent.change(firstLegalControl, { target: { value: "No Title" } });
-    fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+    fireEvent.click(saveChangesButton());
 
     await waitFor(() => expect(updatePreview).toHaveBeenCalledTimes(1));
     const savedPreview = updatePreview.mock.calls[0][1];
@@ -440,10 +479,11 @@ describe("PreviewModal valuation methods", () => {
       screen.getByText("Select the lots that should receive the same required selections.")
     ).toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole("button", { name: "Next lots page" }));
+    fireEvent.click(pagination().getByRole("button", { name: "Next lots page" }));
     expect(await screen.findByDisplayValue("Asset 21")).toBeInTheDocument();
     expect(screen.queryByDisplayValue("Focused asset")).toBeNull();
-  });
+    // The same budget as the other heavy bulk-selection tests: 205 lots.
+  }, 20_000);
 
   it("preserves selected lots across pages, applies page/all groups, and clears without changing values", async () => {
     const response = makePreviewResponse();
@@ -455,20 +495,20 @@ describe("PreviewModal valuation methods", () => {
       expect(within(screen.getByRole("group", { name: `Apply ${label} value to selected lots` })).getByRole("button", { name: "Apply N/A to 0 selected lots" })).toBeDisabled();
     }
     fireEvent.click(screen.getByRole("checkbox", { name: "Select lot 4, row 4" }));
-    fireEvent.click(screen.getByRole("button", { name: "Next lots page" }));
-    fireEvent.click(screen.getByRole("button", { name: "Select 20 lots on this page" }));
+    fireEvent.click(pagination().getByRole("button", { name: "Next lots page" }));
+    fireEvent.click(lotSelection().getByRole("button", { name: "Select 20 lots on this page" }));
     expect(screen.getByText("21 of 100 lots selected. Apply a value below or adjust any lot individually.")).toBeInTheDocument();
     fireEvent.click(within(screen.getByRole("group", { name: "Apply Running Condition value to selected lots" })).getByRole("button", { name: "Apply Unverified Running Condition to 21 selected lots" }));
-    fireEvent.click(screen.getByRole("button", { name: "Unselect 20 lots on this page" }));
-    fireEvent.click(screen.getByRole("button", { name: "Previous lots page" }));
+    fireEvent.click(lotSelection().getByRole("button", { name: "Unselect 20 lots on this page" }));
+    fireEvent.click(pagination().getByRole("button", { name: "Previous lots page" }));
     expect(screen.getByRole("checkbox", { name: "Select lot 4, row 4" })).toBeChecked();
-    fireEvent.click(screen.getByRole("button", { name: "Select all 100 lots" }));
+    fireEvent.click(lotSelection().getByRole("button", { name: "Select all 100 lots" }));
     fireEvent.click(within(screen.getByRole("group", { name: "Apply Completeness value to selected lots" })).getByRole("button", { name: "Apply Incomplete Unit to 100 selected lots" }));
-    fireEvent.click(screen.getByRole("button", { name: "Clear selection" }));
-    expect(screen.getByRole("button", { name: "Clear selection" })).toBeDisabled();
-    expect(screen.getByRole("combobox", { name: "Running Condition for lot 4, row 4" })).toHaveValue("Unverified Running Condition");
-    expect(screen.getByRole("combobox", { name: "Completeness for lot 1, row 1" })).toHaveValue("Incomplete Unit");
-    fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+    fireEvent.click(lotSelection().getByRole("button", { name: "Clear selection" }));
+    expect(lotSelection().getByRole("button", { name: "Clear selection" })).toBeDisabled();
+    expect(lotRow(4).getByRole("combobox", { name: "Running Condition for lot 4, row 4" })).toHaveValue("Unverified Running Condition");
+    expect(lotRow(1).getByRole("combobox", { name: "Completeness for lot 1, row 1" })).toHaveValue("Incomplete Unit");
+    fireEvent.click(saveChangesButton());
     await waitFor(() => expect(update).toHaveBeenCalledTimes(1));
     const lots = update.mock.calls[0][1].lots;
     lots.forEach((lot: any, index: number) => {
