@@ -8,7 +8,7 @@ import lotListingService, {
 } from './lotListingService';
 import AutoSaveService from './autoSaveService';
 import OfflineCaptureStore from './offlineCaptureStore';
-import { pauseActiveUploads, createUploadOperation, type UploadOperation } from './uploadCancellation';
+import { pauseActiveUploads, createUploadOperation, isUploadFinalizing, type UploadOperation } from './uploadCancellation';
 import { LocalMediaStore } from './localMediaStore';
 import {
   type ConnectivityResult,
@@ -57,6 +57,39 @@ const getOfflineQueueDir = (): string => `${FileSystem.documentDirectory || ''}o
 let didInit = false;
 let processing = false;
 let networkSub: (() => void) | null = null;
+
+/*
+ * Automatic pause on connection loss (revised 2026-10-01).
+ *
+ * This used to pause every active upload the moment NetInfo reported
+ * isConnected === false OR isInternetReachable === false. isInternetReachable
+ * is NetInfo's own probe of a public URL: it reads false on weak site signal,
+ * on networks that block that URL while the API is reachable, and for a moment
+ * during a Wi-Fi/cellular handover. Each flicker paused the report in the
+ * field; one landing on "Finalizing" turned an accepted report into a paused
+ * draft.
+ *
+ * Now only an actual disconnect counts, it must last DISCONNECT_PAUSE_DELAY_MS
+ * (a handover recovers well inside that), and a submission being finalized is
+ * left to settle (see isUploadFinalizing). Transfers interrupted by a real
+ * outage still fail on their own and stop at the 120 s no-progress deadline.
+ */
+export const DISCONNECT_PAUSE_DELAY_MS = 10_000;
+let disconnectPauseTimer: ReturnType<typeof setTimeout> | null = null;
+function cancelDisconnectPause(): void {
+  if (!disconnectPauseTimer) return;
+  clearTimeout(disconnectPauseTimer);
+  disconnectPauseTimer = null;
+}
+function scheduleDisconnectPause(): void {
+  if (disconnectPauseTimer) return;
+  disconnectPauseTimer = setTimeout(() => {
+    disconnectPauseTimer = null;
+    // 'connection' lets an open report resume this upload by itself once the
+    // signal is back (uploadAutoResume.ts).
+    if (!isUploadFinalizing()) pauseActiveUploads('connection');
+  }, DISCONNECT_PAUSE_DELAY_MS);
+}
 const listeners = new Set<(jobs: OfflineQueueJob[]) => void>();
 
 async function ensureQueueDirExists(): Promise<void> {
@@ -564,11 +597,13 @@ export const OfflineQueueService = {
 
     // Reconnect may sync inventory elsewhere, never submit a queued report.
     networkSub = NetInfo.addEventListener((state) => {
-      if (state.isConnected === false || state.isInternetReachable === false) pauseActiveUploads();
+      if (state.isConnected === false) scheduleDisconnectPause();
+      else cancelDisconnectPause();
     });
   },
 
   cleanup(): void {
+    cancelDisconnectPause();
     pauseActiveUploads();
     networkSub?.();
     networkSub = null;

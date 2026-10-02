@@ -1,6 +1,6 @@
 import React from 'react';
 import { Alert, Platform } from 'react-native';
-import { act, cleanup, render, waitFor } from '@testing-library/react-native';
+import { act, cleanup, fireEvent, render, waitFor } from '@testing-library/react-native';
 import NativeAuctionCameraScreen from './NativeAuctionCameraScreen';
 import LegacyCameraScreen from './CameraScreen';
 import { loadNativeAuctionCamera } from './nativeAuctionCameraModule';
@@ -258,6 +258,73 @@ it.each(['hide', 'unmount', 'owner', 'draft', 'lock'])('does not acknowledge or 
   expect(input.onClose).not.toHaveBeenCalled();
   expect(nextClose).not.toHaveBeenCalled();
   expect(nextSave).not.toHaveBeenCalled();
+});
+
+// 2026-10-02: after an account or draft change during the camera handoff, the
+// screen stayed on "Saving camera media..." (or "Opening camera...") for good,
+// which users reported as a frozen camera. It now says what happened and closes
+// only when asked; nothing from the old launch reaches the new draft.
+it.each(['owner', 'draft'])('explains a camera closed by a %s change during its draft save and closes only when asked', async (change) => {
+  const acknowledgeCapture = jest.fn().mockResolvedValue(true);
+  const context = { ownerId: 'owner', draftId: 'draft', sessionId: 'session' };
+  const input = { ...props(), captureContext: context };
+  let finishSave!: () => void;
+  input.onAutoSave.mockReturnValue(new Promise<void>((resolve) => { finishSave = resolve; }));
+  jest.mocked(loadNativeAuctionCamera).mockResolvedValue({ openAuctionCamera, acknowledgeCapture });
+  openAuctionCamera.mockResolvedValueOnce(JSON.stringify({ ...context, revision: 2, lots: [{ ...lot, files: [photo] }] }));
+  const view = await render(<NativeAuctionCameraScreen {...input} />);
+  await waitFor(() => expect(input.onAutoSave).toHaveBeenCalledTimes(1));
+  const nextClose = jest.fn();
+  await view.rerender(<NativeAuctionCameraScreen {...input}
+    captureContext={{ ...context,
+      ownerId: change === 'owner' ? 'new-owner' : context.ownerId,
+      draftId: change === 'draft' ? 'new-draft' : context.draftId,
+    }}
+    onClose={nextClose} />);
+  await act(async () => { finishSave(); });
+  expect(view.getByText('Camera closed')).toBeTruthy();
+  expect(view.queryByText('Saving camera media...')).toBeNull();
+  expect(nextClose).not.toHaveBeenCalled();
+  expect(acknowledgeCapture).not.toHaveBeenCalled();
+  await fireEvent.press(view.getByRole('button', { name: 'Close camera' }));
+  expect(nextClose).toHaveBeenCalledTimes(1);
+  expect(input.onClose).not.toHaveBeenCalled();
+});
+
+it('explains a camera whose draft changed while it was open, without saving its result into the new draft', async () => {
+  const context = { ownerId: 'owner', draftId: 'draft', sessionId: 'session' };
+  const input = { ...props(), captureContext: context };
+  let returnResult!: (json: string) => void;
+  openAuctionCamera.mockReturnValueOnce(new Promise<string>((resolve) => { returnResult = resolve; }));
+  const view = await render(<NativeAuctionCameraScreen {...input} />);
+  await waitFor(() => expect(openAuctionCamera).toHaveBeenCalledTimes(1));
+  expect(view.getByText('Opening camera...')).toBeTruthy();
+  const nextSave = jest.fn();
+  await view.rerender(<NativeAuctionCameraScreen {...input} captureContext={{ ...context, draftId: 'new-draft' }} onAutoSave={nextSave} />);
+  await act(async () => { returnResult(JSON.stringify({ ...context, revision: 1, lots: [{ ...lot, files: [photo] }] })); });
+  expect(view.getByText('Camera closed')).toBeTruthy();
+  expect(view.queryByText('Opening camera...')).toBeNull();
+  expect(nextSave).not.toHaveBeenCalled();
+  expect(input.onAutoSave).not.toHaveBeenCalled();
+  expect(input.setLots).not.toHaveBeenCalled();
+});
+
+it('clears the closed notice when the camera is hidden and opened again', async () => {
+  const context = { ownerId: 'owner', draftId: 'draft', sessionId: 'session' };
+  const input = { ...props(), captureContext: context };
+  let returnResult!: (json: string) => void;
+  openAuctionCamera.mockReturnValueOnce(new Promise<string>((resolve) => { returnResult = resolve; }));
+  const view = await render(<NativeAuctionCameraScreen {...input} />);
+  await waitFor(() => expect(openAuctionCamera).toHaveBeenCalledTimes(1));
+  await view.rerender(<NativeAuctionCameraScreen {...input} captureContext={{ ...context, draftId: 'new-draft' }} />);
+  await act(async () => { returnResult(JSON.stringify([{ ...lot, files: [photo] }])); });
+  expect(view.getByText('Camera closed')).toBeTruthy();
+  openAuctionCamera.mockImplementation(() => new Promise<string>(() => {}));
+  await view.rerender(<NativeAuctionCameraScreen {...input} visible={false} captureContext={{ ...context, draftId: 'new-draft' }} />);
+  await view.rerender(<NativeAuctionCameraScreen {...input} captureContext={{ ...context, draftId: 'new-draft' }} />);
+  await waitFor(() => expect(openAuctionCamera).toHaveBeenCalledTimes(2));
+  expect(view.queryByText('Camera closed')).toBeNull();
+  expect(view.getByText('Opening camera...')).toBeTruthy();
 });
 
 it('does not open another camera when same-draft form callbacks rerender during capture', async () => {

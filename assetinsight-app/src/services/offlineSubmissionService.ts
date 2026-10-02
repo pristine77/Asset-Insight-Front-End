@@ -3,14 +3,20 @@ import AutoSaveService, { OfflineReportDraft } from './autoSaveService';
 import OfflineCaptureStore from './offlineCaptureStore';
 import auctioneerService from './auctioneerService';
 import { hasValidAuctioneerLotStructure } from '../components/forms/auctioneerFormPolicy';
+import { UPLOAD_WAITING_FOR_CONNECTION } from './uploadAutoResume';
 
 /** Called only by a user's Submit/Resume action. Nothing here schedules future work. */
 export async function prepareOfflineSubmission(draft: OfflineReportDraft) {
   const owner = OfflineCaptureStore.getOwnerId();
   if (!owner || draft.ownerId !== owner) throw new Error('Sign in to the account that owns this draft.');
+  // Only a reported disconnect refuses here (2026-10-02). NetInfo's
+  // isInternetReachable is its own probe of a public URL and reads false on weak
+  // but working signal, which refused uploads that would have gone through; the
+  // forms check our own server right after this. An open report given this
+  // error waits for the connection and starts by itself (uploadAutoResume.ts).
   const network = await NetInfo.fetch();
-  if (network.isConnected !== true || network.isInternetReachable === false) {
-    throw new Error('Saved on this device. Connect to the internet, then tap Submit or Resume upload. Nothing will upload automatically.');
+  if (network.isConnected === false) {
+    throw Object.assign(new Error('Saved on this device. Connect to the internet, then tap Submit or Resume upload. Nothing will upload automatically.'), { code: UPLOAD_WAITING_FOR_CONNECTION });
   }
   const current = await AutoSaveService.getDraft(draft.id);
   if (!current) throw new Error('This draft is unavailable. Reopen Drafts before submitting.');

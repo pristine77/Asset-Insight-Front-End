@@ -6,6 +6,7 @@ import {
   Platform,
   StyleSheet,
   Text,
+  TouchableOpacity,
   View,
 } from 'react-native';
 
@@ -294,6 +295,9 @@ const NativeAuctionCameraScreen: React.FC<CameraScreenProps> = (props) => {
   const [useLegacyFallback, setUseLegacyFallback] = useState(false);
   const [launching, setLaunching] = useState(false);
   const [savingDraft, setSavingDraft] = useState(false);
+  // The account or draft changed while this camera was opening or returning.
+  // See launchNativeCamera's stale() below.
+  const [contextChanged, setContextChanged] = useState(false);
   const latestPropsRef = useRef(props);
   const launchIdRef = useRef(0);
   const recoveryPromptsRef = useRef(new Set<string>());
@@ -358,6 +362,7 @@ const NativeAuctionCameraScreen: React.FC<CameraScreenProps> = (props) => {
       launchIdRef.current += 1;
       setLaunching(false);
       setSavingDraft(false);
+      setContextChanged(false);
       setUseLegacyFallback(false);
     }
   }, [visible]);
@@ -376,17 +381,28 @@ const NativeAuctionCameraScreen: React.FC<CameraScreenProps> = (props) => {
       latestPropsRef.current.captureContext?.ownerId === current.captureContext?.ownerId &&
       latestPropsRef.current.captureContext?.draftId === current.captureContext?.draftId;
 
+    // When this launch is still the live one and on screen but the account or
+    // draft changed underneath it, the early returns below used to leave
+    // "Opening camera... Please wait." up for good with no camera behind it.
+    // Show what happened and a Close button instead (2026-10-02). The screen is
+    // not closed automatically: nothing from this launch may act on the new
+    // draft, and the existing tests pin that.
+    const stale = () => {
+      if (!disposed && launchIdRef.current === launchId && latestPropsRef.current.visible) setContextChanged(true);
+    };
+
     const launchNativeCamera = async () => {
       setLaunching(true);
+      setContextChanged(false);
       let receivedResult = false;
 
       try {
         const payload = buildNativePayload(current.lots, current.activeLotIdx, current.captureContext);
         const { openAuctionCamera, acknowledgeCapture } = await loadNativeAuctionCamera();
-        if (!stillCurrent()) return;
+        if (!stillCurrent()) return stale();
         const json = await openAuctionCamera(payload);
 
-        if (!stillCurrent()) return;
+        if (!stillCurrent()) return stale();
         receivedResult = true;
         setSavingDraft(true);
 
@@ -412,14 +428,14 @@ const NativeAuctionCameraScreen: React.FC<CameraScreenProps> = (props) => {
         if (latestPropsRef.current.onAutoSave) {
           try {
             if (current.captureContext) await OfflineCaptureStore.stageCameraActivity({ ...parsed, ...current.captureContext });
-            if (!stillCurrent()) return;
+            if (!stillCurrent()) return stale();
             await latestPropsRef.current.onAutoSave?.(nextLots, nextActiveIdx);
-            if (!stillCurrent()) return;
+            if (!stillCurrent()) return stale();
             if (current.captureContext && typeof parsed.revision === 'number' && typeof parsed.sessionId === 'string') {
               await acknowledgeCapture?.(current.captureContext.ownerId, current.captureContext.draftId, parsed.sessionId, parsed.revision);
             }
           } catch (saveError) {
-            if (!stillCurrent()) return;
+            if (!stillCurrent()) return stale();
             console.warn('[Camera] Captured photos could not be saved to draft immediately:', saveError);
             Alert.alert(
               'Draft Save Warning',
@@ -429,8 +445,9 @@ const NativeAuctionCameraScreen: React.FC<CameraScreenProps> = (props) => {
         }
 
         if (stillCurrent()) latestPropsRef.current.onClose();
+        else stale();
       } catch (error) {
-        if (!stillCurrent()) return;
+        if (!stillCurrent()) return stale();
 
         if (isCancelledError(error)) {
           latestPropsRef.current.onClose();
@@ -474,15 +491,29 @@ const NativeAuctionCameraScreen: React.FC<CameraScreenProps> = (props) => {
     <Modal visible={visible} transparent animationType="fade" onRequestClose={onClose}>
       <View style={styles.loadingOverlay}>
         <View style={styles.loadingCard}>
-          <ActivityIndicator size="large" color="#2563EB" />
-          <Text style={styles.loadingTitle}>{savingDraft ? 'Saving camera media...' : 'Opening camera...'}</Text>
-          <Text style={styles.loadingText}>
-            {savingDraft
-              ? 'Keeping your lots and media in the saved draft.'
-              : launching
-                ? 'Preparing the native auction camera.'
-                : 'Please wait.'}
-          </Text>
+          {contextChanged ? (
+            <>
+              <Text style={styles.loadingTitle}>Camera closed</Text>
+              <Text style={styles.loadingText}>
+                This draft changed while the camera was open. Anything the camera captured stays with the original draft and is offered for recovery when that draft is reopened.
+              </Text>
+              <TouchableOpacity accessibilityRole="button" accessibilityLabel="Close camera" onPress={onClose} style={styles.closeButton}>
+                <Text style={styles.closeButtonText}>Close</Text>
+              </TouchableOpacity>
+            </>
+          ) : (
+            <>
+              <ActivityIndicator size="large" color="#2563EB" />
+              <Text style={styles.loadingTitle}>{savingDraft ? 'Saving camera media...' : 'Opening camera...'}</Text>
+              <Text style={styles.loadingText}>
+                {savingDraft
+                  ? 'Keeping your lots and media in the saved draft.'
+                  : launching
+                    ? 'Preparing the native auction camera.'
+                    : 'Please wait.'}
+              </Text>
+            </>
+          )}
         </View>
       </View>
     </Modal>
@@ -516,6 +547,21 @@ const styles = StyleSheet.create({
     fontSize: 14,
     textAlign: 'center',
     color: '#6B7280',
+  },
+  closeButton: {
+    marginTop: 16,
+    minHeight: 44,
+    minWidth: 120,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderRadius: 10,
+    backgroundColor: '#2563EB',
+    paddingHorizontal: 20,
+  },
+  closeButtonText: {
+    color: '#fff',
+    fontSize: 16,
+    fontWeight: '700',
   },
 });
 

@@ -2,7 +2,7 @@ import api from './api';
 import { Platform } from 'react-native';
 import { randomUUID } from 'expo-crypto';
 import { loadNativeAuctionCamera } from '../components/camera/nativeAuctionCameraModule';
-import { createUploadOperation, cancellableUploadRequest, cancellableUploadTask, isUploadStalled, UPLOAD_IDLE_TIMEOUT_MS, type UploadOperation } from './uploadCancellation';
+import { beginUploadFinalization, createUploadOperation, cancellableUploadRequest, cancellableUploadTask, isUploadStalled, UPLOAD_IDLE_TIMEOUT_MS, type UploadOperation } from './uploadCancellation';
 import { isRetryableRequestError } from './connectivityService';
 import { assertReportUploadAccepted } from './reportUploadReceipt';
 
@@ -74,7 +74,6 @@ const COMPLETE_SESSION_RETRIES = 4;
 // client retry count low so a storage outage queues a large resumable session
 // promptly instead of retrying hundreds of files for hours.
 const SERVER_FALLBACK_RETRIES = 2;
-const SERVER_FALLBACK_TIMEOUT_MS = 120000;
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -230,11 +229,13 @@ async function uploadOneWithRetry(
   uploadUrl: string,
   contentType: string,
   signedHeaders?: Record<string, string>,
-  onFileProgress?: (sentBytes: number, totalBytes?: number) => void
+  onFileProgress?: (sentBytes: number, totalBytes?: number) => void,
+  onRetry?: (attempt: number, maxAttempts: number) => void
 ) {
   let lastError: unknown;
   for (let attempt = 0; attempt <= DIRECT_UPLOAD_RETRIES; attempt++) {
     operation.assertActive();
+    if (attempt > 0) onRetry?.(attempt + 1, DIRECT_UPLOAD_RETRIES + 1);
     try {
       await uploadOne(operation, file, uploadUrl, contentType, signedHeaders, onFileProgress);
       return;
@@ -307,6 +308,30 @@ async function createOrResumeUploadSession(
   return response.data.data;
 }
 
+/**
+ * Whether the server has already accepted this upload session, read from its
+ * status receipt (GET .../upload-session/:id/status). Returns the receipt when
+ * accepted, otherwise null -- including when the status call fails or the
+ * server predates it, so the caller just re-sends completion as before.
+ */
+async function acceptedReceiptFromStatus(
+  operation: UploadOperation,
+  endpoint: '/asset' | '/lot-listing',
+  sessionId: string
+): Promise<Record<string, any> | null> {
+  try {
+    const response = await cancellableUploadRequest(operation, (signal) => api.get(
+      `${endpoint}/upload-session/${sessionId}/status`,
+      { timeout: 20000, signal }
+    ));
+    const receipt = (response as any)?.data?.data;
+    return receipt?.accepted === true ? receipt : null;
+  } catch {
+    operation.assertActive();
+    return null;
+  }
+}
+
 async function completeUploadSessionWithRetry(
   operation: UploadOperation,
   endpoint: '/asset' | '/lot-listing',
@@ -317,15 +342,46 @@ async function completeUploadSessionWithRetry(
   for (let attempt = 1; attempt <= COMPLETE_SESSION_RETRIES; attempt += 1) {
     operation.assertActive();
     try {
-      return await cancellableUploadRequest(operation, (signal) => api.post(
+      const response = await cancellableUploadRequest(operation, (signal) => api.post(
         `${endpoint}/upload-session/${sessionId}/complete`,
         {},
         { timeout: 120000, signal }
       ));
+      // A retry of this same completion that the server answers with
+      // reusedAcceptance is this attempt's own acceptance: the earlier request
+      // reached the server and only its answer was lost (the 120 s timeout, a
+      // dropped connection, a 5xx after the job was queued). The session and
+      // manifest are the ones this attempt uploaded, so the receipt is reported
+      // exactly as if the first answer had arrived. Without this the forms took
+      // it for an older report, never marked the draft accepted, and left it on
+      // "Resume upload" for good (reported 2026-10-01).
+      // An acceptance that existed before this attempt began is unaffected:
+      // createOrResumeUploadSession returns it as alreadyQueued, and this
+      // request is never made.
+      if (attempt > 1 && (response as any)?.data?.reusedAcceptance === true) {
+        return {
+          ...response,
+          data: { ...(response as any).data, reusedAcceptance: false, acceptedOnRetry: true },
+        };
+      }
+      return response;
     } catch (error) {
       operation.assertActive();
       lastError = error;
-      if (!isRetryableRequestError(error) || attempt >= COMPLETE_SESSION_RETRIES) {
+      if (!isRetryableRequestError(error)) {
+        throw normalizeUploadError(error, 'The upload could not be finalized');
+      }
+      // The request may have reached the server and been accepted, with only
+      // the answer lost; a long completion also keeps running server-side after
+      // the 120 s client timeout. Ask before sending it again, so an accepted
+      // report finishes now instead of after up to four blind re-sends and,
+      // at the end, a failure for a report that was in fact accepted
+      // (2026-10-02). The receipt counts as this attempt's own acceptance.
+      const receipt = await acceptedReceiptFromStatus(operation, endpoint, sessionId);
+      if (receipt) {
+        return { data: { ...receipt, reusedAcceptance: false, acceptedOnRetry: true } };
+      }
+      if (attempt >= COMPLETE_SESSION_RETRIES) {
         throw normalizeUploadError(error, 'The upload could not be finalized');
       }
 
@@ -387,22 +443,34 @@ async function uploadOneThroughServerFallback(
       type: file.type || 'application/octet-stream',
     } as any);
     try {
-      await cancellableUploadRequest(operation, (signal) => api.post(
+      // No total time limit: a file that is still moving is never cut off. The
+      // deadline is UPLOAD_IDLE_TIMEOUT_MS without upload progress, as for the
+      // direct transfers. The old fixed 120 s cap ended every walkaround video
+      // or large photo on a slow link, identically on every resume, on exactly
+      // the networks this fallback exists for (2026-10-02).
+      const controller = new AbortController();
+      let lastLoaded = -1;
+      await cancellableUploadTask(operation, ({ touch, isActive }) => api.post(
         `${endpoint}/upload-session/${sessionId}/files/${encodeURIComponent(fileId)}`,
         formData,
         {
           headers: { 'Content-Type': 'multipart/form-data' },
-          timeout: SERVER_FALLBACK_TIMEOUT_MS,
-          signal,
+          timeout: 0,
+          signal: controller.signal,
           onUploadProgress: (event: any) => {
-            if (!operation.isActive()) return;
-            onFileProgress?.(
-              Number(event?.loaded || 0),
-              Number(event?.total || file.size || 0) || undefined
-            );
+            if (!isActive()) return;
+            const loaded = Number(event?.loaded || 0);
+            if (loaded > lastLoaded) {
+              lastLoaded = loaded;
+              touch();
+            }
+            onFileProgress?.(loaded, Number(event?.total || file.size || 0) || undefined);
           },
         }
-      ));
+      ), () => controller.abort(), {
+        idleTimeoutMs: UPLOAD_IDLE_TIMEOUT_MS,
+        message: `Sending ${file.name || 'a file'} through the server stopped making progress. Your draft is saved. Resume the same upload when the connection is stable.`,
+      });
       onFileProgress?.(file.size || 1, file.size);
       return;
     } catch (error) {
@@ -574,6 +642,21 @@ async function performReportUpload(args: {
     });
   };
 
+  // A re-sent file starts again from zero bytes while the bar keeps its
+  // high-water mark, so the bar cannot move during a retry and a working retry
+  // looked frozen. Say what is happening instead (2026-10-02).
+  const announceRetry = (fileName: string | undefined, message: string) => {
+    emitProgress(Math.max(8, lastPercent), {
+      stage: 'uploading',
+      message,
+      completedFiles: completedIndexes.size,
+      totalFiles,
+      uploadedBytes: sentBytes.reduce((sum, size) => sum + Math.max(0, size), 0),
+      totalBytes,
+      activeFileName: fileName,
+    });
+  };
+
   const markFileComplete = (index: number, fileName: string) => {
     completedIndexes.add(index);
     sentBytes[index] = Math.max(1, expectedBytes[index]);
@@ -635,13 +718,15 @@ async function performReportUpload(args: {
             markFileComplete(index, file.name);
             return;
           }
+          if (refreshAttempt > 0) announceRetry(file.name, `Sending ${file.name || 'a file'} again...`);
           await uploadOneWithRetry(
             operation,
             file,
             target.uploadUrl,
             target.contentType,
             target.headers,
-            (sent, expected) => reportFileProgress(index, sent, expected, file.name)
+            (sent, expected) => reportFileProgress(index, sent, expected, file.name),
+            (attempt, maxAttempts) => announceRetry(file.name, `Retrying ${file.name || 'a file'} (${attempt} of ${maxAttempts})...`)
           );
           markFileComplete(index, file.name);
         } catch (error) {
@@ -755,29 +840,37 @@ async function performReportUpload(args: {
   }
 
   operation.assertActive();
-  emitProgress(95, {
-    stage: 'finalizing',
-    message: 'Finalizing submission...',
-    completedFiles: totalFiles,
-    totalFiles,
-    uploadedBytes: totalBytes,
-    totalBytes,
-  });
-  const completeResponse = await completeUploadSessionWithRetry(
-    operation,
-    args.endpoint,
-    session.sessionId,
-    (attempt, maxAttempts) => {
-      emitProgress(95, {
-        stage: 'finalizing',
-        message: `Server is busy. Confirming submission (${attempt} of ${maxAttempts})...`,
-        completedFiles: totalFiles,
-        totalFiles,
-        uploadedBytes: totalBytes,
-        totalBytes,
-      });
-    }
-  );
+  // Set before 'finalizing' is shown, so no Pause tap can land in between.
+  // See beginUploadFinalization in uploadCancellation.ts.
+  const endFinalization = beginUploadFinalization();
+  let completeResponse: Awaited<ReturnType<typeof completeUploadSessionWithRetry>>;
+  try {
+    emitProgress(95, {
+      stage: 'finalizing',
+      message: 'Finalizing submission...',
+      completedFiles: totalFiles,
+      totalFiles,
+      uploadedBytes: totalBytes,
+      totalBytes,
+    });
+    completeResponse = await completeUploadSessionWithRetry(
+      operation,
+      args.endpoint,
+      session.sessionId,
+      (attempt, maxAttempts) => {
+        emitProgress(95, {
+          stage: 'finalizing',
+          message: `Server is busy. Confirming submission (${attempt} of ${maxAttempts})...`,
+          completedFiles: totalFiles,
+          totalFiles,
+          uploadedBytes: totalBytes,
+          totalBytes,
+        });
+      }
+    );
+  } finally {
+    endFinalization();
+  }
   assertReportUploadAccepted(completeResponse.data);
   emitProgress(100, {
     stage: 'complete',

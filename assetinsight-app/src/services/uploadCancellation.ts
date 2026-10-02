@@ -6,13 +6,25 @@ export function setUploadOwner(ownerId: string | null) {
   if (uploadOwner !== ownerId) pauseActiveUploads();
   uploadOwner = ownerId;
 }
-function pausedError() {
+/**
+ * Why uploads were paused, when no person asked for it. Only the automatic
+ * pause on a lost connection gives one; the Pause button, Offline mode and an
+ * account change give none. An open report resumes an upload paused for a
+ * reason by itself once the signal is back (uploadAutoResume.ts, 2026-10-02).
+ */
+export type UploadPauseReason = 'connection';
+// The reason for each pause, by the generation that pause started. The pause
+// that ended generation g is the one that started g + 1.
+const pauseReasons = new Map<number, UploadPauseReason>();
+const PAUSE_REASONS_KEPT = 64;
+function pausedError(generation?: number) {
   const error = new Error('Upload paused. Your draft is saved. Resume this same upload to check whether the server already accepted it.');
-  return Object.assign(error, { code: 'ERR_CANCELED', acceptanceUncertain: true });
+  const pauseReason = generation === undefined ? undefined : pauseReasons.get(generation + 1);
+  return Object.assign(error, { code: 'ERR_CANCELED', acceptanceUncertain: true }, pauseReason ? { pauseReason } : {});
 }
 export function uploadGeneration() { return epoch; }
 export function assertUploadGeneration(expected: number) {
-  if (epoch !== expected) throw pausedError();
+  if (epoch !== expected) throw pausedError(expected);
 }
 export type UploadOperation = {
   assertActive(): void;
@@ -32,7 +44,7 @@ export function createUploadOperation(parent?: UploadOperation): UploadOperation
     assertActive() {
       if (failure) throw failure;
       parent?.assertActive();
-      if (!isActive()) throw pausedError();
+      if (!isActive()) throw pausedError(generation);
     },
     cancel(error) {
       if (failure) return;
@@ -110,8 +122,36 @@ export function registerUploadCancellation(cancel: () => void) {
   cancels.add(cancel);
   return () => { cancels.delete(cancel); };
 }
-export function pauseActiveUploads() {
+/*
+ * Finalizing a submission (POST .../upload-session/:id/complete) is the step in
+ * which the server accepts the report. Pausing it cannot stop that acceptance;
+ * it only throws away the answer, which left accepted reports marked "paused"
+ * and stuck on Resume upload (reported 2026-10-01). The request is bounded
+ * (120 s per attempt) and idempotent on the server, so it is allowed to settle.
+ *
+ * Soft pauses -- the Pause button, Android back on the progress overlay, and the
+ * automatic pause on a lost connection -- check isUploadFinalizing() and stand
+ * down. pauseActiveUploads() itself is unchanged: an account switch or sign-out
+ * still cancels everything, finalizing or not.
+ */
+let finalizingUploads = 0;
+/** Mark a submission as finalizing until the returned function is called (idempotent). */
+export function beginUploadFinalization(): () => void {
+  finalizingUploads += 1;
+  let ended = false;
+  return () => {
+    if (ended) return;
+    ended = true;
+    finalizingUploads = Math.max(0, finalizingUploads - 1);
+  };
+}
+export function isUploadFinalizing(): boolean {
+  return finalizingUploads > 0;
+}
+export function pauseActiveUploads(reason?: UploadPauseReason) {
   epoch++;
+  if (reason) pauseReasons.set(epoch, reason);
+  pauseReasons.delete(epoch - PAUSE_REASONS_KEPT);
   for (const cancel of cancels) { try { cancel(); } catch { /* Every task is fenced by generation too. */ } }
   cancels.clear();
 }

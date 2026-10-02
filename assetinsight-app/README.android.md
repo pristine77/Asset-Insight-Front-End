@@ -1,5 +1,107 @@
 # Android local development
 
+## Uploads resume by themselves — 2026-10-02 (local)
+
+Owner request: an upload interrupted by a weak or lost signal should continue
+once the signal is back, without someone watching the phone to tap Resume
+upload. This replaces, for a report that is still open, the earlier rule
+"Reconnection does not start a report automatically".
+
+- **What resumes.** Only an upload the app stopped by itself: the automatic
+  pause on a lost connection, a stalled transfer, a transient network or server
+  error, or a Submit that found no connection. A Pause the person tapped, an
+  account change, and anything that needs a decision (conflicts, "Earlier
+  upload accepted", sign-in problems) are unchanged.
+- **When.** Only while that report stays open. The form shows "Waiting for
+  signal" with **Resume now** and **Pause upload**. The phone must stay
+  connected for 15 s and our server must answer its health check before the
+  upload starts again; while connected but unanswered, it checks again after
+  15, 30, then 60 s. A closed form, a restarted app or a draft reopened from
+  Drafts keep the explicit Resume upload button, and Offline captures are still
+  never sent without a tap on Submit.
+- **How far.** After three automatic tries in a row that store no new file, it
+  stops and shows the usual message and Resume upload. A try that stores more
+  files resets the count, so a long upload on a patchy signal keeps going.
+- **What a resume is.** Exactly the Resume upload action: the same submission
+  and upload session, files already in storage are skipped, and the server
+  refuses a second report for the same submission.
+- **How the app tells pauses apart.** `pauseActiveUploads('connection')` marks
+  the automatic pause, and the paused error carries `pauseReason`
+  (`uploadCancellation.ts`). Rules and the wait: `services/uploadAutoResume.ts`.
+  Form side: `components/forms/useUploadAutoResume.ts` and
+  `UploadWaitingForSignal.tsx`, used by both report forms.
+- **Related fix.** The pre-upload check refused to start whenever NetInfo's own
+  "internet reachable" probe read false, which happens on weak but working
+  signal. It now refuses only a reported disconnect and leaves the decision to
+  the check of our own server that follows (`offlineSubmissionService.ts`).
+
+Not covered: uploading while the app is closed or the phone is locked. Android
+stops the app's JavaScript work in the background; that needs a native
+background upload service.
+
+Tests: `uploadAutoResume.test.ts` (which failures qualify; the wait, with a fake
+network and clock), `uploadPauseReason.test.ts`, additions to
+`offlineQueueManual.test.ts` and `offlineSubmissionService.test.ts`, and nine
+cases per form in `AuctioneerForms.test.tsx`. Removing any of the four guards
+(the person's Pause, the account check, progress counting, the try limit) fails
+a test. Component and mocked-network evidence only; no device run.
+
+## Fewer stuck screens and silent failures — 2026-10-02 (local)
+
+Seven fixes that follow the field reports of a frozen camera and an upload bar
+that stops moving. Items 1 to 6 are in this app; item 7 is in the Asset-Insight
+backend.
+
+1. **Finalizing asks before re-sending.** When the answer to the completion
+   request is lost, the app first asks
+   `GET /api/{asset|lot-listing}/upload-session/:sessionId/status` whether the
+   server already accepted the upload. An accepted receipt finishes at once,
+   reported as `acceptedOnRetry: true`. It asks once more after the last
+   attempt, so an accepted report never ends as an error. If the status check
+   fails or the server lacks it, the app re-sends as before.
+   (`acceptedReceiptFromStatus` in `directR2UploadService.ts`.)
+2. **The server fallback has no total time limit.** When a phone's network
+   blocks direct storage, files go through the API. That request had a fixed
+   120 s limit, which cut off walkaround videos and large photos on slow links
+   while they were still moving, the same way on every resume. It now stops only
+   after `UPLOAD_IDLE_TIMEOUT_MS` (120 s) without progress, like direct
+   transfers.
+3. **The camera tap says why it did not open.** The forms save the draft before
+   opening the camera. When that save failed, the tap did nothing. Both forms now
+   show "Camera not opened" with the save's reason and a **Try again** button
+   (`src/utils/cameraOpenFailure.ts`). Try again saves the form as it is when
+   tapped, and does nothing once the account or the form has changed.
+4. **A Pause during the Submit save is a pause.** A Pause tapped while the draft
+   was being saved before upload ended as "Draft not saved ... check device
+   storage" although the save had worked. The save is now recorded before the
+   pause check, so the draft shows **Resume upload**.
+5. **Retries say so.** A re-sent file starts again from zero bytes while the bar
+   keeps its highest value, so a working retry looked frozen. The progress text
+   now reads "Retrying <file> (2 of 3)..." or "Sending <file> again...".
+6. **"Opening camera..." no longer stays up for good.** When the account or the
+   draft changed while the camera was open or its photos were being saved, the
+   screen kept its spinner with no camera behind it. It now shows "Camera
+   closed", says what happened, and offers **Close**. It does not close by
+   itself: nothing from the old launch may act on the new draft, which the
+   existing stale-handoff tests pin. The captured media stays in the original
+   draft's recovery journal.
+7. **Backend: the per-photo check reads one entry.**
+   `POST .../upload-session/:sessionId/files/:fileId/verify` loaded the whole
+   session, up to 5,000 file entries, for every photo checked during a resume.
+   It now reads only that photo's entry (`$elemMatch` projection, `.lean()`)
+   in `reportUploadSession.controller.ts`.
+
+Tests: `completionRetryReceipt.test.ts` (status checks),
+`uploadFallbackAndRetry.test.ts` (fallback deadline, retry text),
+`cameraOpenFailure.test.ts`, new cases in `AuctioneerForms.test.tsx` (both
+forms: pause during save, camera not opened, Try again and its account guard)
+and `NativeAuctionCameraScreen.test.tsx` (camera closed by an account or draft
+change). Backend: the photo-check cases in
+`report-upload-completion-verification.integration.test.ts`. Each new form and
+camera case was confirmed to fail with its fix removed. This is mocked-transport
+and component evidence, not a device or field-network run. A new native binary
+is required; there is no OTA channel.
+
 ## Standard photo size — 2026-10-02 (local)
 
 Installed builds send camera photos at 1200 × 900, about 235 KB (71 app-stamped
@@ -27,6 +129,40 @@ and `nativeCapturePhotoSize.test.ts`, which pins the Kotlin source because the
 project has no Kotlin test runner. The Kotlin change was not compiled here (no
 JDK or Android SDK on this machine); the next Android build compiles it, and a
 real-phone capture should confirm the 1200 × 900 output before release.
+
+## Finalizing safeguards — 2026-10-01 (local)
+
+Field reports: the bar stopped at "Finalizing Report", or the app announced
+"Earlier upload accepted" and the draft stayed on **Resume upload** while the
+report was in fact accepted and processing.
+
+- A completion retry that the server answers with `reusedAcceptance` is this
+  attempt's own acceptance: the first request reached the server and only its
+  answer was lost. `directR2UploadService` reports it with
+  `reusedAcceptance: false, acceptedOnRetry: true`, so the forms complete
+  normally. An acceptance that existed before the attempt began still arrives as
+  `alreadyQueued` and keeps the "Earlier upload accepted" review.
+- Finalizing cannot be paused. `beginUploadFinalization()` is set before the
+  "finalizing" stage is shown and cleared when the completion request settles
+  (120 s per attempt, idempotent on the server). Both forms hide **Pause upload**
+  and ignore Android back for that step. Account switch and sign-out still cancel
+  everything through `pauseActiveUploads()`.
+- The automatic pause on connection loss ignores `isInternetReachable`
+  (NetInfo's own probe of a public URL, false on weak signal or blocked URLs),
+  waits for a disconnect to last `DISCONNECT_PAUSE_DELAY_MS` (10 s, longer
+  than a Wi-Fi/cellular handover), and leaves a finalizing submission alone.
+  Real outages still stop transfers at the 120 s no-progress deadline.
+- Backend companion in Asset-Insight (`reportUploadSession.controller.ts`):
+  completion reuses verifications recorded in the last 30 minutes, records its
+  own progress as it goes, bounds each storage check at 15 s, and answers a
+  storage hiccup with a retryable 503 instead of failing the session as missing.
+  It helps installed builds too and should deploy before this binary.
+
+Tests: `completionRetryReceipt.test.ts`, `offlineQueueManual.test.ts` and a
+finalizing case in `AuctioneerForms.test.tsx` (both forms). Like the sections
+below, this is mocked-transport and component evidence, not a physical-device
+or field-network run. A new native binary is required; there is no OTA channel.
+No production data, APK build, push or deployment is part of this change.
 
 ## Upload acceptance and recovery — 2026-10-01 (local)
 

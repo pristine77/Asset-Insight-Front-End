@@ -15,6 +15,16 @@ test('offline Submit preserves the draft and requires another explicit action', 
   await expect(prepareOfflineSubmission(draft)).rejects.toThrow('Nothing will upload automatically');
   expect(autoSave.getDraft).not.toHaveBeenCalled();
 });
+test('no connection is marked so an open report can wait for one', async () => {
+  jest.mocked(NetInfo.fetch).mockResolvedValue({ isConnected: false } as any);
+  await expect(prepareOfflineSubmission(draft)).rejects.toMatchObject({ code: 'UPLOAD_WAITING_FOR_CONNECTION' });
+});
+// 2026-10-02: NetInfo's own reachability probe reads false on weak but working
+// signal. Only a reported disconnect refuses; the forms then ask our server.
+test.each([{ isConnected: true, isInternetReachable: false }, { isConnected: null, isInternetReachable: null }])('does not refuse a connection the probe doubts: %j', async (network) => {
+  jest.mocked(NetInfo.fetch).mockResolvedValue(network as any);
+  await expect(prepareOfflineSubmission(draft)).resolves.toMatchObject({ id: 'draft' });
+});
 test('cannot submit another owner or an already accepted upload', async () => {
   await expect(prepareOfflineSubmission({ ...draft, ownerId: 'other' })).rejects.toThrow('owns this draft');
   jest.mocked(autoSave.getDraft).mockResolvedValue({ ...draft, submissionState: 'accepted' });
