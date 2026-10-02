@@ -1,5 +1,33 @@
 # Android local development
 
+## Standard photo size — 2026-10-02 (local)
+
+Installed builds send camera photos at 1200 × 900, about 235 KB (71 app-stamped
+staging photos). The source had since raised the Android camera's limit to a
+3000 px longest side and a 700 KB JPEG target, about 600 KB per photo, while a
+comment still read "keep existing 1200 px limit". The owner chose the office's
+own resize settings instead: **Fit** inside **1200 × 900** (width × height),
+**Do not enlarge if smaller**, **Maintain aspect ratio**, **Reverse width and
+height by orientation** off.
+
+- Both cameras now fit standard photos inside 1200 × 900 without enlarging or
+  changing shape, so a landscape photo is at most 1200 × 900 and a 3:4 portrait
+  photo at most 675 × 900. The JPEG then steps down from quality 95 until it is
+  at most 300 KB. Android: `fitInsideBox` and `STANDARD_PHOTO_MAX_*` in
+  `CameraViewEngine.kt`; JS camera: `src/utils/cameraPhotoSize.ts`.
+- Measured on 17 full-size originals with the camera's JPEG ladder: 232 KB on
+  average, 164 to 293 KB. With the old 700 KB target the same 1200 × 900 photos
+  averaged 385 KB.
+- Unchanged: the 12 MP option (6000 px longest side, 1 MB), WebP/AVIF output
+  choices (also held to 300 KB as before), and gallery imports, which still
+  upload the original the user picked.
+
+Tests: `cameraPhotoSize.test.ts`, the updated `cameraPhotoWatermark.test.ts`,
+and `nativeCapturePhotoSize.test.ts`, which pins the Kotlin source because the
+project has no Kotlin test runner. The Kotlin change was not compiled here (no
+JDK or Android SDK on this machine); the next Android build compiles it, and a
+real-phone capture should confirm the 1200 × 900 output before release.
+
 ## Upload acceptance and recovery — 2026-10-01 (local)
 
 Asset/Lot recovery distinguishes a reserved report ID from an accepted report.

@@ -10,6 +10,7 @@ import * as FileSystem from 'expo-file-system/legacy';
 import * as ImageManipulator from 'expo-image-manipulator';
 import { randomUUID } from 'expo-crypto';
 import { addPhotoWatermarkReceipt, photoBytesToBase64 } from '../utils/photoWatermarkReceipt';
+import { CAMERA_PHOTO_MAX_BYTES, CAMERA_PHOTO_QUALITY_LADDER, fitInsideBox } from '../utils/cameraPhotoSize';
 
 const logoAsset = require('../../modules/auction-camera/android/src/main/res/drawable/ic_app_img.png');
 
@@ -30,9 +31,8 @@ export async function stampCameraPhoto(uri: string): Promise<string> {
       await Skia.Data.fromURI(Image.resolveAssetSource(logoAsset).uri)
     );
     if (!image || !logo) throw new Error('Unable to prepare the camera watermark');
-    const scale = Math.min(1, 3000 / Math.max(image.width(), image.height()));
-    const width = Math.round(image.width() * scale);
-    const height = Math.round(image.height() * scale);
+    // Fit inside the office's 1200 x 900 box, never enlarged (cameraPhotoSize.ts).
+    const { width, height } = fitInsideBox(image.width(), image.height());
     surface = Skia.Surface.MakeOffscreen(width, height);
     if (!surface) throw new Error('Unable to prepare the camera photo');
     const canvas = surface.getCanvas();
@@ -60,7 +60,13 @@ export async function stampCameraPhoto(uri: string): Promise<string> {
     );
     surface.flush();
     snapshot = surface.makeImageSnapshot();
-    const bytes = snapshot.encodeToBytes(ImageFormat.JPEG, 95);
+    // Step the quality down from 95 until the photo is at most 300 KB, as the
+    // Android camera does (cameraPhotoSize.ts).
+    let bytes: ReturnType<SkImage['encodeToBytes']> | null = null;
+    for (const quality of CAMERA_PHOTO_QUALITY_LADDER) {
+      bytes = snapshot.encodeToBytes(ImageFormat.JPEG, quality);
+      if (!bytes || bytes.length <= CAMERA_PHOTO_MAX_BYTES) break;
+    }
     if (!bytes) throw new Error('Unable to encode the camera photo');
     const marked = await addPhotoWatermarkReceipt(bytes);
     if (!FileSystem.documentDirectory) throw new Error('Photo storage is unavailable');

@@ -61,6 +61,37 @@ import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import kotlin.math.pow
 
+/*
+ * Standard photo size (owner, 2026-10-02).
+ *
+ * A standard photo (the 12 MP option off) fits inside a 1200 x 900 box,
+ * width x height. The box is not turned for portrait photos, the photo keeps
+ * its shape, and nothing is enlarged: the office's own resize settings ("Fit",
+ * 1200 x 900, "Do not enlarge if smaller", "Maintain aspect ratio", "Reverse
+ * width and height by orientation" off). A landscape photo is at most
+ * 1200 x 900 and a 3:4 portrait one at most 675 x 900. The JPEG is then stepped
+ * down from quality 95 until it is at most STANDARD_PHOTO_MAX_BYTES, which keeps
+ * photos about where installed builds sent them (1200 px, ~235 KB) before this
+ * limit had been raised to 3000 px and 700 KB.
+ *
+ * src/utils/cameraPhotoSize.ts applies the same rule to the JS camera, and its
+ * tests pin the arithmetic of fitInsideBox; keep the two in step.
+ */
+internal const val STANDARD_PHOTO_MAX_WIDTH = 1200
+internal const val STANDARD_PHOTO_MAX_HEIGHT = 900
+internal const val STANDARD_PHOTO_MAX_BYTES = 300 * 1024
+
+/** The size that fits width x height inside boxWidth x boxHeight, keeping the shape and never enlarging. */
+internal fun fitInsideBox(width: Int, height: Int, boxWidth: Int, boxHeight: Int): Pair<Int, Int> {
+    if (width <= 0 || height <= 0) return Pair(width, height)
+    val scale = minOf(1.0, boxWidth.toDouble() / width, boxHeight.toDouble() / height)
+    if (scale >= 1.0) return Pair(width, height)
+    return Pair(
+        Math.round(width * scale).toInt().coerceAtLeast(1),
+        Math.round(height * scale).toInt().coerceAtLeast(1)
+    )
+}
+
 class CameraViewEngine(private val context: Context, private val lifecycleOwner: LifecycleOwner) {
 
     companion object {
@@ -567,21 +598,15 @@ class CameraViewEngine(private val context: Context, private val lifecycleOwner:
 
         val outputFile = File(File(context.filesDir, "camera-photos").apply { mkdirs() }, "photo_${java.util.UUID.randomUUID()}.$extension")
 
-        // ── Target file-size budget (kept identical to existing logic) ────────
-        //   JPEG: 700 KB  (existing)
-        //   WebP: 300 KB  (client target — lossy WebP achieves this easily)
-        //   AVIF: 300 KB  (AVIF is more efficient still)
-        // ── Determine file-size budget based on 12MP toggle ──────────────────────────
-
-//        var TARGET_SIZE_BYTES = when (fmt) {
-//            ImageFormatStore.Format.JPEG -> 700 * 1024
-//            else -> 300 * 1024
-//        }
-
+        // -- Target file-size budget ----------------------------------------------
+        //   12 MP option on: 1 MB.
+        //   Standard photos, any format: STANDARD_PHOTO_MAX_BYTES (300 KB).
+        //   JPEG used to get 700 KB; at 1200 x 900 that let busy photos reach
+        //   about 500 KB, against about 235 KB from installed builds (measured
+        //   2026-10-02). See "Standard photo size" at the top of this file.
         val TARGET_SIZE_BYTES = when {
             use12MPOutput -> 1 * 1024 * 1024             // 1 MB when 12MP is ON
-            fmt == ImageFormatStore.Format.JPEG -> 700 * 1024
-            else -> 300 * 1024                           // WebP / AVIF
+            else -> STANDARD_PHOTO_MAX_BYTES
         }
 
         try {
@@ -665,22 +690,20 @@ class CameraViewEngine(private val context: Context, private val lifecycleOwner:
                 )
             }
 
-            // ── 6. NEW — Option A resize: fit inside 1200 px on longest side ──
-            // "Do not enlarge if smaller" is honoured — we only ever scale down.
-            // Portrait images become e.g. 900 × 1200; landscape 1200 × 900.
-            // This is a simple proportional scale so the full subject is always
-            // visible with no cropping and no distortion.
-            // When 12MP is ON: target the long side at ~4000 px (≈12MP for 4:3)
-// When 12MP is OFF: keep existing 1200 px limit
-            val MAX_SIDE = if (use12MPOutput) 6000 else 3000
-            val longestSide = maxOf(bitmap.width, bitmap.height)
-            if (longestSide > MAX_SIDE) {
-                val scale  = MAX_SIDE.toFloat() / longestSide.toFloat()
-                val targetW = (bitmap.width  * scale).toInt().coerceAtLeast(1)
-                val targetH = (bitmap.height * scale).toInt().coerceAtLeast(1)
+            // -- 6. Resize -------------------------------------------------------------
+            // Standard photos fit inside STANDARD_PHOTO_MAX_WIDTH x
+            // STANDARD_PHOTO_MAX_HEIGHT (1200 x 900) without enlarging or changing
+            // shape; see "Standard photo size" at the top of this file. The 12 MP
+            // option keeps its 6000 px longest side.
+            val (targetW, targetH) = if (use12MPOutput) {
+                fitInsideBox(bitmap.width, bitmap.height, 6000, 6000)
+            } else {
+                fitInsideBox(bitmap.width, bitmap.height, STANDARD_PHOTO_MAX_WIDTH, STANDARD_PHOTO_MAX_HEIGHT)
+            }
+            if (targetW != bitmap.width || targetH != bitmap.height) {
                 val resized = android.graphics.Bitmap.createScaledBitmap(bitmap, targetW, targetH, true)
                 if (resized !== bitmap) { bitmap.recycle(); bitmap = resized }
-                Log.d(TAG, "Resized to ${targetW}×${targetH} (12MP=${use12MPOutput}, maxSide=$MAX_SIDE)")
+                Log.d(TAG, "Resized to ${targetW}x${targetH} (12MP=${use12MPOutput})")
             }
 
             // Stamp once AFTER all capture crops/resizing, independent of upload opt-in.
