@@ -34,6 +34,8 @@ import SupportScreen from './src/screens/SupportScreen';
 import DrawerContent, { ScreenName as DrawerScreenName } from './src/components/DrawerContent';
 import NotificationCenterModal from './src/components/NotificationCenterModal';
 import PreviewReminderNotification from './src/components/PreviewReminderNotification';
+import UploadBar from './src/components/UploadBar';
+import { claimDraftForEditing } from './src/components/backgroundUploadDraftGuard';
 import { previewReminderDetails } from './src/utils/previewReminderNotification';
 import type { NotificationItem } from './src/services/notificationService';
 import offlineQueueService from './src/services/offlineQueueService';
@@ -280,6 +282,10 @@ function MainApp() {
   }, []);
 
   const handleContinueOfflineDraft = useCallback((draftId: string, type: OfflineDraftType) => {
+    // Every way into a saved draft passes here (Drafts, Offline captures, the
+    // upload bar). A draft uploading in the background stays closed until it
+    // is paused or finished; a paused one is handed back to its form.
+    if (!claimDraftForEditing(draftId)) return;
     setCrmMode('listing');
     setDrawerOpen(false);
     setPreviewTarget(null);
@@ -555,6 +561,12 @@ function MainApp() {
       {/* Main Content */}
       {renderScreen()}
 
+      {/* Background uploads: rendered here, not in a screen, so it stays
+          while the person moves between screens. It follows the screen in
+          this column, so the screen ends above it and keeps its own bottom
+          controls in view. */}
+      <UploadBar onOpenDraft={handleContinueOfflineDraft} />
+
       {showGlobalNotificationCenter ? (
         <TouchableOpacity
           accessibilityRole="button"
@@ -631,9 +643,14 @@ function MainApp() {
 function AuthGate() {
   const { colors } = useAppTheme();
   const { user, loading, deviceAccess } = useAuth();
+  // Keyed by the signed-in account, not the user object (2026-10-02). A
+  // profile save refreshes the user and hands over a new object for the same
+  // account; re-running the cleanup then paused every upload, including the
+  // background upload line.
+  const accountKey = user ? `account:${String(user._id || (user as any).id || '')}` : null;
 
   useEffect(() => {
-    if (user) {
+    if (accountKey) {
       offlineQueueService.init();
       draftSyncService.init();
       OfflineCaptureSync.init();
@@ -652,7 +669,7 @@ function AuthGate() {
       draftSyncService.cleanup();
       OfflineCaptureSync.cleanup();
     };
-  }, [user]);
+  }, [accountKey]);
 
   if (loading) {
     return (

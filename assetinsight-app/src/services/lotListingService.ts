@@ -1,6 +1,6 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import api from "./api";
-import { createUploadOperation, cancellableUploadRequest } from './uploadCancellation';
+import { createUploadOperation, cancellableUploadRequest, type UploadOperation } from './uploadCancellation';
 import { API_ENDPOINTS } from "../config/api";
 import { isRetryableRequestError } from "./connectivityService";
 import { restoreImageWatermarkPreference } from "../utils/watermarkPreference";
@@ -148,14 +148,18 @@ export interface ProgressData {
 
 class LotListingService {
   /**
-   * Create a new lot listing with images - uses same AI processing as Asset
+   * Create a new lot listing with images - uses same AI processing as Asset.
+   * options.operation is the caller's upload operation: pausing it
+   * (pauseUploadOperation) stops this transfer, direct or multipart, and no
+   * other upload.
    */
   async createLotListing(
     details: LotListingDetails,
     lots: LotListingLot[],
-    onUploadProgress?: DirectUploadProgressCallback
+    onUploadProgress?: DirectUploadProgressCallback,
+    options?: { operation?: UploadOperation }
   ): Promise<{ jobId: string; message: string; reportId?: string; status?: string; phase?: string }> {
-    const operation = createUploadOperation();
+    const operation = createUploadOperation(options?.operation);
     const mixedLots = lots.map((lot, index) => ({
       ...(details.auctioneer_work_item_id ? {
         source_key: details.mixed_lots?.[index]?.source_key,

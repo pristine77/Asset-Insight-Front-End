@@ -7,10 +7,20 @@ export function uploadConflictSource(error: any, fallback: string): string {
   return typeof value === 'string' && /^[a-zA-Z0-9._:-]{1,160}$/.test(value) ? value : fallback;
 }
 
+/**
+ * Whether showUploadManifestRecovery() would handle this error. A background
+ * upload (backgroundUploadManager.ts) cannot show the prompt itself; it hands
+ * such a draft back to the form, where the prompt appears on the next Submit.
+ */
+export function isUploadManifestConflict(error: any): boolean {
+  const code = error?.response?.data?.code;
+  return error?.response?.status === 409 && ['SUBMISSION_MANIFEST_CHANGED', 'UPLOAD_SESSION_REPORT_UNAVAILABLE'].includes(code);
+}
+
 /** Recovery is an explicit action, never an automatic identity change/retry. */
 export function showUploadManifestRecovery(error: any, actions: { replace?: () => void; startSeparate?: () => void } = {}): boolean {
-  const code = error?.response?.data?.code;
-  if (error?.response?.status !== 409 || !['SUBMISSION_MANIFEST_CHANGED', 'UPLOAD_SESSION_REPORT_UNAVAILABLE'].includes(code)) return false;
+  if (!isUploadManifestConflict(error)) return false;
+  const code = error.response.data.code;
   const receipt = error.response.data.data;
   const keepDraft = { text: 'Keep Draft', style: 'cancel' as const };
   if (code === 'UPLOAD_SESSION_REPORT_UNAVAILABLE' && receipt?.accepted === true && receipt?.reportAvailable === false) {

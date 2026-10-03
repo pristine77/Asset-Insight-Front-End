@@ -22,7 +22,12 @@ import OfflineCaptureStore from '../../services/offlineCaptureStore';
 import { prepareOfflineSubmission } from '../../services/offlineSubmissionService';
 import { assertReportUploadAccepted, isExistingReportUploadReceipt } from '../../services/reportUploadReceipt';
 import { showUploadManifestRecovery, uploadConflictSource } from './uploadManifestRecovery';
-import { createUploadOperation, isUploadFinalizing, pauseActiveUploads } from '../../services/uploadCancellation';
+import { createUploadOperation, isUploadFinalizing, pauseUploadOperation, type UploadOperation } from '../../services/uploadCancellation';
+import backgroundUploadManager, {
+  ALREADY_UPLOADING_MESSAGE,
+  ALREADY_UPLOADING_TITLE,
+  BACKGROUND_UPLOAD_BUSY_MESSAGE,
+} from '../../services/backgroundUploadManager';
 import { CAMERA_NOT_OPENED_TITLE, cameraOpenFailureButtons, describeCameraOpenFailure } from '../../utils/cameraOpenFailure';
 import { UPLOAD_WAITING_FOR_CONNECTION } from '../../services/uploadAutoResume';
 import { useUploadAutoResume } from './useUploadAutoResume';
@@ -62,6 +67,12 @@ interface LotListingFormSheetProps {
   auctioneer?: AuctioneerWorkItemSetup;
   onAuctioneerSetupChange?: (setup: AuctioneerWorkItemSetup) => void;
   auctioneerControl?: AuctioneerFormControl;
+  /**
+   * Hand an ordinary Submit to the background upload line and close the form
+   * (services/backgroundUploadManager.ts). Off by default: only the Dashboard
+   * turns it on, so every other caller keeps the foreground upload.
+   */
+  backgroundUploads?: boolean;
 }
 
 const isoDate = (d: Date) =>
@@ -78,6 +89,7 @@ const LotListingFormSheet = ({
   onDraftLoaded,
   auctionManagementTask: suppliedAuctionManagementTask,
   auctioneerControl,
+  backgroundUploads = false,
 }: LotListingFormSheetProps) => {
   const auctioneer = auctioneerControl?.setup;
   const [recoveredAuctionTask, setRecoveredAuctionTask] = useState<AuctionManagementTaskPayload>();
@@ -152,6 +164,8 @@ const LotListingFormSheet = ({
     return () => { recoveryScopeRef.current += 1; };
   }, [visible, draftIdToLoad, auctioneer?.workItemId]);
   const submissionLockRef = useRef(false);
+  // The operation of the upload this form is running, so Pause stops only it.
+  const activeOperationRef = useRef<UploadOperation | null>(null);
   const handlePauseUpload = () => {
     // Finalizing is when the server accepts the listing; pausing then only loses
     // the answer. See beginUploadFinalization in uploadCancellation.ts.
@@ -159,7 +173,10 @@ const LotListingFormSheet = ({
       || uploadStatus?.stage === 'finalizing' || isUploadFinalizing()) return;
     pauseRequestedRef.current = true;
     setPausingUpload(true);
-    pauseActiveUploads();
+    // This form's upload only: a background upload of another report keeps
+    // going (2026-10-02). A global pause (Offline mode, sign-out) still stops
+    // this operation as well.
+    pauseUploadOperation(activeOperationRef.current);
   };
   // An upload the app stopped by itself (lost signal, stalled transfer)
   // continues once the connection is steady, while this listing stays open
@@ -478,6 +495,11 @@ const LotListingFormSheet = ({
       const owner = OfflineCaptureStore.getOwnerId();
       setDraftLoadError(undefined);
       try {
+        // A draft queued or uploading in the background is not opened here:
+        // edits would change photos and identity under an upload on its way.
+        if (backgroundUploadManager.isBusy(draftIdToLoad)) throw new Error(BACKGROUND_UPLOAD_BUSY_MESSAGE);
+        // A paused or needs-attention background upload belongs to this form now.
+        backgroundUploadManager.forget(draftIdToLoad);
         const draft = await AutoSaveService.getDraft(draftIdToLoad);
         if (cancelled) return;
         if (!owner || owner !== OfflineCaptureStore.getOwnerId()) throw new Error('The account changed. Reopen this draft from its owner account.');
@@ -857,10 +879,30 @@ const LotListingFormSheet = ({
       (sum, lot) => sum + lot.files.length + (lot.extraFiles?.length || 0) + (lot.videoFile ? 1 : 0),
       0
     );
+    // Background hand-off (2026-10-02, services/backgroundUploadManager.ts):
+    // an ordinary Submit or Resume from the Dashboard is saved, checked and
+    // handed to the upload line, and the form closes. Incoming work and
+    // Auction Management tasks keep waiting here for acceptance, and so do the
+    // explicit separate/replace choices and automatic resumes. A draft whose
+    // last background attempt needs a decision runs here once, where the
+    // prompts can appear; this attempt uses up that mark.
+    const plannedDraftId = currentDraftId || draftIdentityRef.current;
+    // Never save over, or send a second time, a draft the line is sending.
+    if (backgroundUploadManager.isBusy(plannedDraftId)) {
+      Alert.alert(ALREADY_UPLOADING_TITLE, ALREADY_UPLOADING_MESSAGE);
+      return;
+    }
+    let background = backgroundUploads && !auctioneer && !isAuctionManagementMode && !options.nextLot && !options.forceNew
+      && !options.replaceSubmissionId && !options.newSubmissionFromId && !options.automaticResume;
+    if (backgroundUploads && backgroundUploadManager.prefersForeground(plannedDraftId)) {
+      background = false;
+      backgroundUploadManager.consumeForegroundMark(plannedDraftId);
+    }
     // A person's Submit or Resume starts a fresh count of automatic tries.
     autoResume.beginAttempt(options.automaticResume === true);
     // Bind the user's explicit action across local preparation and transport.
     const operation = createUploadOperation();
+    activeOperationRef.current = operation;
     const attemptOwner = OfflineCaptureStore.getOwnerId();
     const attemptRecoveryScope = recoveryScopeRef.current;
     submissionLockRef.current = true;
@@ -908,7 +950,13 @@ const LotListingFormSheet = ({
       draftSaved = true;
       attemptDraftId = localDraft.id;
       operation.assertActive();
-      await prepareOfflineSubmission(localDraft);
+      try {
+        await prepareOfflineSubmission(localDraft);
+      } catch (error: any) {
+        // The background line waits for a connection by itself. Any other
+        // refusal stops here, as before.
+        if (!background || error?.code !== UPLOAD_WAITING_FOR_CONNECTION) throw error;
+      }
       operation.assertActive();
       await OfflineCaptureStore.setSubmissionState(localDraft.id, 'ready');
       operation.assertActive();
@@ -993,6 +1041,32 @@ const LotListingFormSheet = ({
         coverIndex: lot.coverIndex,
       }));
 
+      if (background) {
+        if (!attemptOwner) throw new Error('Sign in to the account that owns this draft.');
+        // The same details and photos this form would send, frozen now.
+        const queuedDetails = details;
+        const queuedLots = serviceLots;
+        const handedOff = backgroundUploadManager.enqueue({
+          draftId: localDraft.id,
+          type: 'lotListing',
+          ownerId: attemptOwner,
+          title: contractNo.trim() || 'Lot listing',
+          totalFiles: submissionFileCount,
+          draft: localDraft,
+          upload: (onProgress, uploadOperation) =>
+            lotListingService.createLotListing(queuedDetails, queuedLots, onProgress, { operation: uploadOperation }),
+        });
+        setSubmitting(false);
+        if (!handedOff) {
+          Alert.alert(ALREADY_UPLOADING_TITLE, ALREADY_UPLOADING_MESSAGE);
+          return;
+        }
+        // No alert: the upload bar shows progress and the outcome from here.
+        await resetForm();
+        onClose();
+        return;
+      }
+
       const connectivity = await OfflineQueueService.getConnectivityStatus();
       operation.assertActive();
       if (options.nextLot && connectivity.status === 'offline') {
@@ -1013,7 +1087,7 @@ const LotListingFormSheet = ({
         setUploadProgress(progress);
         if (detail) setUploadStatus(detail);
         autoResume.noteProgress(detail?.completedFiles);
-      });
+      }, { operation });
       operation.assertActive();
       assertReportUploadAccepted(acceptedResponse);
       uploadAccepted = true;
@@ -1101,6 +1175,7 @@ const LotListingFormSheet = ({
       Alert.alert(feedback.title, feedback.message);
     } finally {
       submissionLockRef.current = false;
+      if (activeOperationRef.current === operation) activeOperationRef.current = null;
       setPausingUpload(false);
     }
   };

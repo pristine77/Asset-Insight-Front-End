@@ -1,10 +1,25 @@
 let epoch = 0;
 let uploadOwner: string | null = null;
 const cancels = new Set<() => void>();
+const ownerListeners = new Set<(ownerId: string | null) => void>();
 /** Bind with local draft ownership, before starting any account's uploads. */
 export function setUploadOwner(ownerId: string | null) {
-  if (uploadOwner !== ownerId) pauseActiveUploads();
+  if (uploadOwner === ownerId) return;
+  pauseActiveUploads();
   uploadOwner = ownerId;
+  for (const listener of Array.from(ownerListeners)) {
+    try { listener(ownerId); } catch { /* One faulty listener must not keep another account's work alive. */ }
+  }
+}
+/**
+ * Called after the upload owner actually changes (sign-out, account switch),
+ * once every upload has already been cancelled. The background upload line
+ * (backgroundUploadManager.ts) drops its jobs here: nothing queued by one
+ * account may start under another.
+ */
+export function onUploadOwnerChange(listener: (ownerId: string | null) => void): () => void {
+  ownerListeners.add(listener);
+  return () => { ownerListeners.delete(listener); };
 }
 /**
  * Why uploads were paused, when no person asked for it. Only the automatic
@@ -17,9 +32,9 @@ export type UploadPauseReason = 'connection';
 // that ended generation g is the one that started g + 1.
 const pauseReasons = new Map<number, UploadPauseReason>();
 const PAUSE_REASONS_KEPT = 64;
-function pausedError(generation?: number) {
+function pausedError(generation?: number, reason?: UploadPauseReason) {
   const error = new Error('Upload paused. Your draft is saved. Resume this same upload to check whether the server already accepted it.');
-  const pauseReason = generation === undefined ? undefined : pauseReasons.get(generation + 1);
+  const pauseReason = reason ?? (generation === undefined ? undefined : pauseReasons.get(generation + 1));
   return Object.assign(error, { code: 'ERR_CANCELED', acceptanceUncertain: true }, pauseReason ? { pauseReason } : {});
 }
 export function uploadGeneration() { return epoch; }
@@ -148,6 +163,23 @@ export function beginUploadFinalization(): () => void {
 export function isUploadFinalizing(): boolean {
   return finalizingUploads > 0;
 }
+/*
+ * Pausing ONE upload (2026-10-02). Uploads now run in the background while the
+ * person starts the next report, so the Pause on one upload must not stop
+ * another: the form's Pause and the upload bar's Pause each cancel only their
+ * own operation. The upload sees the same paused error as after
+ * pauseActiveUploads() (code ERR_CANCELED, acceptanceUncertain), so Resume
+ * behaves exactly as before. Every operation created with this one as its
+ * parent (the service's own operation and its transfers) stops with it.
+ */
+export function pauseUploadOperation(operation: UploadOperation | null | undefined, reason?: UploadPauseReason) {
+  operation?.cancel(pausedError(undefined, reason));
+}
+/**
+ * Pauses every upload of this account. Kept for the automatic pause on a lost
+ * connection, Offline mode and sign-out; a person's Pause uses
+ * pauseUploadOperation() instead.
+ */
 export function pauseActiveUploads(reason?: UploadPauseReason) {
   epoch++;
   if (reason) pauseReasons.set(epoch, reason);

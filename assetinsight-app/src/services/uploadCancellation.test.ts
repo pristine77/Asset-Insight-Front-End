@@ -1,7 +1,7 @@
 import { Platform } from 'react-native';
 import api from './api';
 import { uploadReportFilesDirectToR2, type DirectUploadFile } from './directR2UploadService';
-import { pauseActiveUploads, createUploadOperation, cancellableUploadRequest, setUploadOwner } from './uploadCancellation';
+import { pauseActiveUploads, createUploadOperation, cancellableUploadRequest, setUploadOwner, pauseUploadOperation, onUploadOwnerChange } from './uploadCancellation';
 import { loadNativeAuctionCamera } from '../components/camera/nativeAuctionCameraModule';
 import { assetService, type AssetCreateDetails } from './assetService';
 import { lotListingService, type LotListingDetails } from './lotListingService';
@@ -209,4 +209,70 @@ it('unregisters a completed request so later pause cannot cancel it', async () =
   let signal!: AbortSignal;
   await cancellableUploadRequest(createUploadOperation(), async (value) => { signal = value; return 1; });
   pauseActiveUploads(); expect(signal.aborted).toBe(false);
+});
+
+/*
+ * Pausing one upload (2026-10-02). With uploads running in the background, the
+ * form's Pause and the upload bar's Pause stop their own upload only: the
+ * services bind their transfer to the caller's operation.
+ */
+describe('pausing one upload', () => {
+  const listingDetails = details as LotListingDetails;
+  const listingLot = { id: 'lot', lot_number: 1, files: [file], extraFiles: [] };
+
+  it('stops the direct transfer of that upload and leaves another upload running', async () => {
+    const mine = createUploadOperation(); const other = createUploadOperation();
+    const mineRequest = interruptedRequest(); const otherRequest = interruptedRequest();
+    jest.mocked(api.post).mockImplementationOnce(mineRequest.request as any).mockImplementationOnce(otherRequest.request as any);
+    const mineResult = assetService.createAssetReport(details as AssetCreateDetails, [{ id: 'lot', files: [file], extraFiles: [], coverIndex: 0 }], undefined, { operation: mine }).catch((error) => error);
+    const mineSignal = await mineRequest.started.promise;
+    const otherResult = lotListingService.createLotListing(listingDetails, [listingLot], undefined, { operation: other }).catch((error) => error);
+    const otherSignal = await otherRequest.started.promise;
+    pauseUploadOperation(mine);
+    expect(mineSignal.aborted).toBe(true);
+    expect(await mineResult).toMatchObject({ code: 'ERR_CANCELED', acceptanceUncertain: true });
+    expect(otherSignal.aborted).toBe(false);
+    expect(other.isActive()).toBe(true);
+    // The other upload goes on to its answer; the paused one tried no fallback.
+    otherRequest.response.resolve({ data: { data: { ...session, alreadyQueued: true, accepted: true } } });
+    expect(await otherResult).toMatchObject({ reportId: 'same-report', jobId: 'same-job' });
+    expect(api.post).toHaveBeenCalledTimes(2);
+  });
+
+  it.each(['asset', 'lotListing'] as const)('stops the %s multipart transfer of that upload only', async (kind) => {
+    const mine = createUploadOperation(); const other = createUploadOperation();
+    const pending = interruptedRequest();
+    jest.mocked(api.post).mockRejectedValueOnce({ response: { status: 404 } }).mockImplementation(pending.request as any);
+    const result = (kind === 'asset'
+      ? assetService.createAssetReport(details as AssetCreateDetails, [{ id: 'lot', files: [file], extraFiles: [], coverIndex: 0 }], undefined, { operation: mine })
+      : lotListingService.createLotListing(listingDetails, [listingLot], undefined, { operation: mine })).catch((error) => error);
+    const signal = await pending.started.promise;
+    pauseUploadOperation(mine);
+    expect(signal.aborted).toBe(true);
+    expect(await result).toMatchObject({ code: 'ERR_CANCELED', acceptanceUncertain: true });
+    expect(other.isActive()).toBe(true);
+    expect(api.post).toHaveBeenCalledTimes(2);
+  });
+
+  it('gives the same paused error as a pause of every upload, with a reason when one is given', () => {
+    const operation = createUploadOperation();
+    pauseUploadOperation(operation, 'connection');
+    let error: any;
+    try { operation.assertActive(); } catch (caught) { error = caught; }
+    expect(error).toMatchObject({ code: 'ERR_CANCELED', acceptanceUncertain: true, pauseReason: 'connection' });
+    expect(() => pauseUploadOperation(null)).not.toThrow();
+  });
+
+  it('tells listeners when the upload owner changes, after every upload has stopped, and only then', () => {
+    const running = createUploadOperation();
+    const seen: Array<{ owner: string | null; uploadStillActive: boolean }> = [];
+    const stop = onUploadOwnerChange((owner) => { seen.push({ owner, uploadStillActive: running.isActive() }); });
+    setUploadOwner('owner-a');
+    expect(seen).toEqual([]);
+    setUploadOwner('owner-b');
+    expect(seen).toEqual([{ owner: 'owner-b', uploadStillActive: false }]);
+    stop();
+    setUploadOwner('owner-a');
+    expect(seen).toHaveLength(1);
+  });
 });

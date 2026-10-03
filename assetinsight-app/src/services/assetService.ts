@@ -1,6 +1,6 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import api from "./api";
-import { createUploadOperation, cancellableUploadRequest } from './uploadCancellation';
+import { createUploadOperation, cancellableUploadRequest, type UploadOperation } from './uploadCancellation';
 import { API_ENDPOINTS } from "../config/api";
 import { isRetryableRequestError } from "./connectivityService";
 import { restoreImageWatermarkPreference } from "../utils/watermarkPreference";
@@ -215,13 +215,17 @@ class AssetService {
    * @param details Report details
    * @param lots Mixed lots with images
    * @param onUploadProgress Progress callback
+   * @param options.operation The caller's upload operation. Pausing it
+   *   (pauseUploadOperation) stops this transfer, direct or multipart, and no
+   *   other upload.
    */
   async createAssetReport(
     details: AssetCreateDetails,
     lots: MixedLot[],
-    onUploadProgress?: DirectUploadProgressCallback
+    onUploadProgress?: DirectUploadProgressCallback,
+    options?: { operation?: UploadOperation }
   ): Promise<{ jobId: string; message: string; reportId?: string }> {
-    const operation = createUploadOperation();
+    const operation = createUploadOperation(options?.operation);
     // Send an explicit choice even to older APIs whose missing-field default
     // was true. Never mutate the saved draft supplied by the caller.
     const uploadDetails = {

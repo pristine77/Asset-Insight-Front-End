@@ -1,5 +1,104 @@
 # Android local development
 
+## Uploads run in the background — 2026-10-02 (local)
+
+Owner request: while a report's photos uploaded, the screen was held up until
+the upload finished. Chosen option: **keep waiting for acceptance** — ordinary
+uploads move to the background; work whose next step needs the server's
+acceptance keeps waiting in the form.
+
+- **How it works.** Submit (or Resume upload) on the Dashboard's Asset and Lot
+  Listing forms saves the draft and checks it as before, records it as ready to
+  upload, hands the upload to the background upload line and closes the form at
+  once. The person can start the next report or take photos meanwhile. The
+  upload is the form's own: the same saved draft, details, photos, submission
+  and upload session, the same check before every attempt
+  (`prepareOfflineSubmission`) and the same acceptance rules
+  (`reportUploadReceipt.ts`). Only the waiting moved. Code:
+  `services/backgroundUploadManager.ts`; the forms decide in `handleSubmit`.
+- **One at a time.** One upload runs; the rest wait in line, first in, first
+  out. Resume puts a paused upload at the end of the line.
+- **The upload bar** (`components/UploadBar.tsx`, rendered once in `App.tsx`)
+  sits below every main screen, which ends above it, and takes no room when
+  there is nothing to show: "Uploading 93530.3-A · 45 of 160 photos" with a
+  thin progress bar and **Pause**; "+2 waiting" (tap to list them and pause
+  one); "Waiting for signal · 45 of 160 sent" with **Resume now** and
+  **Pause**; paused uploads with **Resume** and **Open**; "Sent: 93530.3-A" for
+  six seconds when the server accepts a report; "Needs attention: 93530.3-A —
+  <reason>" with **Open** and **Dismiss**. Open is the same as Continue in
+  Drafts. The forms, the drawer and other dialogs are full-screen and cover it.
+- **Drafts.** Each local draft card shows the live state ("Uploading 45 of
+  160", "Waiting in line", "Waiting for signal", "Paused", "Needs attention").
+  While a draft is uploading or waiting in line it cannot be opened, deleted,
+  discarded or replaced from its cloud copy; pause it from the bar first.
+  Drafts also leaves any draft the line holds out of its cloud sync, which ends
+  by replacing the local draft with its cloud copy and deleting its local
+  photos — the photos the upload is reading.
+- **What stays in the foreground, and why.** Incoming work, including
+  **Generate files & new lot**: the next lot may start only after the server
+  accepts this one, so the form keeps waiting for that acceptance, as before.
+  Also Auction Management tasks, the explicit **Create Separate**, **Upload
+  updated version** and **Start separate report** choices, a form's own
+  automatic resume, and every form outside the Dashboard.
+- **Needs attention.** A report already processing for the contract, changed
+  photos, an earlier acceptance ("Earlier upload accepted"), sign-in problems
+  or any other error stop that upload; the draft is kept as paused and a notice
+  says why. That draft's next Submit or Resume upload runs in the form once,
+  where the form's usual prompt (Create Separate, replace or start separate,
+  the error message) appears.
+- **Pause.** The bar's Pause stops that upload only, and the form's own Pause
+  upload now stops only the form's upload (`pauseUploadOperation` in
+  `uploadCancellation.ts`), so pausing one never pauses the other. Sign-out,
+  an account switch, the automatic pause on a lost connection and Offline mode
+  still pause every upload. A Pause always takes effect at once: every step of
+  a background attempt, including the checks before the transfer, stops
+  waiting when its upload is paused.
+- **Finalizing.** Pause is not offered, and is refused, while a submission is
+  being finalized: that is when the server accepts it (see "Finalizing
+  safeguards" below). Choosing Offline on a new report now also leaves a
+  finalizing submission to settle (`setDraftCaptureMode` in
+  `offlineDraftPolicy.ts`); before, it would have cut off a background upload
+  at that moment and shown its accepted report as "Earlier upload accepted".
+- **Automatic resume.** A lost connection, a stalled transfer, a transient
+  network or server error, or no connection at Submit: the upload shows
+  "Waiting for signal", keeps its turn, and continues by itself with the rules
+  of "Uploads resume by themselves" (15 s of steady signal, a server check,
+  three tries in a row that send no new file). **Resume now** tries at once as
+  the person's own action. A pause from elsewhere in the app that nobody asked
+  of this upload (Offline chosen on a new report pauses every upload) is tried
+  again at once, counted in the same three tries.
+- **Accepted.** The draft is recorded as accepted and leaves Drafts, the
+  Dashboard refreshes its figures, and "Sent" appears. If the phone cannot
+  record the acceptance, the notice says the server accepted the report and
+  stays until dismissed; that draft is not uploaded again from the line.
+  Local media cleanup afterwards keeps camera files from the last 48 hours
+  (the forms clear them at once): the person may be taking the next report's
+  photos while an upload finishes.
+- **Sign-out and account switch** empty the line; nothing is written for the
+  old account. A profile refresh no longer re-runs the sign-in cleanup that
+  paused every upload: `AuthGate` keys it by the signed-in account.
+- **App restart.** The line lives in memory while the app is open. After a
+  restart nothing starts by itself: the drafts are still recorded as ready or
+  paused and show the usual **Resume upload**.
+
+Not covered: uploading while the app is closed or the phone is locked. That
+needs a native background upload service; this change is JavaScript only and
+ships with the next APK.
+
+Tests: `backgroundUploadManager.test.ts` (the line: order, one at a time,
+acceptance and its writes, earlier acceptance, needs attention and the
+foreground mark, the targeted Pause, waiting and automatic resume, the try
+limit, a pause from elsewhere, account change, finalizing, a busy draft),
+`backgroundUploadHandoff.test.tsx` (both forms: hand-off with the same details
+and photos, Incoming and the other foreground cases, the foreground mark, no
+signal at Submit, the form's Pause leaving a background upload running, the
+busy-draft guards), `UploadBar.test.tsx`, `backgroundUploadDraftGuard.test.ts`,
+`OfflineReportsScreen.backgroundUploads.test.tsx`, new cases in
+`OfflineCaptureList.test.tsx`, `uploadCancellation.test.ts` (a targeted pause
+stops the direct and the multipart transfer of its own upload only) and
+`uploadManifestRecovery.test.ts`. Component and mocked-transport evidence; no
+device run.
+
 ## Uploads resume by themselves — 2026-10-02 (local)
 
 Owner request: an upload interrupted by a weak or lost signal should continue
@@ -12,13 +111,15 @@ upload. This replaces, for a report that is still open, the earlier rule
   error, or a Submit that found no connection. A Pause the person tapped, an
   account change, and anything that needs a decision (conflicts, "Earlier
   upload accepted", sign-in problems) are unchanged.
-- **When.** Only while that report stays open. The form shows "Waiting for
-  signal" with **Resume now** and **Pause upload**. The phone must stay
+- **When.** While that report stays open, or, for an upload handed to the
+  background (see "Uploads run in the background"), while the app is open. The
+  form, or the upload bar, shows "Waiting for signal" with **Resume now** and
+  **Pause**. The phone must stay
   connected for 15 s and our server must answer its health check before the
   upload starts again; while connected but unanswered, it checks again after
-  15, 30, then 60 s. A closed form, a restarted app or a draft reopened from
-  Drafts keep the explicit Resume upload button, and Offline captures are still
-  never sent without a tap on Submit.
+  15, 30, then 60 s. A closed form that held its own upload, a restarted app or
+  a draft reopened from Drafts keep the explicit Resume upload button, and
+  Offline captures are still never sent without a tap on Submit.
 - **How far.** After three automatic tries in a row that store no new file, it
   stops and shows the usual message and Resume upload. A try that stores more
   files resets the count, so a long upload on a patchy signal keeps going.

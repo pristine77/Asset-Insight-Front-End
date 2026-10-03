@@ -23,6 +23,8 @@ import AutoSaveService, {
 import OfflineQueueService, { OfflineQueueJob } from '../services/offlineQueueService';
 import OfflineCaptureStore from '../services/offlineCaptureStore';
 import OfflineCaptureList from '../components/OfflineCaptureList';
+import { useBackgroundUploads } from '../components/useBackgroundUploads';
+import backgroundUploadManager, { describeBackgroundUpload } from '../services/backgroundUploadManager';
 import reportDraftService, { ReportDraft } from '../services/reportDraftService';
 import DraftSyncService from '../services/draftSyncService';
 import {
@@ -199,6 +201,14 @@ const isDraftCloudClean = (draft: OfflineReportDraft, cloud?: ReportDraft) => {
   return new Date(syncedAt).getTime() >= new Date(draft.updatedAt).getTime();
 };
 
+// A draft the background upload line holds -- sending, waiting in line, paused
+// or needing attention -- is not cloud-synced by this screen (2026-10-02). That
+// sync ends by replacing the local draft with its cloud copy and deleting its
+// local photos, which the background upload reads and a Resume from the upload
+// bar sends again. syncOneDraft checks again after the cloud save, because
+// Submit can hand the draft over while that save is still running.
+const heldByBackgroundUpload = (draftId: string) => Boolean(backgroundUploadManager.statusFor(draftId));
+
 
 const hydrateCloudLots = (cloud: ReportDraft): SavedLotData[] => {
   const lots = (JSON.parse(JSON.stringify(cloud.lots || [])) as SavedLotData[]).map(
@@ -294,6 +304,9 @@ const OfflineReportsScreen = ({
   const [syncing, setSyncing] = useState(false);
   const [syncingDraftIds, setSyncingDraftIds] = useState<Set<string>>(new Set());
   const [sendingIds, setSendingIds] = useState<Set<string>>(new Set());
+  // Re-renders with every background upload change, so each card shows its
+  // live status (services/backgroundUploadManager.ts).
+  useBackgroundUploads();
   const [storageSummary, setStorageSummary] = useState<{
     bytes: number;
     formatted: string;
@@ -307,7 +320,7 @@ const OfflineReportsScreen = ({
   } | null>(null);
 
   const syncOneDraft = useCallback(async (draft: OfflineReportDraft, force = false) => {
-    if (!canAttemptDraftCloudSync(draft, { force })) return;
+    if (!canAttemptDraftCloudSync(draft, { force }) || heldByBackgroundUpload(draft.id)) return;
     setSyncingDraftIds((prev) => new Set(prev).add(draft.id));
     try {
       const result = await DraftSyncService.syncDraft(draft, { force });
@@ -328,6 +341,7 @@ const OfflineReportsScreen = ({
         setDrafts((prev) => prev.map((item) => (item.id === current.id ? current : item)));
         return;
       }
+      if (heldByBackgroundUpload(draft.id)) return;
 
       const saved = await AutoSaveService.saveCloudDraftSnapshot({
         id: draft.id,
@@ -467,6 +481,9 @@ const OfflineReportsScreen = ({
       clearInterval(timer);
     };
   }, [loadData]);
+
+  // A draft accepted in the background leaves the list at once.
+  useEffect(() => backgroundUploadManager.onAccepted(() => { void loadData(false); }), [loadData]);
 
   const onRefresh = useCallback(async () => {
     setRefreshing(true);
@@ -687,6 +704,15 @@ const OfflineReportsScreen = ({
   }, [onContinueDraft]);
 
   const continueCloudDraft = useCallback(async (cloud: ReportDraft) => {
+    // Restoring from the cloud replaces the local draft and deletes its local
+    // media, so never while that draft is uploading in the background.
+    if (cloud.clientDraftId && backgroundUploadManager.isBusy(cloud.clientDraftId)) {
+      Alert.alert('Uploading in the background', 'This draft is uploading in the background. Pause it from the upload bar to edit it, or continue when the upload finishes.');
+      return;
+    }
+    // A paused upload of the local copy refers to the photos about to be
+    // replaced; it must not be resumable from the upload bar afterwards.
+    if (cloud.clientDraftId) backgroundUploadManager.forget(cloud.clientDraftId);
     const local = await AutoSaveService.saveCloudDraftSnapshot({
       id: cloud.clientDraftId,
       cloudId: cloud.id || cloud._id,
@@ -708,6 +734,10 @@ const OfflineReportsScreen = ({
   }, [loadData, onContinueDraft]);
 
   const deleteItem = useCallback((item: UnifiedDraftItem) => {
+    if (item.source === 'local' && backgroundUploadManager.isBusy(item.draft.id)) {
+      Alert.alert('Uploading in the background', 'This draft is uploading in the background. Pause it from the upload bar before deleting it.');
+      return;
+    }
     const title = item.title || 'draft';
     Alert.alert('Delete Draft', `Delete "${title}"?`, [
       { text: 'Cancel', style: 'cancel' },
@@ -716,6 +746,9 @@ const OfflineReportsScreen = ({
         style: 'destructive',
         onPress: async () => {
           if (item.source === 'local') {
+            if (backgroundUploadManager.isBusy(item.draft.id)) return;
+            // A paused background upload of this draft must not be resumable once it is gone.
+            backgroundUploadManager.forget(item.draft.id);
             if (item.draft.cloudId) {
               await reportDraftService.delete(item.draft.cloudId).catch(() => undefined);
             }
@@ -772,6 +805,10 @@ const OfflineReportsScreen = ({
       item.status === 'Uploading' ||
       (item.source === 'local' && sendingIds.has(item.draft.id)) ||
       (item.source === 'queue' && sendingIds.has(item.job.id));
+    // Live status from the background upload line; a draft it is sending or
+    // holding in line cannot be deleted (the bar's Pause comes first).
+    const background = item.source === 'local' ? backgroundUploadManager.statusFor(item.draft.id) : undefined;
+    const uploadingInBackground = item.source === 'local' && backgroundUploadManager.isBusy(item.draft.id);
 
     return (
       <View key={item.id} style={styles.card}>
@@ -794,6 +831,22 @@ const OfflineReportsScreen = ({
 
         <Text style={styles.contractText}>Contract: {item.contractNo || '-'}</Text>
         {renderMeta(item.counts)}
+
+        {background ? (
+          <View style={[styles.errorBox, background.status === 'attention' ? styles.retryBox : styles.backgroundBox]}>
+            <Feather
+              name={background.status === 'attention' ? 'alert-triangle' : 'upload-cloud'}
+              size={14}
+              color={background.status === 'attention' ? '#B45309' : '#2563EB'}
+            />
+            <Text
+              style={[styles.errorText, background.status === 'attention' ? styles.retryText : styles.backgroundText]}
+              accessibilityLiveRegion="polite"
+            >
+              Background upload: {describeBackgroundUpload(background)}
+            </Text>
+          </View>
+        ) : null}
 
         {item.source === 'local' && item.draft.cloudSyncError ? (
           <View style={[styles.errorBox, recoverableDraftError && styles.retryBox]}>
@@ -904,7 +957,13 @@ const OfflineReportsScreen = ({
             </TouchableOpacity>
           )}
 
-          <TouchableOpacity style={styles.secondaryAction} onPress={() => deleteItem(item)}>
+          <TouchableOpacity
+            style={[styles.secondaryAction, uploadingInBackground && styles.actionDisabled]}
+            onPress={() => deleteItem(item)}
+            disabled={uploadingInBackground}
+            accessibilityRole="button"
+            accessibilityState={{ disabled: uploadingInBackground }}
+          >
             <Feather name="trash-2" size={15} color="#DC2626" />
             <Text style={styles.deleteText}>Delete</Text>
           </TouchableOpacity>
@@ -1455,6 +1514,12 @@ const styles = StyleSheet.create({
   },
   retryText: {
     color: '#92400E',
+  },
+  backgroundBox: {
+    backgroundColor: '#EFF6FF',
+  },
+  backgroundText: {
+    color: '#1D4ED8',
   },
   actions: {
     marginTop: 14,

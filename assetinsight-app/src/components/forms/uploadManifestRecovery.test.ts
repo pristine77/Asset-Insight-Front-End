@@ -1,5 +1,5 @@
 import { Alert } from 'react-native';
-import { showUploadManifestRecovery } from './uploadManifestRecovery';
+import { isUploadManifestConflict, showUploadManifestRecovery } from './uploadManifestRecovery';
 
 const conflict = (data: Record<string, unknown>, code = 'SUBMISSION_MANIFEST_CHANGED') => ({
   response: { status: 409, data: { code, data } },
@@ -56,4 +56,18 @@ it('keeps Incoming on the same assignment even when ordinary separate creation i
   showUploadManifestRecovery(conflict({ accepted: true, reportAvailable: false, canCreateSeparate: true }, 'UPLOAD_SESSION_REPORT_UNAVAILABLE'));
   expect(jest.mocked(Alert.alert).mock.calls[0][1]).toContain('Incoming');
   expect(jest.mocked(Alert.alert).mock.calls[0][2]?.map(button => button.text)).toEqual(['Keep Draft']);
+});
+
+// The background upload line asks this instead of showing the prompt, then
+// leaves the draft for the form, where the prompt appears (2026-10-02).
+it.each([
+  [conflict({ accepted: false, canSupersede: true }), true],
+  [conflict({ accepted: true, reportAvailable: false }, 'UPLOAD_SESSION_REPORT_UNAVAILABLE'), true],
+  [conflict({}, 'ACTIVE_REPORT_EXISTS'), false],
+  [{ response: { status: 503, data: { code: 'SUBMISSION_MANIFEST_CHANGED' } } }, false],
+  [{ message: 'Network Error' }, false],
+  [undefined, false],
+])('recognises exactly the conflicts the prompt handles: %j', (error, expected) => {
+  expect(isUploadManifestConflict(error)).toBe(expected);
+  expect(showUploadManifestRecovery(error)).toBe(expected);
 });

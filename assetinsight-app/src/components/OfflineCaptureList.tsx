@@ -4,7 +4,9 @@ import { useAppTheme } from '../context/ThemeContext';
 import OfflineCaptureStore, { OfflineDraftSummary } from '../services/offlineCaptureStore';
 import AutoSaveService, { OfflineReportDraft } from '../services/autoSaveService';
 import { needsExplicitUploadResume } from '../services/offlineDraftPolicy';
+import backgroundUploadManager, { describeBackgroundUpload } from '../services/backgroundUploadManager';
 import LotPhotoCounts from './LotPhotoCounts';
+import { useBackgroundUploads } from './useBackgroundUploads';
 
 export default function OfflineCaptureList({ onOpen }: { onOpen: (id: string, type: 'asset' | 'lotListing') => void }) {
   const { colors } = useAppTheme();
@@ -15,6 +17,8 @@ export default function OfflineCaptureList({ onOpen }: { onOpen: (id: string, ty
   const [page, setPage] = useState(0);
   const [legacyLimit, setLegacyLimit] = useState(20);
   const [expanded, setExpanded] = useState<string>();
+  // Re-renders with every background upload change; statusFor() reads it.
+  useBackgroundUploads();
   const refresh = useCallback(async () => {
     const owner = OfflineCaptureStore.getOwnerId();
     try {
@@ -31,6 +35,8 @@ export default function OfflineCaptureList({ onOpen }: { onOpen: (id: string, ty
     const timer = setInterval(() => void refresh(), 30000);
     return () => { clearInterval(timer); listener.remove(); };
   }, [refresh]);
+  // A draft accepted in the background leaves this list at once.
+  useEffect(() => backgroundUploadManager.onAccepted(() => { void refresh(); }), [refresh]);
   const recover = (draft: OfflineReportDraft) => Alert.alert('Recover older draft',
     'This older draft has no recorded owner. Confirm only if you created it. Recovery keeps its photos on this device and requires review before submission.', [
       { text: 'Cancel', style: 'cancel' }, { text: 'These are my drafts', onPress: () => {
@@ -38,9 +44,14 @@ export default function OfflineCaptureList({ onOpen }: { onOpen: (id: string, ty
           .catch((reason) => setError(reason.message || 'Could not recover this draft.'));
       } },
     ]);
-  const remove = (item: OfflineDraftSummary) => Alert.alert('Discard local draft?',
+  const remove = (item: OfflineDraftSummary) => backgroundUploadManager.isBusy(item.id)
+    ? Alert.alert('Uploading in the background', 'This draft is uploading in the background. Pause it from the upload bar before discarding it.')
+    : Alert.alert('Discard local draft?',
     'This removes it from your draft list. Original gallery photos are not deleted. Its operational history can still sync to admin.', [
       { text: 'Cancel', style: 'cancel' }, { text: 'Discard draft', style: 'destructive', onPress: () => {
+        if (backgroundUploadManager.isBusy(item.id)) return;
+        // A paused background upload of this draft must not be resumable from the bar once it is gone.
+        backgroundUploadManager.forget(item.id);
         void AutoSaveService.deleteDraft(item.id).then(refresh).catch((reason) => setError(reason.message));
       } },
     ]);
@@ -49,19 +60,27 @@ export default function OfflineCaptureList({ onOpen }: { onOpen: (id: string, ty
     <Text style={[styles.title, { color: colors.text }]}>Offline captures · {items.length}</Text>
     <Text style={{ color: colors.textSecondary }}>Photos remain on this device. Only operational counts and status sync automatically. Open a draft to review and submit.</Text>
     {error ? <Text accessibilityRole="alert" style={{ color: colors.danger }}>{error}</Text> : null}
-    {visible.map((item) => <View key={item.id} style={[styles.card, { borderColor: colors.border, backgroundColor: colors.surface }]}>
+    {visible.map((item) => {
+      // The background upload line knows more than the stored state: a draft
+      // it is sending is stored as 'ready' but is not waiting for anyone.
+      const background = backgroundUploadManager.statusFor(item.id);
+      const busy = backgroundUploadManager.isBusy(item.id);
+      return <View key={item.id} style={[styles.card, { borderColor: colors.border, backgroundColor: colors.surface }]}>
       <Text style={[styles.heading, { color: colors.text }]}>{item.contractNo || 'Contract not entered'} · {item.type === 'asset' ? 'Asset' : 'Lot listing'}</Text>
       <Text style={{ color: colors.text }}>Saved on this device · {new Date(item.updatedAt).toLocaleString()}</Text>
       <Text style={{ color: colors.textSecondary }}>{item.counts.lots} lots · {item.counts.images} photos · {item.counts.extraImages} report-only{item.counts.missingImages ? ` · ${item.counts.missingImages} missing` : ''}</Text>
-      {needsExplicitUploadResume(item.submissionState) ? <Text style={{ color: colors.warning }}>Upload needs your confirmation — open the draft, then tap Resume upload. Nothing uploads automatically.</Text> : null}
+      {background ? <Text accessibilityLiveRegion="polite" style={{ color: background.status === 'attention' ? colors.warning : colors.info }}>Background upload: {describeBackgroundUpload(background)}</Text>
+        : needsExplicitUploadResume(item.submissionState) ? <Text style={{ color: colors.warning }}>Upload needs your confirmation — open the draft, then tap Resume upload. Nothing uploads automatically.</Text> : null}
       {item.inventoryError ? <Text accessibilityRole="alert" style={{ color: colors.warning }}>{item.inventoryError}</Text> : null}
       <View style={styles.actions}>
         <TouchableOpacity accessibilityRole="button" accessibilityHint="Review saved data first. Photos upload only after you tap Submit." onPress={() => onOpen(item.id, item.type)} style={styles.button}><Text style={{ color: colors.accent }}>Open and submit</Text></TouchableOpacity>
         <TouchableOpacity accessibilityRole="button" accessibilityState={{ expanded: expanded === item.id }} onPress={() => setExpanded(expanded === item.id ? undefined : item.id)} style={styles.button}><Text style={{ color: colors.text }}>Lot counts</Text></TouchableOpacity>
-        <TouchableOpacity accessibilityRole="button" onPress={() => remove(item)} style={styles.button}><Text style={{ color: colors.danger }}>Discard</Text></TouchableOpacity>
+        <TouchableOpacity accessibilityRole="button" accessibilityState={{ disabled: busy }} accessibilityHint={busy ? 'Uploading in the background. Pause it from the upload bar first.' : undefined}
+          disabled={busy} onPress={() => remove(item)} style={[styles.button, busy && styles.disabled]}><Text style={{ color: colors.danger }}>Discard</Text></TouchableOpacity>
       </View>
       {expanded === item.id ? <LotPhotoCounts lots={item.counts.perLot} /> : null}
-    </View>)}
+    </View>;
+    })}
     {items.length > 20 ? <View style={styles.actions}>
       <TouchableOpacity accessibilityRole="button" disabled={!page} onPress={() => setPage(page - 1)} style={styles.button}><Text style={{ color: colors.accent }}>Previous</Text></TouchableOpacity>
       <Text style={{ color: colors.text }}>Page {page + 1} / {Math.ceil(items.length / 20)}</Text>
@@ -89,4 +108,5 @@ export default function OfflineCaptureList({ onOpen }: { onOpen: (id: string, ty
 
 const styles = StyleSheet.create({ section: { gap: 10, marginVertical: 16 }, title: { fontSize: 20, fontWeight: '700' },
   card: { borderWidth: 1, borderRadius: 8, padding: 12, gap: 8 }, heading: { fontSize: 16, fontWeight: '600' },
-  actions: { flexDirection: 'row', flexWrap: 'wrap', alignItems: 'center', gap: 8 }, button: { minHeight: 44, padding: 10, justifyContent: 'center' } });
+  actions: { flexDirection: 'row', flexWrap: 'wrap', alignItems: 'center', gap: 8 }, button: { minHeight: 44, padding: 10, justifyContent: 'center' },
+  disabled: { opacity: 0.4 } });

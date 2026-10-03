@@ -29,6 +29,7 @@ import api from '../services/api';
 import { NotificationItem } from '../services/notificationService';
 import type { OfflineDraftType } from '../services/autoSaveService';
 import { OfflineQueueService } from '../services/offlineQueueService';
+import backgroundUploadManager from '../services/backgroundUploadManager';
 
 interface ReportStats {
   totalReports: number;
@@ -288,6 +289,13 @@ const DashboardScreen = ({
     void fetchRecentReports();
     void refreshConnectionStatus();
   }, [fetchRecentReports, fetchStats, refreshConnectionStatus]);
+
+  // A report accepted in the background (services/backgroundUploadManager.ts)
+  // shows in the figures and recent reports without a pull to refresh.
+  useEffect(() => backgroundUploadManager.onAccepted(() => {
+    void fetchStats();
+    void fetchRecentReports();
+  }), [fetchRecentReports, fetchStats]);
 
   useEffect(() => {
     const interval = setInterval(() => void refreshConnectionStatus(), 15_000);
@@ -607,7 +615,10 @@ const DashboardScreen = ({
         )}
       </ScrollView>
 
+      {/* Submit hands the upload to the background line and closes the form;
+          the upload bar shows its progress (App.tsx, UploadBar.tsx). */}
       <AssetFormSheet
+        backgroundUploads
         visible={assetFormVisible}
         onClose={() => {
           setAssetFormVisible(false);
@@ -636,6 +647,7 @@ const DashboardScreen = ({
         }}
       />
       <LotListingFormSheet
+        backgroundUploads
         visible={lotListingFormVisible}
         onClose={() => {
           setLotListingFormVisible(false);
