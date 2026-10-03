@@ -1989,9 +1989,9 @@ const AssetFormSheet = ({
         <View style={styles.fieldContainer}>
           <View style={styles.toggleRow}>
             <View style={{ flex: 1, paddingRight: 12 }}>
-              <Text style={styles.fieldLabel}>Apply watermark</Text>
+              <Text style={styles.fieldLabel}>Add logo where missing</Text>
               <Text style={{ fontSize: 12, color: '#6B7280' }}>
-                For imported, unwatermarked photos only. Asset Insight camera photos already have a logo. Off by default.
+                Adds the company logo to photos that don’t have it. Photos that already show it, like Asset Insight camera photos, are left alone, so no photo gets two. On by default.
               </Text>
             </View>
             <TouchableOpacity

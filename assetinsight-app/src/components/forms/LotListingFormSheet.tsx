@@ -1521,13 +1521,13 @@ const LotListingFormSheet = ({
                   style={styles.bankToggleRow}
                   activeOpacity={0.8}
                   accessibilityRole="switch"
-                  accessibilityLabel="Apply watermark to new photos"
+                  accessibilityLabel="Add the company logo to photos that don’t have it"
                   accessibilityState={{ checked: watermarkImages }}
                   onPress={() => setWatermarkImages((prev) => !prev)}>
                   <View style={{ flex: 1, paddingRight: 12 }}>
-                    <Text style={styles.fieldLabelSmall}>Apply watermark</Text>
+                    <Text style={styles.fieldLabelSmall}>Add logo where missing</Text>
                     <Text style={styles.bankToggleHelp}>
-                      For imported, unwatermarked photos only. Asset Insight camera photos already have a logo. Off by default.
+                      Adds the company logo to photos that don’t have it. Photos that already show it, like Asset Insight camera photos, are left alone, so no photo gets two. On by default.
                     </Text>
                   </View>
                   <View style={[styles.bankCheckbox, watermarkImages && styles.bankCheckboxActive]}>

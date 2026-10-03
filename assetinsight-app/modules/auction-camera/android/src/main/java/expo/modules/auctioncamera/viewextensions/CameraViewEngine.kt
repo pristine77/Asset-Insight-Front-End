@@ -110,8 +110,15 @@ class CameraViewEngine(private val context: Context, private val lifecycleOwner:
     private var use12MPOutput: Boolean = false
     var onCameraRebound: (() -> Unit)? = null
     var onZoomChanged: ((Float, Float, Float) -> Unit)? = null
-    var onPhotoCaptured: ((Uri) -> Unit)? = null
+    /**
+     * The frame of a shot is on disk. The shutter may fire again now, while this
+     * shot is still being processed; its photo follows in onPhotoCaptured.
+     */
+    var onCaptureSaved: ((CaptureTicket?) -> Unit)? = null
+    var onPhotoCaptured: ((Uri, CaptureTicket?) -> Unit)? = null
     var onPhotoProcessed: ((Uri, Uri, Int, Int) -> Unit)? = null
+    /** A saved shot could not be processed. Nothing was added to any lot. */
+    var onPhotoProcessingFailed: ((String, CaptureTicket?) -> Unit)? = null
     var onVideoRecordingStarted: (() -> Unit)? = null
     var onVideoFinalizing: ((Uri) -> Unit)? = null
     var onVideoRecorded: ((Uri) -> Boolean)? = null
@@ -125,7 +132,7 @@ class CameraViewEngine(private val context: Context, private val lifecycleOwner:
     var onExtensionModeChanged: ((CameraViewExtensionMode) -> Unit)? = null
     var onManualConflictResolved: ((String) -> Unit)? = null
     var onNightModeComplete: (() -> Unit)? = null
-    var onNightModeUriReady: ((Uri) -> Unit)? = null
+    var onNightModeUriReady: ((Uri, CaptureTicket?) -> Unit)? = null
     var onNightModeError: ((String) -> Unit)? = null
     private var lensFacing = CameraSelector.LENS_FACING_BACK
     private lateinit var preview: Preview
@@ -165,8 +172,12 @@ class CameraViewEngine(private val context: Context, private val lifecycleOwner:
     private val mainHandler = Handler(Looper.getMainLooper())
     private var cameraExecutor: ExecutorService = Executors.newSingleThreadExecutor()
 
-    //  A multi-lane highway for heavy image processing
-    private var processingExecutor: ExecutorService = Executors.newFixedThreadPool(3)
+    // Photo processing runs on ONE thread so photos are filed in the order they
+    // were taken. The shutter is free while a shot is processed (onCaptureSaved),
+    // so with a pool a quick second shot could finish before a slow first one and
+    // be filed ahead of it. One thread was the real throughput before as well:
+    // the shutter lock allowed only one shot in flight (2026-10-03).
+    private var processingExecutor: ExecutorService = Executors.newSingleThreadExecutor()
     var suppressGalleryCopy = false
     private var autoFlashEnabled = false
     private val lotPhotosDir: File by lazy {
@@ -542,17 +553,31 @@ class CameraViewEngine(private val context: Context, private val lifecycleOwner:
     // Capture routing
     // ─────────────────────────────────────────────────────────────────────────
 
-    fun capturePhoto() {
-        if (!::imageCapture.isInitialized || !::camera.isInitialized) return
+    /**
+     * Every tap gets an answer: a saved frame, a processed photo, or an error.
+     * A tap that is answered by nothing leaves the screen's shutter locked for
+     * good, which is what happened when the camera was not bound yet, or when
+     * takePicture itself threw (2026-10-03).
+     */
+    fun capturePhoto(ticket: CaptureTicket? = null) {
+        if (!::imageCapture.isInitialized || !::camera.isInitialized) {
+            mainHandler.post { onRecordingError?.invoke("Camera is not ready yet. Try again.") }
+            return
+        }
         Log.d(
             "CAPTURE_ROUTE",
             "capturePhoto called — isNightMode=$isNightMode activeMode=${activeExtensionMode.label}"
         )
 
-        when {
-            isNightMode -> captureNight()
-            activeExtensionMode is CameraViewExtensionMode.Bokeh -> captureBokeh()
-            else -> captureToFile()
+        try {
+            when {
+                isNightMode -> captureNight(ticket)
+                activeExtensionMode is CameraViewExtensionMode.Bokeh -> captureBokeh(ticket)
+                else -> captureToFile(ticket)
+            }
+        } catch (error: Exception) {
+            Log.e(TAG, "takePicture threw: ${error.message}")
+            mainHandler.post { onRecordingError?.invoke("Capture failed: ${error.message}") }
         }
     }
 
@@ -562,22 +587,46 @@ class CameraViewEngine(private val context: Context, private val lifecycleOwner:
 
     private data class ProcessedCapture(val uri: Uri, val width: Int, val height: Int)
 
-    private fun publishCapturedFile(file: File, night: Boolean = false) {
+    private fun publishCapturedFile(file: File, ticket: CaptureTicket?, night: Boolean = false) {
         processingExecutor.execute {
-            val result = processCapturedFile(file)
+            // Everything is caught, OutOfMemoryError included. It is not an Exception,
+            // so it escaped the catch inside processCapturedFile, killed this thread,
+            // and answered nobody: the app crashed on a very large photo, or the
+            // shutter stayed locked and the thumbnail kept pulsing (2026-10-03).
+            val result = try {
+                processCapturedFile(file)
+            } catch (error: Throwable) {
+                Log.e(TAG, "Processing failed: ${error.message}")
+                null
+            }
+            // The raw frame is never shown to anyone; a shot that cannot be
+            // processed is retaken, so its frame is not kept.
+            if (result == null && file.exists()) file.delete()
             mainHandler.post {
                 if (result == null) {
-                    if (night) onNightModeError?.invoke("Photo processing failed. Please take the photo again.")
-                    else onRecordingError?.invoke("Photo processing failed. Please take the photo again.")
+                    onPhotoProcessingFailed?.invoke("Photo processing failed. Please take the photo again.", ticket)
                 } else {
                     if (night) {
                         onNightModeComplete?.invoke()
-                        onNightModeUriReady?.invoke(result.uri)
-                    } else onPhotoCaptured?.invoke(result.uri)
+                        onNightModeUriReady?.invoke(result.uri, ticket)
+                    } else onPhotoCaptured?.invoke(result.uri, ticket)
                     onPhotoProcessed?.invoke(result.uri, result.uri, result.width, result.height)
                 }
             }
         }
+    }
+
+    /**
+     * The largest decode the output needs: twice the output box, so the crops and
+     * the resize have detail to work from, widened when a focus box keeps only
+     * part of the frame. The decoder also stays inside the memory available.
+     */
+    internal fun decodeBoundFor(use12MP: Boolean, crop: RectF?): Pair<Int, Int> {
+        val (outW, outH) = if (use12MP) 6000 to 6000 else STANDARD_PHOTO_MAX_WIDTH to STANDARD_PHOTO_MAX_HEIGHT
+        val cropW = crop?.width()?.takeIf { it > 0f } ?: 1f
+        val cropH = crop?.height()?.takeIf { it > 0f } ?: 1f
+        val cap = 8192
+        return minOf(cap, (outW * 2 / cropW).toInt()) to minOf(cap, (outH * 2 / cropH).toInt())
     }
 
     private fun processCapturedFile(file: File): ProcessedCapture? {
@@ -622,7 +671,21 @@ class CameraViewEngine(private val context: Context, private val lifecycleOwner:
                 androidx.exifinterface.media.ExifInterface.ORIENTATION_ROTATE_270 -> 270f
                 else -> 0f
             }
-            val raw = android.graphics.BitmapFactory.decodeFile(file.path) ?: throw IllegalStateException("Unable to decode capture")
+            // Decode only as large as the output needs (2026-10-03). A full-size
+            // decode of a 50 MP frame is 200 MB, and the upright copy below another
+            // 200 MB — more than the app may hold, so very large photos crashed it.
+            // The crops below work in fractions of the frame, so a smaller decode
+            // crops the same picture. See decodeBoundFor for the size chosen.
+            val (boundW, boundH) = decodeBoundFor(use12MPOutput, activeCropRect)
+            val decoded = expo.modules.auctioncamera.utils.SafeBitmapDecoder.decode(
+                file,
+                expo.modules.auctioncamera.model.ImageProcessingConfig(
+                    maxDecodedWidthPx = boundW,
+                    maxDecodedHeightPx = boundH,
+                    maxHeapFraction = 0.35f,
+                ),
+            ) ?: throw IllegalStateException("Unable to decode capture")
+            val raw = decoded.bitmap
 
             var bitmap = if (rotation != 0f) {
                 val matrix = android.graphics.Matrix().apply { postRotate(rotation) }
@@ -1081,7 +1144,7 @@ class CameraViewEngine(private val context: Context, private val lifecycleOwner:
         }
     }
 
-    private fun captureToFile() {
+    private fun captureToFile(ticket: CaptureTicket?) {
         val captureStartMs = SystemClock.elapsedRealtime()
         CameraProfiler.beginSection("capture_photo")
         // --- Determine extension based on outputFormat ---
@@ -1103,11 +1166,11 @@ class CameraViewEngine(private val context: Context, private val lifecycleOwner:
                         "image_saved extension=${activeExtensionMode.label} ms=${SystemClock.elapsedRealtime() - captureStartMs} bytes=${tempFile.length()}"
                     )
 
+                    // The frame is on disk: the shutter is free again from here, while
+                    // the shot is processed (see onCaptureSaved).
+                    mainHandler.post { onCaptureSaved?.invoke(ticket) }
                     // Never expose an unprocessed/raw URI to drafts or upload.
-                    publishCapturedFile(tempFile)
-//                    cameraExecutor.execute {
-//                        processCapturedFile(tempFile)
-//                    }
+                    publishCapturedFile(tempFile, ticket)
                 }
 
                 override fun onError(exception: ImageCaptureException) {
@@ -1120,7 +1183,7 @@ class CameraViewEngine(private val context: Context, private val lifecycleOwner:
     }
 
     // ── Portrait / Bokeh capture ──────────────────────────────────────────────
-    private fun captureBokeh() {
+    private fun captureBokeh(ticket: CaptureTicket?) {
         Log.d("BOKEH_CAPTURE", "Starting Portrait capture")
         CameraProfiler.beginSection("capture_bokeh")
         // --- Determine extension based on outputFormat ---
@@ -1138,7 +1201,8 @@ class CameraViewEngine(private val context: Context, private val lifecycleOwner:
             object : ImageCapture.OnImageSavedCallback {
                 override fun onImageSaved(outputFileResults: ImageCapture.OutputFileResults) {
                     CameraProfiler.endSection("capture_bokeh")
-                    publishCapturedFile(tempFile)
+                    mainHandler.post { onCaptureSaved?.invoke(ticket) }
+                    publishCapturedFile(tempFile, ticket)
 
 //                    // 2. BACKGROUND PROCESSING: Do the heavy lifting in a background thread
 //                    cameraExecutor.execute {
@@ -1158,7 +1222,7 @@ class CameraViewEngine(private val context: Context, private val lifecycleOwner:
 
     // ── Night capture ─────────────────────────────────────────────────────────
 
-    private fun captureNight() {
+    private fun captureNight(ticket: CaptureTicket?) {
         CameraProfiler.beginSection("capture_night")
         // --- Determine extension based on outputFormat ---
         val extension = when (outputFormat) {
@@ -1175,7 +1239,8 @@ class CameraViewEngine(private val context: Context, private val lifecycleOwner:
             object : ImageCapture.OnImageSavedCallback {
                 override fun onImageSaved(outputFileResults: ImageCapture.OutputFileResults) {
                     CameraProfiler.endSection("capture_night")
-                    publishCapturedFile(tempFile, night = true)
+                    mainHandler.post { onCaptureSaved?.invoke(ticket) }
+                    publishCapturedFile(tempFile, ticket, night = true)
 
 //                    // 2. BACKGROUND PROCESSING: Do the heavy lifting in a background thread
 //                    cameraExecutor.execute {

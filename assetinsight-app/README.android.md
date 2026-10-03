@@ -1,5 +1,93 @@
 # Android local development
 
+## One logo per photo — 2026-10-03 (local)
+
+The owner asked for the company logo on every photo, added only where it is
+missing ("sometimes no logo and sometimes it's double"). Why both happened:
+
+- **No logo:** the 2026-09-11 rule left the upload switch ("Apply watermark")
+  off by default and meant it for imported photos only. Gallery imports and web
+  uploads therefore went up without a logo unless someone ticked it.
+- **Double logo:** ticking it made the server stamp every photo that had no
+  receipt. Photos that already showed the logo without a receipt got a second
+  one: camera photos from builds before receipts, photos re-saved by
+  WhatsApp/email/gallery editors, and photos downloaded from the website.
+
+What changed:
+
+- The server now checks every photo before stamping (backend
+  `src/utils/photoLogoDetection.ts`, called by `processImageWithLogo`): a valid
+  receipt, or the logo visible at the camera's placement (20% width, 3%
+  padding) or the server's (10% width, 20 px / 2% margin), means "leave the
+  pixels alone". Only photos without the logo get one. The check was tested
+  on 1,326 photos: no-logo photos scored at most 0.37, photos with a logo at
+  least 0.72 (threshold 0.55), including website re-saves, smaller copies, dark
+  scenes and photos with both logos.
+- The switch is now **"Add logo where missing"**, **on by default**
+  (`src/utils/watermarkPreference.ts`), for Asset and Lot Listing reports. Turning
+  it off still stores photos exactly as taken (camera photos keep the logo the
+  camera adds). A draft saved by an older build with the switch off keeps that
+  choice.
+- The server default for a missing choice is now on, so web uploads and older
+  app builds get the logo where it is missing. Once the server is deployed,
+  ticking the switch in the current field app is safe for every photo.
+- The camera is unchanged: it always stamps one logo and writes a receipt.
+
+Limit: a photo cropped after it was stamped, or a logo placed somewhere else by
+hand, is not recognised and gets a second logo.
+
+Verification: backend 11 logo-related test files (109 tests) and the type
+check; app Jest suites for the switch, transport and camera source.
+
+## Camera controls fit landscape screens — 2026-10-03 (local)
+
+Owner report with a screenshot (Galaxy S24 Ultra, large system text): in
+landscape, Done was missing and Next was half cut off. The right-hand column
+was a scroll view, so on that screen Done sat below the edge, and nothing showed
+that the column could scroll.
+
+`res/layout-land/activity_camera_view.xml` now has a fixed-height column
+(`rightPanelColumn`, a ConstraintLayout) instead of the scroll view:
+
+- the gallery row is pinned to the top;
+- Prev / Next / Done (`linearLayoutLotLeftRight`) are pinned to the bottom and
+  are always visible;
+- Bundle, Item, Photo and + Extra (`captureButtons`) share the height in between.
+  They keep their usual size (the box is at most 210dp) and shrink, with their
+  text (`autoSizeTextType="uniform"`, one line), when a short screen or a large
+  font leaves less room.
+
+View IDs used by `CameraViewActivity` are unchanged. Portrait already fits: Prev,
+Next, + Extra and Done sit in one row sized with sdp. The status bar strip
+at the top stays as it was (the owner withdrew that request).
+`src/config/cameraLandscapeLayout.test.ts` pins these rules.
+
+## Device approval: once per phone, opens by itself — 2026-10-03 (local)
+
+Owner request: approve a phone once, never again after an app update, and open
+the app by itself once approved.
+
+- **Once per phone already holds for official builds.** An in-place update keeps
+  the installation key, so the same registration is used. After uninstalling and
+  reinstalling, the app sends a hashed Android ID (`deviceReinstallIdentity.ts`)
+  and the backend rebinds the existing, still-approved registration
+  (`beginDeviceAwareSession`, "Android app reinstalled on an existing bound
+  device"). The store build already sends this ID.
+- **The signing key matters.** Android gives each signing key its own Android ID.
+  A build signed with a different key looks like a new phone and needs one
+  approval. That is what happened with the local test build (signed with this
+  PC's key); later test builds from this PC reuse that approval. **Every release
+  must be signed with the same upload key** (the EAS-managed keystore), or every
+  user's phone will need approving again.
+- **Opens by itself.** The waiting screen (`DeviceAccessScreen.tsx`) used to
+  check every 10 seconds, and only on that timer. It now checks straight away,
+  again whenever the app comes back to the front, and then every 5 seconds
+  (`APPROVAL_CHECK_INTERVAL_MS`). An approval found by any check signs in and
+  opens the app (`refreshDeviceStatus` -> `exchangeApproval`). Checks pause while
+  the app is in the background. The status check is one indexed read with no
+  rate limit. The waiting state is keyed on a flag, so storing a fresh pending
+  state never triggers an extra check.
+
 ## Uploads run in the background — 2026-10-02 (local)
 
 Owner request: while a report's photos uploaded, the screen was held up until
@@ -230,6 +318,66 @@ and `nativeCapturePhotoSize.test.ts`, which pins the Kotlin source because the
 project has no Kotlin test runner. The Kotlin change was not compiled here (no
 JDK or Android SDK on this machine); the next Android build compiles it, and a
 real-phone capture should confirm the 1200 × 900 output before release.
+
+## Camera: the shutter, failed shots, large photos and long sessions — 2026-10-03 (local)
+
+Four defects in the native camera (`modules/auction-camera`), found in the
+2026-10-01 sweep and fixed once this machine could compile Kotlin.
+
+**The shutter locked after each shot, and sometimes for good.** The screen
+allows one shot in flight (`captureInFlight`) and used to free it only after
+the previous photo was fully processed — decoded, cropped, resized and
+compressed — so every shot locked the shutter for a second or more. It now
+frees as soon as the frame is on disk (`onCaptureSaved`), and the photo is
+processed while the next shot is taken. Because a tap can now land before the
+previous photo is filed, each shot carries its own request (`CaptureTicket`:
+mode, extra, tap time) instead of reading two shared "pending" fields, and
+processing runs on one thread so photos are filed in the order they were
+taken. Two taps that nothing ever answered left the shutter locked for good:
+a tap before the camera was bound (the engine returned silently) and a
+processing thread that died. Both now answer, and a watchdog frees the
+shutter after 12 seconds with "The camera did not return a photo. Try again."
+if nothing else has.
+
+**Failed shots vanished silently.** `onRecordingError` was set twice; the
+surviving copy treated every message containing "capture failed" as transient
+and showed nothing. One handler now shows every failure except a shot cut
+off by the camera closing during a lens or mode switch. A saved frame that
+cannot be processed reports through its own callback
+(`onPhotoProcessingFailed`), which also stops the thumbnail pulse.
+
+**Very large photos crashed the app.** Processing decoded the whole frame: a
+50 MP frame is 200 MB, and the upright copy another 200 MB. It now decodes
+only as large as the output needs — twice the output box, wider when a focus
+box keeps part of the frame — through `SafeBitmapDecoder`, which also stays
+inside the memory available. An `OutOfMemoryError` is not an `Exception`, so
+it escaped the catch and killed the processing thread; everything is caught
+now, and the shot is reported as failed instead.
+
+**The camera slowed down over a long session.** Every photo wrote the
+recovery journal on the main thread: read it back, work out what changed,
+rewrite the whole session. The cost grew with the session. The session is now
+snapshotted on the main thread and written on the journal thread, in order.
+Leaving the screen and Done still wait for the pending writes (up to 10 s)
+before going on, so nothing is reported saved before it is. A video still
+writes before "video saved" is shown.
+
+**Verification.** Compiled here with JDK 17 and the Android SDK 36 tools. The
+camera module has no JVM test harness (its tests are instrumented, under
+`android/app/src/androidTest`), so the behaviour is confirmed on a phone:
+take 20 photos as fast as the shutter allows and check the gallery order and
+count; switch lens mid-shot and expect no stuck shutter; take a 50 MP photo
+with the 12 MP option on and expect no crash; run a 300-photo session and
+watch the shutter-to-thumbnail time in the `AuctionCameraTiming` log stay
+flat; kill the app mid-session and reopen the draft.
+
+**Building here.** The Gradle wrapper could not download Gradle on this
+machine: Avast scans HTTPS and re-signs it with its own certificate, which
+the JDK does not trust, and the wrapper's 10-second network timeout trips
+while Avast holds the download. Builds run with the JDK pointed at Windows'
+certificate store (`JAVA_TOOL_OPTIONS=-Djavax.net.ssl.trustStoreType=WINDOWS-ROOT
+-Djavax.net.ssl.trustStore=NONE`) and the Gradle package placed in the
+wrapper's folder by hand after a checksum check.
 
 ## Finalizing safeguards — 2026-10-01 (local)
 

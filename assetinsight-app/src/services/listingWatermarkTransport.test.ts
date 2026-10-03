@@ -35,7 +35,8 @@ describe.each(['asset', 'lotListing'] as const)('%s mobile watermark transport',
     const details = { contract_no: 'TEST', watermark_images: choice };
     await create(details);
     const sent = jest.mocked(uploadReportFilesDirectToR2).mock.calls[0][0];
-    expect(sent.details.watermark_images).toBe(choice === true);
+    // No saved choice means the default: add the logo where missing.
+    expect(sent.details.watermark_images).toBe(choice !== false);
     expect(sent.files.map(file => file.uri)).toEqual([capture.uri, extra.uri]);
     expect(sent.files.map(file => file.role)).toEqual(['main', 'extra']);
     expect(details.watermark_images).toBe(choice);
@@ -46,7 +47,7 @@ describe.each(['asset', 'lotListing'] as const)('%s mobile watermark transport',
     jest.mocked(uploadReportFilesDirectToR2).mockRejectedValue({ response: { status: 404 } });
     await create({ contract_no: 'TEST', watermark_images: choice });
     const form = jest.mocked(api.post).mock.calls[0][1] as { parts: [string, unknown][] };
-    expect(JSON.parse(form.parts[0][1] as string).watermark_images).toBe(choice === true);
+    expect(JSON.parse(form.parts[0][1] as string).watermark_images).toBe(choice !== false);
     expect(form.parts.slice(1).map(([, file]) => (file as { uri: string }).uri)).toEqual([capture.uri, extra.uri]);
   });
 });

@@ -33,10 +33,12 @@ describe('native capture watermark ownership', () => {
     expect(engine).not.toContain('watermarkImages');
   });
 
+  // Each capture now carries its CaptureTicket (2026-10-03), so the markers
+  // stop at the opening parenthesis.
   it.each([
-    ['private fun captureToFile()', 'private fun captureBokeh()'],
-    ['private fun captureBokeh()', 'private fun captureNight()'],
-    ['private fun captureNight()', 'fun startRecording()'],
+    ['private fun captureToFile(', 'private fun captureBokeh('],
+    ['private fun captureBokeh(', 'private fun captureNight('],
+    ['private fun captureNight(', 'fun startRecording()'],
   ])('publishes only fully processed camera photos for %s', (start, end) => {
     const capture = engineSection(start, end);
     expect(capture).toContain('imageCapture.takePicture(');
@@ -73,13 +75,13 @@ describe('native capture watermark ownership', () => {
         path.join(projectRoot, 'src/components/forms', filename),
         'utf8'
       );
-      expect(DEFAULT_IMAGE_WATERMARK).toBe(false);
+      expect(DEFAULT_IMAGE_WATERMARK).toBe(true);
       expect(restoreImageWatermarkPreference(false)).toBe(false);
       expect(restoreImageWatermarkPreference(true)).toBe(true);
       expect(form).toContain('useState(DEFAULT_IMAGE_WATERMARK)');
       expect(form).toContain('setWatermarkImages((prev) => !prev)');
       expect(form).toContain('watermark_images: watermarkImages');
-      expect(form).toContain('For imported, unwatermarked photos only.');
+      expect(form).toContain('Add logo where missing');
     }
   );
 

@@ -61,6 +61,7 @@ import expo.modules.auctioncamera.viewextensions.AEAFRegionOverlay
 import expo.modules.auctioncamera.viewextensions.CameraViewEngine
 import expo.modules.auctioncamera.viewextensions.CameraViewExtensionMode
 import expo.modules.auctioncamera.viewextensions.CameraViewModel
+import expo.modules.auctioncamera.viewextensions.CaptureTicket
 import expo.modules.auctioncamera.viewextensions.ExtensionViewConflictResolver
 import expo.modules.auctioncamera.viewextensions.HapticCaptureHelper
 import expo.modules.auctioncamera.viewextensions.ImageFormatStore
@@ -153,7 +154,27 @@ class CameraViewActivity : BaseActivity() {
     private var hasProcessedLotRestore = false
     private var isDualRecording = false
     private var flashPopup: PopupWindow? = null
+    /*
+     * One shot in flight at a time, from the tap until the frame is on disk —
+     * no longer until the photo is fully processed (2026-10-03: "the shutter
+     * locks after each shot"). captureWatchdog is the last resort: a tap that
+     * nothing answers within captureWatchdogMs (no saved frame, no error) frees
+     * the shutter and says so, rather than leaving it locked for good.
+     */
     private val captureInFlight = java.util.concurrent.atomic.AtomicBoolean(false)
+    private val captureWatchdogMs = 12_000L
+    private val captureWatchdog = Runnable {
+        if (captureInFlight.compareAndSet(true, false)) {
+            clearPreviewFreeze()
+            toast("The camera did not return a photo. Try again.")
+        }
+    }
+
+    /** The shot has been answered: free the shutter and stand the watchdog down. */
+    private fun releaseCapture() {
+        captureInFlight.set(false)
+        if (::binding.isInitialized) binding.previewView.removeCallbacks(captureWatchdog)
+    }
     private var isBoxModeActive = false
     private var selectedWbIndex = 0
     private var previousLotNumber = 1
@@ -463,6 +484,7 @@ class CameraViewActivity : BaseActivity() {
 
     override fun onDestroy() {
         clearPreviewFreeze()
+        if (::binding.isInitialized) binding.previewView.removeCallbacks(captureWatchdog)
         super.onDestroy()
         if (::engine.isInitialized) engine.shutdown()
     }
@@ -865,31 +887,46 @@ class CameraViewActivity : BaseActivity() {
 //            }
 //        }
 
-        // 1. THIS FIRES INSTANTLY
-        engine.onPhotoCaptured = { tempUri ->
-            lastPhotoUri = tempUri
-            lastVideoUri = null
+        // 1. THE FRAME IS ON DISK — the shutter is free again, the shot is being processed.
+        // The lock used to be held until the photo was decoded, cropped, resized and
+        // compressed, so every shot locked the shutter for a second or more (2026-10-03).
+        engine.onCaptureSaved = { _ ->
+            runOnUiThread {
+                releaseCapture()
+                schedulePreviewFreezeClear()
+                // ── START PROCESSING ANIMATION ──
+                processingCount++
+                startThumbnailPulse()
+            }
+        }
 
-            // Release the lock instantly so the user can tap the button again!
-            captureInFlight.set(false)
+        // 2. THE PHOTO IS READY — filed under the mode its own tap asked for (CaptureTicket).
+        engine.onPhotoCaptured = { uri, ticket ->
+            lastPhotoUri = uri
+            lastVideoUri = null
 
             runOnUiThread {
                 val uiStartMs = SystemClock.elapsedRealtime()
-                schedulePreviewFreezeClear()
-
-                // Show the raw thumbnail instantly
-                viewModel.onPhotoCaptured(tempUri)
+                viewModel.onPhotoCaptured(uri, ticketMode = ticket?.mode, ticketExtra = ticket?.isExtra)
                 binding.galleryCount.visibility = View.VISIBLE
-                val tapDeltaMs =
-                    if (lastShutterTapAtMs > 0L) SystemClock.elapsedRealtime() - lastShutterTapAtMs else -1L
+                val tapDeltaMs = ticket?.let { SystemClock.elapsedRealtime() - it.tapAtMs } ?: -1L
                 Log.d(
                     "AuctionCameraTiming",
                     "thumbnail_update deltaFromTapMs=$tapDeltaMs uiMs=${SystemClock.elapsedRealtime() - uiStartMs}"
                 )
+            }
+        }
 
-                // ── START PROCESSING ANIMATION ──
-                processingCount++
-                startThumbnailPulse()
+        // A saved shot that could not be processed: nothing was filed, so say so.
+        engine.onPhotoProcessingFailed = { message, _ ->
+            runOnUiThread {
+                processingCount--
+                if (processingCount <= 0) {
+                    processingCount = 0
+                    stopThumbnailPulse()
+                }
+                clearPreviewFreeze()
+                toast(message)
             }
         }
 
@@ -933,19 +970,10 @@ class CameraViewActivity : BaseActivity() {
         }
         engine.onVideoFinalizing = { uri -> viewModel.onVideoRecorded(uri) }
         engine.onVideoRecorded = { uri -> onRecordingSaved(uri) }
-        engine.onRecordingError = { err ->
-            runOnUiThread {
-                clearPreviewFreeze()
-                stopRecordingUI()
-                // Safety catch to stop pulsing if capture fails
-                processingCount--
-                if (processingCount <= 0) {
-                    processingCount = 0
-                    stopThumbnailPulse()
-                }
-                toast(err)
-            }
-        }
+        // onRecordingError is set once, below, with the camera setup. It used to be
+        // set here as well and overwritten there, and the surviving copy treated
+        // every "Capture failed" as transient — so a failed shot vanished with no
+        // message (2026-10-03).
 
 //        engine.onEVChanged = { ev ->
 //            runOnUiThread { viewModel.setCurrentEV(ev); updateEVLabel(ev); syncEVSeekBar(ev) }
@@ -1032,11 +1060,10 @@ class CameraViewActivity : BaseActivity() {
             }
         }
 
-        engine.onNightModeUriReady = { uri ->
-            captureInFlight.set(false)
+        engine.onNightModeUriReady = { uri, ticket ->
+            // The shutter was freed when the frame was saved (onCaptureSaved).
             runOnUiThread {
-                schedulePreviewFreezeClear()
-                viewModel.onPhotoCaptured(uri)
+                viewModel.onPhotoCaptured(uri, ticketMode = ticket?.mode, ticketExtra = ticket?.isExtra)
             }
         }
 
@@ -1086,18 +1113,22 @@ class CameraViewActivity : BaseActivity() {
         }
         engine.onRecordingError = { err ->
             runOnUiThread {
-                captureInFlight.set(false)
+                releaseCapture()
+                clearPreviewFreeze()
                 stopRecordingUI()
-                val isTransient = err.lowercase().let {
-                    it.contains("camera is closed") || it.contains("camera closed") ||
-                            it.contains("camera disconnected") || it.contains("capture failed")
+                // Only a shot cut off by the camera closing — a lens or mode switch
+                // mid-capture — is expected and stays silent. Everything else is
+                // shown: "Capture failed" used to count as transient too, so a
+                // failed shot vanished with no message (2026-10-03).
+                val expected = err.lowercase().let {
+                    it.contains("camera is closed") || it.contains("camera closed") || it.contains("camera disconnected")
                 }
-                if (!isTransient) toast(err)
+                if (!expected) toast(err)
             }
         }
         engine.onNightModeError = { err ->
             runOnUiThread {
-                captureInFlight.set(false)
+                releaseCapture()
                 clearPreviewFreeze()
                 toast("Night failed: $err")
             }
@@ -1724,7 +1755,7 @@ class CameraViewActivity : BaseActivity() {
 
         val allowed = viewModel.requestCapture(mode, isExtra)
         if (!allowed) {
-            captureInFlight.set(false)
+            releaseCapture()
             return
         }
         lastShutterTapAtMs = SystemClock.elapsedRealtime()
@@ -1737,7 +1768,11 @@ class CameraViewActivity : BaseActivity() {
 
         engine.previewViewWidth = binding.previewView.width
         engine.previewViewHeight = binding.previewView.height
-        engine.capturePhoto()
+        // The tap's request rides with the shot, so the photo is filed under this
+        // mode even if the next tap lands before it is processed (CaptureTicket).
+        engine.capturePhoto(CaptureTicket(mode, isExtra, lastShutterTapAtMs))
+        binding.previewView.removeCallbacks(captureWatchdog)
+        binding.previewView.postDelayed(captureWatchdog, captureWatchdogMs)
         binding.previewView.post { freezePreviewFrame() }
     }
 
@@ -1897,7 +1932,7 @@ class CameraViewActivity : BaseActivity() {
         if (currentCameraMode == CameraMode.VIDEO) {
             toast("Switch off video mode first"); return
         }
-        captureInFlight.set(false)
+        releaseCapture()
         val currentKey = currentActiveChipKey()
         // Keep current mode on repeated taps; avoid accidental fallback to Normal.
         if (currentKey == key) return
