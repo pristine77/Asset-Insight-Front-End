@@ -76,6 +76,36 @@ in `services/auctioneer.test.ts`, `components/forms/auctioneerContinuation.test.
 suites. Tests use synthetic fixtures, with no live Auctioneer delivery or report
 generation required.
 
+### Auctioneer: closing your part of a contract (2026-10-02)
+
+Several people can be assigned to one Auctioneer contract. Each closes **their
+own part**; Auctioneer completes the contract once every assigned person has
+closed theirs. Delivery summaries name the scope (`contractCompletionScope`:
+`"user"` for assigned work, `"contract"` for older unassigned work).
+
+- **Send to Auctioneer** offers assigned users "I've finished this contract —
+  close my part", unticked by default. Ticked, the server closes the user's part
+  after every lot of that delivery has landed. A retry keeps the original choice
+  (locked, like the destination). Unassigned work keeps the older "Mark the
+  contract task complete" wording.
+- **My Reports → Completed** offers "Close my part of this contract" on a
+  delivered, assigned report whose part is still open, for a person with
+  nothing left to send. It asks for confirmation, calls
+  `POST /auctioneer/contracts/:contractId/close-my-part` (the server takes the
+  user from the session), and every report row on that contract then reads
+  "Sent · your part closed", or "Sent · contract complete" once Auctioneer
+  reports every assigned person has closed theirs. A refusal (another delivery
+  for the contract still unfinished, no work of yours on the contract) is shown
+  as the server's message and the action stays available.
+- A part is the person's, not one report's: once it is closed — by a
+  delivery's box or by the action — none of that person's reports on the
+  contract offers the action again.
+
+The action sits on My Reports because Incoming drops a contract's rows once they
+are sent. Deploy the backend first. Coverage: `services/auctioneer.test.ts`,
+`components/reports/AuctioneerDeliveryDialog.test.tsx` and
+`app/(main)/reports/page.test.tsx`.
+
 ### Failed Asset and Lot Listing preview recovery
 
 The preview queue and report deep links keep Preview available after generation

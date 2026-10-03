@@ -42,32 +42,42 @@ describe("AuctioneerDeliveryDialog", () => {
     });
   });
 
-  it("hides whole-contract completion and sends false for a split contract", async () => {
+  /*
+     Several people can be assigned to one contract. An assigned user closes
+     THEIR part, and Auctioneer completes the contract once every assigned
+     person has closed theirs (owner, 2026-10-02). This replaced a note saying
+     the contract "may remain open", which gave no way to say you were done.
+  */
+  const assignedDelivery: AuctioneerDeliverySummary = {
+    ...delivery,
+    canCompleteContract: true,
+    contractCompletionScope: "user",
+  };
+
+  it("offers an assigned user a close-my-part box, unticked, and sends false when left so", async () => {
     const onClose = vi.fn();
     const onUpdated = vi.fn();
-
     render(
       <AuctioneerDeliveryDialog
         open
-        delivery={{
-          ...delivery,
-          canCompleteContract: false,
-          completeContract: true,
-        }}
+        delivery={assignedDelivery}
         onClose={onClose}
         onUpdated={onUpdated}
       />
     );
 
+    const checkbox = await screen.findByRole("checkbox", {
+      name: "I've finished this contract — close my part",
+    });
+    expect(checkbox).not.toBeChecked();
+    expect(checkbox).toBeEnabled();
+    expect(checkbox).toHaveAccessibleDescription(
+      /The contract itself closes when every person assigned to it has closed theirs\./
+    );
+    // Neither the old note nor the whole-contract wording is offered.
+    expect(screen.queryByText(/may remain open/)).not.toBeInTheDocument();
     expect(
-      await screen.findByText(
-        /This delivery covers only your assigned lots/
-      )
-    ).toBeInTheDocument();
-    expect(
-      screen.queryByRole("checkbox", {
-        name: /Mark the contract task complete/,
-      })
+      screen.queryByRole("checkbox", { name: /Mark the contract task complete/ })
     ).not.toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "Send report" }));
@@ -82,6 +92,78 @@ describe("AuctioneerDeliveryDialog", () => {
       expect.objectContaining({ state: "queued" })
     );
     expect(onClose).toHaveBeenCalled();
+  });
+
+  it("asks to close the assigned user's part when they tick the box", async () => {
+    render(
+      <AuctioneerDeliveryDialog
+        open
+        delivery={assignedDelivery}
+        onClose={vi.fn()}
+        onUpdated={vi.fn()}
+      />
+    );
+
+    fireEvent.click(
+      await screen.findByRole("checkbox", {
+        name: "I've finished this contract — close my part",
+      })
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Send report" }));
+
+    await waitFor(() =>
+      expect(mocks.sendDelivery).toHaveBeenCalledWith("work-100", {
+        destination: "LottingBoard",
+        completeContract: true,
+      })
+    );
+  });
+
+  it("keeps an assigned user's saved close, locked, on a retry", async () => {
+    render(
+      <AuctioneerDeliveryDialog
+        open
+        delivery={{ ...assignedDelivery, state: "failed", completeContract: true }}
+        onClose={vi.fn()}
+        onUpdated={vi.fn()}
+      />
+    );
+
+    const checkbox = await screen.findByRole("checkbox", {
+      name: "I've finished this contract — close my part",
+    });
+    expect(checkbox).toBeChecked();
+    expect(checkbox).toBeDisabled();
+    fireEvent.click(screen.getByRole("button", { name: "Retry delivery" }));
+
+    await waitFor(() =>
+      expect(mocks.sendDelivery).toHaveBeenCalledWith("work-100", {
+        destination: "LottingBoard",
+        completeContract: true,
+      })
+    );
+  });
+
+  it("offers no close to an older server that refuses one, and sends false", async () => {
+    render(
+      <AuctioneerDeliveryDialog
+        open
+        delivery={{ ...delivery, canCompleteContract: false, completeContract: true }}
+        onClose={vi.fn()}
+        onUpdated={vi.fn()}
+      />
+    );
+
+    await screen.findByRole("button", { name: "Send report" });
+    expect(screen.queryByRole("checkbox")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Send report" }));
+
+    await waitFor(() =>
+      expect(mocks.sendDelivery).toHaveBeenCalledWith("work-100", {
+        destination: "LottingBoard",
+        completeContract: false,
+      })
+    );
   });
 
   it("keeps the legacy completion option when capability is unspecified", async () => {

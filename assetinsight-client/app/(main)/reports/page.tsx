@@ -9,6 +9,7 @@ import {
   ChevronDown,
   ChevronLeft,
   ChevronRight,
+  CircleCheck,
   Eye,
   FileArchive,
   FileImage,
@@ -139,12 +140,38 @@ function auctioneerDeliveryPresentation(
       bg: "var(--app-warning-soft)",
     },
     sent: {
-      label: "Sent",
+      // Say where the contract stands once a close has been confirmed: the
+      // user's own part, or (when Auctioneer reported it) the whole contract.
+      label: delivery.contractClosedAt
+        ? delivery.contractTaskCompleted ||
+          delivery.contractCompletionScope === "contract"
+          ? "Sent · contract complete"
+          : "Sent · your part closed"
+        : "Sent",
       color: "var(--app-success)",
       bg: "var(--app-success-soft)",
     },
   };
   return values[delivery.state] || values.not_ready;
+}
+
+/*
+   "Close my part of this contract" is offered on a delivery that has reached
+   Auctioneer, for work assigned to this user, until their part is closed.
+
+   It lives here because this is where delivered Auctioneer work stays in view:
+   Incoming drops a contract's rows once they are sent, so a person whose lots
+   have all gone back — or whose remaining lots someone else covered — has
+   nothing left to send and no other place to say they are done.
+*/
+function canCloseContractPart(delivery?: AuctioneerDeliverySummary) {
+  return Boolean(
+    delivery &&
+      delivery.contractCompletionScope === "user" &&
+      delivery.state === "sent" &&
+      delivery.contractId &&
+      !delivery.contractClosedAt
+  );
 }
 function typeLabel(type?: string) {
   const normalized = String(type || "").toLowerCase();
@@ -500,6 +527,7 @@ export default function ReportsPage() {
   const [mergeAnchorId, setMergeAnchorId] = useState<string | null>(null);
   const [deliveryDialogItem, setDeliveryDialogItem] =
     useState<AuctioneerDeliverySummary | null>(null);
+  const [closingContractId, setClosingContractId] = useState<string | null>(null);
   const loadingReportsRef = useRef(false);
   const retryingKeysRef = useRef(new Set<string>());
   const [retryingKeys, setRetryingKeys] = useState<ReadonlySet<string>>(() => new Set());
@@ -641,6 +669,60 @@ export default function ReportsPage() {
   const handleManualRefresh = async () => {
     await loadReports({ successToast: true });
   };
+
+  async function handleCloseContractPart(delivery: AuctioneerDeliverySummary) {
+    const contractId = delivery.contractId;
+    if (!contractId || closingContractId) return;
+    const label = delivery.contractNo
+      ? `contract ${delivery.contractNo}`
+      : "this contract";
+    if (
+      !confirm(
+        `Close your part of ${label}? Do this when you have nothing left to send. The contract closes in Auctioneer once every person assigned to it has closed theirs.`
+      )
+    ) {
+      return;
+    }
+    try {
+      setClosingContractId(contractId);
+      const result = await AuctioneerService.closeContractPart(contractId);
+      // The server records the close on every one of this user's assigned
+      // deliveries for the contract, so every such row changes, not just this
+      // one. Older whole-contract rows are not parts and keep their own state.
+      setAuctioneerDeliveries((current) =>
+        current.map((item) =>
+          item.contractId === contractId &&
+          item.contractCompletionScope === "user"
+            ? {
+                ...item,
+                contractClosedAt: result.closedAt || new Date().toISOString(),
+                contractTaskCompleted: result.taskCompleted,
+              }
+            : item
+        )
+      );
+      if (result.userStatus === "revoked" && !result.taskCompleted) {
+        toast.info(
+          `Auctioneer shows you are no longer assigned to ${label}, so there was nothing of yours to close.`
+        );
+      } else if (result.taskCompleted) {
+        toast.success(
+          `Your part is closed and ${label} is now complete in Auctioneer.`
+        );
+      } else {
+        toast.success(
+          `Your part of ${label} is closed. It completes when every assigned person has closed theirs.`
+        );
+      }
+    } catch (closeError: any) {
+      toast.error(
+        closeError?.response?.data?.message ||
+          "Your part of the contract could not be closed. Try again."
+      );
+    } finally {
+      setClosingContractId(null);
+    }
+  }
 
   async function handleDelete(group: ReportGroup) {
     if (deletingKey) return;
@@ -1160,10 +1242,50 @@ export default function ReportsPage() {
       });
     }
 
+    /*
+       A part belongs to the person and the contract, not to one report.
+       Closing it after one delivery records the close on that delivery only,
+       so the user's other reports on the same contract kept offering "Close
+       my part of this contract" for a part that was already closed. Every
+       close on the contract is shared across its rows here; the contract
+       counts as complete once any close reported it so.
+    */
+    const partClosesByContract = new Map<
+      string,
+      { closedAt: string; taskCompleted: boolean }
+    >();
+    for (const delivery of auctioneerDeliveries) {
+      if (
+        delivery.contractCompletionScope !== "user" ||
+        !delivery.contractId ||
+        !delivery.contractClosedAt
+      ) {
+        continue;
+      }
+      const known = partClosesByContract.get(delivery.contractId);
+      partClosesByContract.set(delivery.contractId, {
+        closedAt: known?.closedAt || delivery.contractClosedAt,
+        taskCompleted: Boolean(
+          known?.taskCompleted || delivery.contractTaskCompleted
+        ),
+      });
+    }
+
     for (const delivery of auctioneerDeliveries) {
       if (!delivery.reportId) continue;
       const group = map.get(String(delivery.reportId));
-      if (group) group.auctioneerDelivery = delivery;
+      if (!group) continue;
+      const partClose =
+        delivery.contractCompletionScope === "user" && delivery.contractId
+          ? partClosesByContract.get(delivery.contractId)
+          : undefined;
+      group.auctioneerDelivery = partClose
+        ? {
+            ...delivery,
+            contractClosedAt: delivery.contractClosedAt || partClose.closedAt,
+            contractTaskCompleted: partClose.taskCompleted,
+          }
+        : delivery;
     }
 
     return Array.from(map.values());
@@ -1594,6 +1716,27 @@ export default function ReportsPage() {
           >
             <Send className="size-3.5 shrink-0" />
             <span className="truncate">{deliveryLabel}</span>
+          </button>
+        ) : null}
+        {delivery && canCloseContractPart(delivery) ? (
+          <button
+            type="button"
+            aria-label={`Close my part of this contract: ${delivery.contractNo || previewTitle}`}
+            title="Tell Auctioneer you have finished this contract. It completes when every assigned person has closed theirs."
+            className={`${REPORT_ACTION_CLASS_NAME} border-[var(--app-control-border)] bg-[var(--app-panel)] text-[var(--app-text)] hover:border-[var(--app-control-border-hover)] hover:bg-[var(--app-panel-alt)]`}
+            onClick={() => void handleCloseContractPart(delivery)}
+            disabled={Boolean(closingContractId)}
+          >
+            {closingContractId === delivery.contractId ? (
+              <RefreshCw className="size-3.5 shrink-0 animate-spin" />
+            ) : (
+              <CircleCheck className="size-3.5 shrink-0 text-[var(--app-success)]" />
+            )}
+            <span className="truncate">
+              {closingContractId === delivery.contractId
+                ? "Closing…"
+                : "Close my part of this contract"}
+            </span>
           </button>
         ) : null}
         {normalizedType === "asset" &&

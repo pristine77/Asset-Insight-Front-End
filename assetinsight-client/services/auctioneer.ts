@@ -96,16 +96,47 @@ export type AuctioneerDeliverySummary = {
   reportId?: string;
   reportModel?: "AssetReport" | "LotListing";
   reportType?: AuctioneerReportType;
+  /** The Auctioneer contract this delivery belongs to. */
+  contractId?: string;
   contractNo?: string;
   state: AuctioneerDeliveryState;
   canSend?: boolean;
   canCompleteContract?: boolean;
+  /**
+   * What closing means for this delivery. "user": the work is assigned to the
+   * signed-in user, and closing closes THEIR part — the contract completes
+   * once every assigned person has closed theirs. "contract": older unassigned
+   * work, where closing completes the contract task itself. Absent from older
+   * servers.
+   */
+  contractCompletionScope?: "user" | "contract";
   destination?: "LottingBoard" | "OpToDoBoard";
   opTaskDescription?: string;
   completeContract?: boolean;
+  /** When Auctioneer confirmed the close (the user's part, or the contract). */
+  contractClosedAt?: string;
+  /** Whether the whole contract was complete when that close was confirmed. */
+  contractTaskCompleted?: boolean;
   error?: string;
   sentAt?: string;
   updatedAt?: string;
+};
+
+/** Auctioneer's answer when the signed-in user closed their part of a contract. */
+export type AuctioneerContractPartClose = {
+  contractId: string;
+  contractNo?: string;
+  closedAt?: string;
+  /** Every assigned person has now closed theirs: the contract is complete. */
+  taskCompleted: boolean;
+  /** The contract had already completed before this close. */
+  alreadyCompleted: boolean;
+  /**
+   * The user's assignment as Auctioneer reports it: "completed" for a closed
+   * part, "revoked" when they had been taken off the contract (nothing of
+   * theirs to close), null when Auctioneer named no status.
+   */
+  userStatus: string | null;
 };
 
 export type AuctioneerSendDeliveryInput = {
@@ -450,6 +481,7 @@ function normalizeDelivery(value: unknown): AuctioneerDeliverySummary {
     reportId: textValue(raw.reportId, raw.report_id, raw.linkedReportId) || undefined,
     reportModel: raw.reportModel ?? raw.linkedReportModel,
     reportType: normalizeReportType(raw.reportType),
+    contractId: textValue(raw.contractId, raw.contract_id) || undefined,
     contractNo: textValue(raw.contractNo, raw.contract_no) || undefined,
     state: textValue(
       delivery.state,
@@ -475,9 +507,22 @@ function normalizeDelivery(value: unknown): AuctioneerDeliverySummary {
     destination: delivery.destination ?? raw.destination,
     opTaskDescription:
       textValue(delivery.opTaskDescription, raw.opTaskDescription) || undefined,
+    // Only the two documented meanings; anything else reads as unknown, which
+    // the dialog treats as the older whole-contract wording.
+    contractCompletionScope:
+      raw.contractCompletionScope === "user" ||
+      raw.contractCompletionScope === "contract"
+        ? raw.contractCompletionScope
+        : undefined,
     completeContract: Boolean(
       delivery.completeContract ?? raw.completeContract
     ),
+    contractClosedAt:
+      textValue(delivery.contractClosedAt, raw.contractClosedAt) || undefined,
+    contractTaskCompleted:
+      typeof raw.contractTaskCompleted === "boolean"
+        ? raw.contractTaskCompleted
+        : undefined,
     error: textValue(delivery.error, raw.error) || undefined,
     sentAt: textValue(delivery.sentAt, raw.sentAt) || undefined,
     updatedAt: textValue(delivery.updatedAt, raw.updatedAt) || undefined,
@@ -587,6 +632,32 @@ export const AuctioneerService = {
       input
     );
     return normalizeDelivery(unwrap(response.data));
+  },
+
+  /**
+   * Close the signed-in user's own part of a contract without sending
+   * anything. The server takes the user from the session, so nothing about
+   * who is closing is sent from here.
+   */
+  async closeContractPart(
+    contractId: string
+  ): Promise<AuctioneerContractPartClose> {
+    const response = await API.post(
+      `/auctioneer/contracts/${encodeURIComponent(contractId)}/close-my-part`,
+      {}
+    );
+    const raw = asRecord(unwrap(response.data));
+    return {
+      contractId: textValue(raw.contractId) || contractId,
+      contractNo: textValue(raw.contractNo) || undefined,
+      closedAt: textValue(raw.closedAt) || undefined,
+      taskCompleted: raw.taskCompleted === true,
+      alreadyCompleted: raw.alreadyCompleted === true,
+      userStatus:
+        typeof raw.userStatus === "string" && raw.userStatus.trim()
+          ? raw.userStatus.trim()
+          : null,
+    };
   },
 };
 

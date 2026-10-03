@@ -144,6 +144,14 @@ export default function AuctioneerDeliveryDialog({
   const terminal = delivery?.state === "sent";
   const retrying = delivery?.state === "failed";
   const lotListingDelivery = isLotListingDelivery(delivery);
+  /*
+     Work assigned to this user closes THEIR part of the contract, never the
+     contract itself: several people can be assigned to one contract, and
+     Auctioneer completes it only once every one of them has closed theirs.
+     This used to be a note saying the contract "may remain open", with no way
+     to say you were done; the box is that way.
+  */
+  const closesOwnPart = delivery?.contractCompletionScope === "user";
 
   const handleSend = async () => {
     if (!delivery || busy) return;
@@ -390,11 +398,49 @@ export default function AuctioneerDeliveryDialog({
                   </span>
                 </label>
               ) : null}
-              {delivery?.canCompleteContract === false ? (
-                <Notice>
-                  This delivery covers only your assigned lots. The overall
-                  contract may remain open for other assigned users.
-                </Notice>
+              {closesOwnPart ? (
+                <div style={{ display: "grid", gap: 6 }}>
+                  <label
+                    style={{
+                      display: "flex",
+                      alignItems: "flex-start",
+                      gap: 10,
+                      color: "var(--app-text)",
+                      fontSize: 14,
+                    }}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={completeContract}
+                      onChange={(event) =>
+                        setCompleteContract(event.target.checked)
+                      }
+                      disabled={busy || terminal || retrying}
+                      aria-describedby="auctioneer-close-part-help"
+                      style={{
+                        width: 18,
+                        height: 18,
+                        marginTop: 1,
+                        accentColor: "var(--app-accent)",
+                      }}
+                    />
+                    <span>I&apos;ve finished this contract — close my part</span>
+                  </label>
+                  <p
+                    id="auctioneer-close-part-help"
+                    className="app-muted"
+                    style={{ margin: "0 0 0 28px", fontSize: 12.5 }}
+                  >
+                    Your part closes once every lot in this delivery has
+                    reached Auctioneer. The contract itself closes when every
+                    person assigned to it has closed theirs. Leave this
+                    unticked if you still have lots to send.
+                  </p>
+                </div>
+              ) : delivery?.canCompleteContract === false ? (
+                // An older server that refuses any close for this work and
+                // names no scope: offer nothing rather than a box it rejects.
+                null
               ) : (
                 <label
                   style={{
