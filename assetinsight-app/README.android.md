@@ -291,7 +291,29 @@ camera case was confirmed to fail with its fix removed. This is mocked-transport
 and component evidence, not a device or field-network run. A new native binary
 is required; there is no OTA channel.
 
-## Standard photo size — 2026-10-02 (local)
+## Standard photo size restored — 2026-10-03 (local)
+
+**The 2026-10-02 change below is reverted.** Standard photos are again at most
+**3000 px on the longest side**, never enlarged. The Android camera steps JPEG
+quality down from 95 until the file is at most **700 KB** (WebP/AVIF 300 KB). The
+12 MP option keeps 6000 px and 1 MB, and the JS camera saves at quality 95, as
+before.
+
+Why: the 1200 × 900 cut was made on the understanding that installed builds
+already sent 1200 × 900 photos. They did not. The store build on the owner's
+phone, disassembled (`classes5.dex`, `processCapturedFile`), used
+`use12MP ? 6000 : 3000` and a 700 KB JPEG target. The "1200 × 900, ~235 KB"
+figure came from photos already resized after upload. The cut left about a sixth
+of the detail (a ninth for upright photos: 21 test photos measured 1200 × 671 and
+579 × 900 at quality 95), and the owner saw the difference on a real phone and
+asked for the old setting back.
+
+Today's crash fix is kept: the photo is decoded at up to twice the output size,
+now up to 6000 px for a 3000 px photo, and the decoder stays within the memory
+available. Tests: `cameraPhotoSize.test.ts`, `cameraPhotoWatermark.test.ts`,
+`nativeCapturePhotoSize.test.ts`.
+
+## Standard photo size — 2026-10-02 (local, reverted 2026-10-03)
 
 Installed builds send camera photos at 1200 × 900, about 235 KB (71 app-stamped
 staging photos). The source had since raised the Android camera's limit to a

@@ -62,24 +62,27 @@ import java.util.concurrent.TimeUnit
 import kotlin.math.pow
 
 /*
- * Standard photo size (owner, 2026-10-02).
+ * Standard photo size (restored by the owner, 2026-10-03).
  *
- * A standard photo (the 12 MP option off) fits inside a 1200 x 900 box,
- * width x height. The box is not turned for portrait photos, the photo keeps
- * its shape, and nothing is enlarged: the office's own resize settings ("Fit",
- * 1200 x 900, "Do not enlarge if smaller", "Maintain aspect ratio", "Reverse
- * width and height by orientation" off). A landscape photo is at most
- * 1200 x 900 and a 3:4 portrait one at most 675 x 900. The JPEG is then stepped
- * down from quality 95 until it is at most STANDARD_PHOTO_MAX_BYTES, which keeps
- * photos about where installed builds sent them (1200 px, ~235 KB) before this
- * limit had been raised to 3000 px and 700 KB.
+ * A standard photo (the 12 MP option off) is at most 3000 px on its longest
+ * side, keeps its shape and is never enlarged. Its JPEG is stepped down from
+ * quality 95, ten at a time, until it is at most 700 KB (WebP/AVIF: 300 KB).
+ * These are the values the installed app used.
  *
- * src/utils/cameraPhotoSize.ts applies the same rule to the JS camera, and its
- * tests pin the arithmetic of fitInsideBox; keep the two in step.
+ * Why restored: on 2026-10-02 this was cut to fit inside 1200 x 900 at most
+ * 300 KB, the office's resize setting, on the understanding that installed
+ * builds already sent 1200 x 900 photos. They did not: the installed build used
+ * the rule above. The 1200 x 900 figure came from photos already resized after
+ * upload. The cut left about a sixth of the detail (a ninth for upright
+ * photos), the owner saw the difference on a real phone, and asked for the old
+ * setting back.
+ *
+ * src/utils/cameraPhotoSize.ts applies the same longest side to the JS camera;
+ * keep the two in step.
  */
-internal const val STANDARD_PHOTO_MAX_WIDTH = 1200
-internal const val STANDARD_PHOTO_MAX_HEIGHT = 900
-internal const val STANDARD_PHOTO_MAX_BYTES = 300 * 1024
+internal const val STANDARD_PHOTO_MAX_SIDE = 3000
+internal const val STANDARD_PHOTO_MAX_JPEG_BYTES = 700 * 1024
+internal const val STANDARD_PHOTO_MAX_OTHER_BYTES = 300 * 1024
 
 /** The size that fits width x height inside boxWidth x boxHeight, keeping the shape and never enlarging. */
 internal fun fitInsideBox(width: Int, height: Int, boxWidth: Int, boxHeight: Int): Pair<Int, Int> {
@@ -622,7 +625,7 @@ class CameraViewEngine(private val context: Context, private val lifecycleOwner:
      * part of the frame. The decoder also stays inside the memory available.
      */
     internal fun decodeBoundFor(use12MP: Boolean, crop: RectF?): Pair<Int, Int> {
-        val (outW, outH) = if (use12MP) 6000 to 6000 else STANDARD_PHOTO_MAX_WIDTH to STANDARD_PHOTO_MAX_HEIGHT
+        val (outW, outH) = if (use12MP) 6000 to 6000 else STANDARD_PHOTO_MAX_SIDE to STANDARD_PHOTO_MAX_SIDE
         val cropW = crop?.width()?.takeIf { it > 0f } ?: 1f
         val cropH = crop?.height()?.takeIf { it > 0f } ?: 1f
         val cap = 8192
@@ -649,13 +652,13 @@ class CameraViewEngine(private val context: Context, private val lifecycleOwner:
 
         // -- Target file-size budget ----------------------------------------------
         //   12 MP option on: 1 MB.
-        //   Standard photos, any format: STANDARD_PHOTO_MAX_BYTES (300 KB).
-        //   JPEG used to get 700 KB; at 1200 x 900 that let busy photos reach
-        //   about 500 KB, against about 235 KB from installed builds (measured
-        //   2026-10-02). See "Standard photo size" at the top of this file.
+        //   Standard JPEG: 700 KB. Standard WebP/AVIF: 300 KB (both compress
+        //   further for the same picture). The installed app's values, restored
+        //   2026-10-03; see "Standard photo size" at the top of this file.
         val TARGET_SIZE_BYTES = when {
             use12MPOutput -> 1 * 1024 * 1024             // 1 MB when 12MP is ON
-            else -> STANDARD_PHOTO_MAX_BYTES
+            fmt == ImageFormatStore.Format.JPEG -> STANDARD_PHOTO_MAX_JPEG_BYTES
+            else -> STANDARD_PHOTO_MAX_OTHER_BYTES       // WebP / AVIF
         }
 
         try {
@@ -754,14 +757,13 @@ class CameraViewEngine(private val context: Context, private val lifecycleOwner:
             }
 
             // -- 6. Resize -------------------------------------------------------------
-            // Standard photos fit inside STANDARD_PHOTO_MAX_WIDTH x
-            // STANDARD_PHOTO_MAX_HEIGHT (1200 x 900) without enlarging or changing
-            // shape; see "Standard photo size" at the top of this file. The 12 MP
-            // option keeps its 6000 px longest side.
+            // Standard photos: at most STANDARD_PHOTO_MAX_SIDE (3000 px) on the
+            // longest side, without enlarging or changing shape; see "Standard photo
+            // size" at the top of this file. The 12 MP option keeps its 6000 px.
             val (targetW, targetH) = if (use12MPOutput) {
                 fitInsideBox(bitmap.width, bitmap.height, 6000, 6000)
             } else {
-                fitInsideBox(bitmap.width, bitmap.height, STANDARD_PHOTO_MAX_WIDTH, STANDARD_PHOTO_MAX_HEIGHT)
+                fitInsideBox(bitmap.width, bitmap.height, STANDARD_PHOTO_MAX_SIDE, STANDARD_PHOTO_MAX_SIDE)
             }
             if (targetW != bitmap.width || targetH != bitmap.height) {
                 val resized = android.graphics.Bitmap.createScaledBitmap(bitmap, targetW, targetH, true)

@@ -69,8 +69,8 @@ it('stamps one logo before saving a receipt-bearing camera JPEG with bounded dim
   const { fixture } = jest.requireMock('@shopify/react-native-skia');
   expect(result).toBe('file:///test/camera-photos/test-capture.jpg');
   expect(ImageManipulator.manipulateAsync).toHaveBeenCalledTimes(1);
-  // Fits the office's 1200 x 900 box (cameraPhotoSize.ts), not the old 3000 px.
-  expect(Skia.Surface.MakeOffscreen).toHaveBeenCalledWith(1200, 900);
+  // At most 3000 px on the longest side (cameraPhotoSize.ts, restored 2026-10-03).
+  expect(Skia.Surface.MakeOffscreen).toHaveBeenCalledWith(3000, 2250);
   expect(fixture.snapshot.encodeToBytes).toHaveBeenCalledTimes(1);
   expect(fixture.snapshot.encodeToBytes).toHaveBeenCalledWith('jpeg', 95);
   expect(fixture.canvas.drawImageRect).toHaveBeenCalledTimes(2); // original, then one logo
@@ -85,14 +85,14 @@ it('stamps one logo before saving a receipt-bearing camera JPEG with bounded dim
   });
 });
 
-it('fits a portrait photo inside the same 1200 x 900 box, 900 px tall', async () => {
+it('limits a portrait photo to 3000 px tall', async () => {
   const { fixture } = jest.requireMock('@shopify/react-native-skia');
   const original = { width: fixture.image.width, height: fixture.image.height };
   fixture.image.width = () => 3024;
   fixture.image.height = () => 4032;
   try {
     await stampCameraPhoto('file:///raw.jpg');
-    expect(Skia.Surface.MakeOffscreen).toHaveBeenCalledWith(675, 900);
+    expect(Skia.Surface.MakeOffscreen).toHaveBeenCalledWith(2250, 3000);
   } finally {
     Object.assign(fixture.image, original);
   }
@@ -111,7 +111,7 @@ it('does not enlarge a photo smaller than the box', async () => {
   }
 });
 
-it('steps the quality down from 95 until the photo is at most 300 KB', async () => {
+it('saves once at quality 95, however large the photo, as before 2026-10-02', async () => {
   const { fixture } = jest.requireMock('@shopify/react-native-skia');
   const jpegOf = (size: number) => {
     const bytes = new Uint8Array(size);
@@ -119,14 +119,11 @@ it('steps the quality down from 95 until the photo is at most 300 KB', async () 
     bytes.set([255, 217], size - 2);
     return bytes;
   };
-  fixture.snapshot.encodeToBytes
-    .mockReturnValueOnce(jpegOf(420 * 1024))
-    .mockReturnValueOnce(jpegOf(310 * 1024))
-    .mockReturnValueOnce(jpegOf(240 * 1024));
+  fixture.snapshot.encodeToBytes.mockReturnValueOnce(jpegOf(1500 * 1024));
   await stampCameraPhoto('file:///raw.jpg');
-  expect(fixture.snapshot.encodeToBytes.mock.calls.map((call: unknown[]) => call[1])).toEqual([95, 85, 75]);
+  expect(fixture.snapshot.encodeToBytes.mock.calls.map((call: unknown[]) => call[1])).toEqual([95]);
   const [, encoded] = jest.mocked(FileSystem.writeAsStringAsync).mock.calls[0];
-  expect(Buffer.from(encoded, 'base64').length).toBeLessThan(300 * 1024 + 1024);
+  expect(Buffer.from(encoded, 'base64').length).toBeGreaterThan(1500 * 1024);
 });
 
 it('does not save an unmarked camera photo if the logo cannot be decoded', async () => {

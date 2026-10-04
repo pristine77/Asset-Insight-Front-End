@@ -1,26 +1,27 @@
-import { CAMERA_PHOTO_BOX, CAMERA_PHOTO_MAX_BYTES, CAMERA_PHOTO_QUALITY_LADDER, fitInsideBox } from './cameraPhotoSize';
+import { CAMERA_PHOTO_BOX, CAMERA_PHOTO_JPEG_QUALITY, CAMERA_PHOTO_MAX_SIDE, fitInsideBox } from './cameraPhotoSize';
 
+// Restored by the owner, 2026-10-03: the camera's values from before
+// 2026-10-02 (a 3000 px longest side, JPEG quality 95).
 describe('standard camera photo size', () => {
-  it("uses the office's 1200 x 900 box and a 300 KB target", () => {
-    expect(CAMERA_PHOTO_BOX).toEqual({ width: 1200, height: 900 });
-    expect(CAMERA_PHOTO_MAX_BYTES).toBe(300 * 1024);
-    expect(CAMERA_PHOTO_QUALITY_LADDER).toEqual([95, 85, 75, 65, 55, 45]);
+  it('uses a 3000 px longest side and JPEG quality 95', () => {
+    expect(CAMERA_PHOTO_MAX_SIDE).toBe(3000);
+    expect(CAMERA_PHOTO_BOX).toEqual({ width: 3000, height: 3000 });
+    expect(CAMERA_PHOTO_JPEG_QUALITY).toBe(95);
   });
 
   it.each([
-    ['a 12 MP landscape photo', 4032, 3024, 1200, 900],
-    ['a 4000 x 3000 landscape photo', 4000, 3000, 1200, 900],
-    ['a 16:9 landscape photo', 1920, 1080, 1200, 675],
-    ['a 3:4 portrait photo', 3024, 4032, 675, 900],
-    ['a 9:16 portrait photo', 1080, 1920, 506, 900],
-    ['a photo already exactly the size', 1200, 900, 1200, 900],
-    ['a photo one pixel too wide', 1201, 900, 1200, 899],
-  ])('fits %s inside 1200 x 900 without changing its shape', (_label, w, h, expectedW, expectedH) => {
+    ['a 12 MP landscape photo', 4032, 3024, 3000, 2250],
+    ['a 4000 x 3000 landscape photo', 4000, 3000, 3000, 2250],
+    ['a 3:4 portrait photo', 3024, 4032, 2250, 3000],
+    ['a 9:16 portrait photo', 2160, 3840, 1688, 3000],
+    ['a photo already exactly the size', 3000, 2250, 3000, 2250],
+    ['a photo one pixel too long', 3001, 2000, 3000, 1999],
+  ])('limits %s to 3000 px on its longest side without changing its shape', (_label, w, h, expectedW, expectedH) => {
     expect(fitInsideBox(w, h)).toEqual({ width: expectedW, height: expectedH });
   });
 
   it('never enlarges a smaller photo', () => {
-    expect(fitInsideBox(1000, 700)).toEqual({ width: 1000, height: 700 });
+    expect(fitInsideBox(1920, 1080)).toEqual({ width: 1920, height: 1080 });
     expect(fitInsideBox(640, 480)).toEqual({ width: 640, height: 480 });
   });
 
