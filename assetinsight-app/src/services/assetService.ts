@@ -366,9 +366,10 @@ class AssetService {
   /**
    * Get all asset reports for current user
    */
-  async getAssetReports(): Promise<AssetReport[]> {
-    const response = await api.get(API_ENDPOINTS.GET_ASSETS);
-    return response.data.data || [];
+  async getAssetReports(view?: 'previews'): Promise<AssetReport[]> {
+    const response = await api.get(API_ENDPOINTS.GET_ASSETS, view ? { params: { view } } : undefined);
+    if (!Array.isArray(response.data?.data)) throw new Error('Asset reports returned an incomplete response. Refresh to try again.');
+    return response.data.data;
   }
 
   /**

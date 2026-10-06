@@ -1,439 +1,161 @@
 # Android local development
 
-## One logo per photo — 2026-10-03 (local)
+## Restore pre-reduction camera quality — 2026-10-05 (source fix; release pending)
 
-The owner asked for the company logo on every photo, added only where it is
-missing ("sometimes no logo and sometimes it's double"). Why both happened:
+Restored the photo-size/encoding correction from Pristine `551205d`
+(2026-10-04 04:31 UTC), without importing unrelated changes from its parent.
+Pristine `9b1f739` introduced the 1200 × 900 / 300 KiB reduction on
+2026-10-02 20:29 UTC; our October 3 refresh included it. This section supersedes
+the capture-size paragraph in that refresh below.
 
-- **No logo:** the 2026-09-11 rule left the upload switch ("Apply watermark")
-  off by default and meant it for imported photos only. Gallery imports and web
-  uploads therefore went up without a logo unless someone ticked it.
-- **Double logo:** ticking it made the server stamp every photo that had no
-  receipt. Photos that already showed the logo without a receipt got a second
-  one: camera photos from builds before receipts, photos re-saved by
-  WhatsApp/email/gallery editors, and photos downloaded from the website.
+Standard Android captures now have a **3000 px longest side**, preserving aspect
+ratio without enlargement: 4:3 landscape is at most 3000 × 2250, portrait
+2250 × 3000. These match the settings independently inspected in the saved
+1.0.1/code22 APK and 1.0.2/code23 AAB; standard mode was not full 4K.
+Android retains the original JPEG 95→45 ladder targeting 700 KiB, WebP/AVIF
+300 KiB targets, and the 12MP toggle's 6000 px / 1 MiB policy. Encoding targets
+are not guaranteed final byte caps. The JS/fallback camera encodes once at
+quality 95, with no 300 KiB ladder, as it did before the reduction.
 
-What changed:
+Watermark receipts, capture journals, saved originals, upload identities, video,
+backend processing and export settings are unchanged. This is a targeted
+restoration, not a full Pristine refresh: the separate `2a4b60c` camera lifecycle,
+bounded-decoder, approval and default-logo changes are not imported here.
+Already-reduced photos cannot regain detail through this change. A new native
+binary is required to change installed apps; existing release artifacts are not
+rebuilt, signed or published by this work. No production or customer data changes.
 
-- The server now checks every photo before stamping (backend
-  `src/utils/photoLogoDetection.ts`, called by `processImageWithLogo`): a valid
-  receipt, or the logo visible at the camera's placement (20% width, 3%
-  padding) or the server's (10% width, 20 px / 2% margin), means "leave the
-  pixels alone". Only photos without the logo get one. The check was tested
-  on 1,326 photos: no-logo photos scored at most 0.37, photos with a logo at
-  least 0.72 (threshold 0.55), including website re-saves, smaller copies, dark
-  scenes and photos with both logos.
-- The switch is now **"Add logo where missing"**, **on by default**
-  (`src/utils/watermarkPreference.ts`), for Asset and Lot Listing reports. Turning
-  it off still stores photos exactly as taken (camera photos keep the logo the
-  camera adds). A draft saved by an older build with the switch off keeps that
-  choice.
-- The server default for a missing choice is now on, so web uploads and older
-  app builds get the logo where it is missing. Once the server is deployed,
-  ticking the switch in the current field app is safe for every photo.
-- The camera is unchanged: it always stamps one logo and writes a receipt.
+Verification: all 97 Jest suites / 1,043 tests and TypeScript pass. The 22
+focused size/watermark tests reproduced the reduction before the implementation
+change and pass after restoration, including portrait/landscape 4K inputs,
+no-enlargement, the unchanged high-resolution bounds, one quality-95 JS encode
+above the old byte budget, and existing watermark receipts. Android camera
+`compileDebugKotlin` passes offline with JDK17 (existing deprecation warnings).
+No connected emulator/device was available: physical capture quality, memory
+endurance and release-binary installation remain unverified.
 
-Limit: a photo cropped after it was stamped, or a logo placed somewhere else by
-hand, is not recognised and gets a second logo.
+## Lot Listing optional appraisal fields — 2026-10-03 (local)
 
-Verification: backend 11 logo-related test files (109 tests) and the type
-check; app Jest suites for the switch, transport and camera source.
+Lot Listing preview no longer shows the Required selections or bulk Running
+Condition blocks, and submission does not require Running Condition, Completeness,
+Legal or N/A choices. FMV is optional on the corresponding backend paths. Asset
+appraisal controls are unchanged; existing saved values and photo order are not
+deleted or rewritten. Deploy the backend/API workers first, then web and a new
+mobile binary. Existing installed APKs and the prepared Play bundle are unchanged.
+Local regression tests exercise blank-field submission and retained legacy values,
+alongside the unchanged Asset per-lot/bulk-selection tests.
 
-## Camera controls fit landscape screens — 2026-10-03 (local)
+## Pristine local refresh — 2026-10-03
 
-Owner report with a screenshot (Galaxy S24 Ultra, large system text): in
-landscape, Done was missing and Next was half cut off. The right-hand column
-was a scroll view, so on that screen Done sat below the edge, and nothing showed
-that the column could scroll.
+Ported the native folder delta `8105c04..4cffcea` from
+`pristine77/Asset-Insight-Front-End` into the current checkout. The standalone
+`Asset-Insight-Mobile-APK` repository is still at `98c656f`, already incorporated.
+All existing camera handoff, upload recovery, authentication, preview/version and
+Play privacy work remains. Marketing version stays 1.0.2 and the existing signed
+Play bundle is unchanged; it does not contain this later source refresh.
 
-`res/layout-land/activity_camera_view.xml` now has a fixed-height column
-(`rightPanelColumn`, a ConstraintLayout) instead of the scroll view:
+Dashboard Submit can now hand an ordinary Asset/Lot upload to an in-app,
+single-active FIFO queue and close the form. The upload bar survives navigation,
+offers Pause/Resume/Open and keeps queued/active drafts locked against edits or
+discard. Incoming/auction tasks and explicit replacement/separate-report choices
+stay in the form. Original media references, submission identities, ordered lots
+and acceptance rules are unchanged. Upload counts say files, including videos.
 
-- the gallery row is pinned to the top;
-- Prev / Next / Done (`linearLayoutLotLeftRight`) are pinned to the bottom and
-  are always visible;
-- Bundle, Item, Photo and + Extra (`captureButtons`) share the height in between.
-  They keep their usual size (the box is at most 210dp) and shrink, with their
-  text (`autoSizeTextType="uniform"`, one line), when a short screen or a large
-  font leaves less room.
+The upstream automatic-resume behavior was deliberately not imported. Offline,
+connection interruptions, restart and reopened drafts require explicit Resume.
+Offline also holds queued uploads; it cannot immediately restart them. Account
+switches clear in-memory work, including deferred owner-bound local writes.
+The queue receives global pauses synchronously even while an accepted receipt is
+being saved. Local ready/accepted writes have a 30-second wait bound, and paused
+state persistence does not strand the interface if SQLite stops answering. Late
+writes never restart transport; originals stay protected by the durable store.
+Status receipt recovery checks the same server session after an ambiguous
+completion, but never clears `reusedAcceptance` to claim newer field edits were
+accepted. Such drafts remain available for review. Brief network handovers no
+longer immediately cancel uploads; server fallback is bounded by the existing
+120-second no-progress watchdog rather than total transfer time.
 
-View IDs used by `CameraViewActivity` are unchanged. Portrait already fits: Prev,
-Next, + Extra and Done sit in one row sized with sdp. The status bar strip
-at the top stays as it was (the owner withdrew that request).
-`src/config/cameraLandscapeLayout.test.ts` pins these rules.
+Capture sizing below was superseded by the October 5 restoration above.
+At the time of this refresh, new standard captures fit inside a fixed 1200 × 900 box, preserving aspect ratio
+without enlargement; portrait 3:4 captures are at most 675 × 900. The upstream
+300 KiB compression target is a quality-ladder target, not a guaranteed final
+file-byte cap: minimum quality and subsequent EXIF/watermark receipts may exceed
+it. The high-resolution option remains separate. Existing original photos are
+not resized. Camera save failures now explain the issue with an owner/form-fenced
+retry, and changed camera contexts have an explicit Close action.
 
-## Device approval: once per phone, opens by itself — 2026-10-03 (local)
+Local verification uses mocked transport/storage and loopback bundle settings,
+not production requests. Typecheck and all 97 Jest suites / 1,042 tests pass,
+including stalled local writes, Offline during acceptance persistence, competing
+Pause requests, account changes, camera-save failure/retry and late responses.
+Scoped ESLint has zero errors (55 existing/imported style warnings). Android and
+iOS Hermes exports pass. Android debug integration requires JDK17; this run's
+default 2 GiB Gradle heap exhausted during packaging, then succeeded with the
+command-only 4 GiB heap and two workers. No Gradle source setting was changed.
+No attached device was available, so physical camera quality, real-media transfer
+endurance, accessibility/device interaction and iOS native execution remain
+release checks. No EAS build, store upload, push, deployment or customer repair.
 
-Owner request: approve a phone once, never again after an app update, and open
-the app by itself once approved.
+## Play privacy and account deletion entry points — 2026-10-03 (local)
 
-- **Once per phone already holds for official builds.** An in-place update keeps
-  the installation key, so the same registration is used. After uninstalling and
-  reinstalling, the app sends a hashed Android ID (`deviceReinstallIdentity.ts`)
-  and the backend rebinds the existing, still-approved registration
-  (`beginDeviceAwareSession`, "Android app reinstalled on an existing bound
-  device"). The store build already sends this ID.
-- **The signing key matters.** Android gives each signing key its own Android ID.
-  A build signed with a different key looks like a new phone and needs one
-  approval. That is what happened with the local test build (signed with this
-  PC's key); later test builds from this PC reuse that approval. **Every release
-  must be signed with the same upload key** (the EAS-managed keystore), or every
-  user's phone will need approving again.
-- **Opens by itself.** The waiting screen (`DeviceAccessScreen.tsx`) used to
-  check every 10 seconds, and only on that timer. It now checks straight away,
-  again whenever the app comes back to the front, and then every 5 seconds
-  (`APPROVAL_CHECK_INTERVAL_MS`). An approval found by any check signs in and
-  opens the app (`refreshDeviceStatus` -> `exchangeApproval`). Checks pause while
-  the app is in the background. The status check is one indexed read with no
-  rate limit. The waiting state is keyed on a flag, so storing a fresh pending
-  state never triggers an extra check.
+Auth (including signup/recovery) and Drawer > Profile now expose labelled,
+48px-minimum Privacy policy and Account deletion links. Both open fixed public
+HTTPS pages on `assetinsightvaluator.com` without account identifiers or tokens.
+The account-deletion page describes/request-starts deletion; opening it is not
+an account, draft, journal or media deletion. Browser-launch errors retain the
+current screen and show the exact public URL for manual retry. No background
+request, auto-open, new API/dependency or permission is added.
 
-## Uploads run in the background — 2026-10-02 (local)
+Marketing version is now **1.0.2** in Expo/package/native configuration; local
+Android code **4** is only a development fallback. EAS remains remote and
+auto-incrementing: do not reset its counter, and verify the actual release code
+is greater than the last distributed build. The production AAB profile now pins
+the production EAS environment/API, `EXPO_NO_DOTENV=1`, developmentClient=false,
+and remote credentials; production-apk retains those settings and APK output.
+The local Gradle template still uses debug signing unless EAS injects the remote
+release credentials. Never publish an unverified local Gradle artifact.
 
-Owner request: while a report's photos uploaded, the screen was held up until
-the upload finished. Chosen option: **keep waiting for acceptance** — ordinary
-uploads move to the background; work whose next step needs the server's
-acceptance keeps waiting in the form.
+Focused rendered-action tests cover signed-out/in links, both CRM/Listings
+profiles, failure/retry, repeated presses, dark colors and non-mutating behavior.
+The full native gate passes **86 suites / 889 tests**, TypeScript, scoped ESLint
+and diff whitespace checks. Expo public config confirms 1.0.2/com.assetinsight.app.
+Production submission additionally requires the public pages to be live,
+successful reviewer access, an accepted upload certificate and a freshly built
+signed production AAB. These source changes alone do not certify those gates.
 
-- **How it works.** Submit (or Resume upload) on the Dashboard's Asset and Lot
-  Listing forms saves the draft and checks it as before, records it as ready to
-  upload, hands the upload to the background upload line and closes the form at
-  once. The person can start the next report or take photos meanwhile. The
-  upload is the form's own: the same saved draft, details, photos, submission
-  and upload session, the same check before every attempt
-  (`prepareOfflineSubmission`) and the same acceptance rules
-  (`reportUploadReceipt.ts`). Only the waiting moved. Code:
-  `services/backgroundUploadManager.ts`; the forms decide in `handleSubmit`.
-- **One at a time.** One upload runs; the rest wait in line, first in, first
-  out. Resume puts a paused upload at the end of the line.
-- **The upload bar** (`components/UploadBar.tsx`, rendered once in `App.tsx`)
-  sits below every main screen, which ends above it, and takes no room when
-  there is nothing to show: "Uploading 93530.3-A · 45 of 160 photos" with a
-  thin progress bar and **Pause**; "+2 waiting" (tap to list them and pause
-  one); "Waiting for signal · 45 of 160 sent" with **Resume now** and
-  **Pause**; paused uploads with **Resume** and **Open**; "Sent: 93530.3-A" for
-  six seconds when the server accepts a report; "Needs attention: 93530.3-A —
-  <reason>" with **Open** and **Dismiss**. Open is the same as Continue in
-  Drafts. The forms, the drawer and other dialogs are full-screen and cover it.
-- **Drafts.** Each local draft card shows the live state ("Uploading 45 of
-  160", "Waiting in line", "Waiting for signal", "Paused", "Needs attention").
-  While a draft is uploading or waiting in line it cannot be opened, deleted,
-  discarded or replaced from its cloud copy; pause it from the bar first.
-  Drafts also leaves any draft the line holds out of its cloud sync, which ends
-  by replacing the local draft with its cloud copy and deleting its local
-  photos — the photos the upload is reading.
-- **What stays in the foreground, and why.** Incoming work, including
-  **Generate files & new lot**: the next lot may start only after the server
-  accepts this one, so the form keeps waiting for that acceptance, as before.
-  Also Auction Management tasks, the explicit **Create Separate**, **Upload
-  updated version** and **Start separate report** choices, a form's own
-  automatic resume, and every form outside the Dashboard.
-- **Needs attention.** A report already processing for the contract, changed
-  photos, an earlier acceptance ("Earlier upload accepted"), sign-in problems
-  or any other error stop that upload; the draft is kept as paused and a notice
-  says why. That draft's next Submit or Resume upload runs in the form once,
-  where the form's usual prompt (Create Separate, replace or start separate,
-  the error message) appears.
-- **Pause.** The bar's Pause stops that upload only, and the form's own Pause
-  upload now stops only the form's upload (`pauseUploadOperation` in
-  `uploadCancellation.ts`), so pausing one never pauses the other. Sign-out,
-  an account switch, the automatic pause on a lost connection and Offline mode
-  still pause every upload. A Pause always takes effect at once: every step of
-  a background attempt, including the checks before the transfer, stops
-  waiting when its upload is paused.
-- **Finalizing.** Pause is not offered, and is refused, while a submission is
-  being finalized: that is when the server accepts it (see "Finalizing
-  safeguards" below). Choosing Offline on a new report now also leaves a
-  finalizing submission to settle (`setDraftCaptureMode` in
-  `offlineDraftPolicy.ts`); before, it would have cut off a background upload
-  at that moment and shown its accepted report as "Earlier upload accepted".
-- **Automatic resume.** A lost connection, a stalled transfer, a transient
-  network or server error, or no connection at Submit: the upload shows
-  "Waiting for signal", keeps its turn, and continues by itself with the rules
-  of "Uploads resume by themselves" (15 s of steady signal, a server check,
-  three tries in a row that send no new file). **Resume now** tries at once as
-  the person's own action. A pause from elsewhere in the app that nobody asked
-  of this upload (Offline chosen on a new report pauses every upload) is tried
-  again at once, counted in the same three tries.
-- **Accepted.** The draft is recorded as accepted and leaves Drafts, the
-  Dashboard refreshes its figures, and "Sent" appears. If the phone cannot
-  record the acceptance, the notice says the server accepted the report and
-  stays until dismissed; that draft is not uploaded again from the line.
-  Local media cleanup afterwards keeps camera files from the last 48 hours
-  (the forms clear them at once): the person may be taking the next report's
-  photos while an upload finishes.
-- **Sign-out and account switch** empty the line; nothing is written for the
-  old account. A profile refresh no longer re-runs the sign-in cleanup that
-  paused every upload: `AuthGate` keys it by the signed-in account.
-- **App restart.** The line lives in memory while the app is open. After a
-  restart nothing starts by itself: the drafts are still recorded as ready or
-  paused and show the usual **Resume upload**.
+## Preview loading and app version — 2026-10-03 (local)
 
-Not covered: uploading while the app is closed or the phone is locked. That
-needs a native background upload service; this change is JavaScript only and
-ships with the next APK.
+Previews now settle Asset, Lot Listing, Real Estate, Salvage and draft reads
+independently. A failed or malformed response preserves that source's last-loaded
+rows instead of blanking the entire screen. Errors distinguish session/access,
+server, timeout and network failures; Retry is read-only. Unknown counts show a
+dash and stale counts have an asterisk. Initial processing remains in New and
+approved Real Estate remains in Submitted. Foreground refreshes coalesce and
+reject late responses from an earlier signed-in session. This does not diagnose
+the unidentified customer's historical transport failure.
 
-Tests: `backgroundUploadManager.test.ts` (the line: order, one at a time,
-acceptance and its writes, earlier acceptance, needs attention and the
-foreground mark, the targeted Pause, waiting and automatic resume, the try
-limit, a pause from elsewhere, account change, finalizing, a busy draft),
-`backgroundUploadHandoff.test.tsx` (both forms: hand-off with the same details
-and photos, Incoming and the other foreground cases, the foreground mark, no
-signal at Submit, the form's Pause leaving a background upload running, the
-busy-draft guards), `UploadBar.test.tsx`, `backgroundUploadDraftGuard.test.ts`,
-`OfflineReportsScreen.backgroundUploads.test.tsx`, new cases in
-`OfflineCaptureList.test.tsx`, `uploadCancellation.test.ts` (a targeted pause
-stops the direct and the multipart transfer of its own upload only) and
-`uploadManifestRecovery.test.ts`. Component and mocked-transport evidence; no
-device run.
+Queue reads use optional `view=previews` compact DTOs; full editor/draft reads
+remain unchanged. Backend support must precede this app and web/admin updates.
+The existing 30-second API deadline remains. No report submission, generation,
+deletion, original-media copy, accounting or watermark behavior changes here.
 
-## Uploads resume by themselves — 2026-10-02 (local)
+Marketing version is **1.0.1** in Expo/package/native configuration; the local
+Android versionCode is **3**. EAS retains `appVersionSource: remote` and production
+`autoIncrement`: verify the next release build number exceeds the last distributed
+APK. Do not reset the remote counter to the local debug code. Installed native
+version/build now travel with API and newly recorded offline activity, allowing
+Admin Report Activity to show last-received version evidence. Missing historical
+evidence is Not recorded, not an inferred version.
 
-Owner request: an upload interrupted by a weak or lost signal should continue
-once the signal is back, without someone watching the phone to tap Resume
-upload. This replaces, for a report that is still open, the earlier rule
-"Reconnection does not start a report automatically".
-
-- **What resumes.** Only an upload the app stopped by itself: the automatic
-  pause on a lost connection, a stalled transfer, a transient network or server
-  error, or a Submit that found no connection. A Pause the person tapped, an
-  account change, and anything that needs a decision (conflicts, "Earlier
-  upload accepted", sign-in problems) are unchanged.
-- **When.** While that report stays open, or, for an upload handed to the
-  background (see "Uploads run in the background"), while the app is open. The
-  form, or the upload bar, shows "Waiting for signal" with **Resume now** and
-  **Pause**. The phone must stay
-  connected for 15 s and our server must answer its health check before the
-  upload starts again; while connected but unanswered, it checks again after
-  15, 30, then 60 s. A closed form that held its own upload, a restarted app or
-  a draft reopened from Drafts keep the explicit Resume upload button, and
-  Offline captures are still never sent without a tap on Submit.
-- **How far.** After three automatic tries in a row that store no new file, it
-  stops and shows the usual message and Resume upload. A try that stores more
-  files resets the count, so a long upload on a patchy signal keeps going.
-- **What a resume is.** Exactly the Resume upload action: the same submission
-  and upload session, files already in storage are skipped, and the server
-  refuses a second report for the same submission.
-- **How the app tells pauses apart.** `pauseActiveUploads('connection')` marks
-  the automatic pause, and the paused error carries `pauseReason`
-  (`uploadCancellation.ts`). Rules and the wait: `services/uploadAutoResume.ts`.
-  Form side: `components/forms/useUploadAutoResume.ts` and
-  `UploadWaitingForSignal.tsx`, used by both report forms.
-- **Related fix.** The pre-upload check refused to start whenever NetInfo's own
-  "internet reachable" probe read false, which happens on weak but working
-  signal. It now refuses only a reported disconnect and leaves the decision to
-  the check of our own server that follows (`offlineSubmissionService.ts`).
-
-Not covered: uploading while the app is closed or the phone is locked. Android
-stops the app's JavaScript work in the background; that needs a native
-background upload service.
-
-Tests: `uploadAutoResume.test.ts` (which failures qualify; the wait, with a fake
-network and clock), `uploadPauseReason.test.ts`, additions to
-`offlineQueueManual.test.ts` and `offlineSubmissionService.test.ts`, and nine
-cases per form in `AuctioneerForms.test.tsx`. Removing any of the four guards
-(the person's Pause, the account check, progress counting, the try limit) fails
-a test. Component and mocked-network evidence only; no device run.
-
-## Fewer stuck screens and silent failures — 2026-10-02 (local)
-
-Seven fixes that follow the field reports of a frozen camera and an upload bar
-that stops moving. Items 1 to 6 are in this app; item 7 is in the Asset-Insight
-backend.
-
-1. **Finalizing asks before re-sending.** When the answer to the completion
-   request is lost, the app first asks
-   `GET /api/{asset|lot-listing}/upload-session/:sessionId/status` whether the
-   server already accepted the upload. An accepted receipt finishes at once,
-   reported as `acceptedOnRetry: true`. It asks once more after the last
-   attempt, so an accepted report never ends as an error. If the status check
-   fails or the server lacks it, the app re-sends as before.
-   (`acceptedReceiptFromStatus` in `directR2UploadService.ts`.)
-2. **The server fallback has no total time limit.** When a phone's network
-   blocks direct storage, files go through the API. That request had a fixed
-   120 s limit, which cut off walkaround videos and large photos on slow links
-   while they were still moving, the same way on every resume. It now stops only
-   after `UPLOAD_IDLE_TIMEOUT_MS` (120 s) without progress, like direct
-   transfers.
-3. **The camera tap says why it did not open.** The forms save the draft before
-   opening the camera. When that save failed, the tap did nothing. Both forms now
-   show "Camera not opened" with the save's reason and a **Try again** button
-   (`src/utils/cameraOpenFailure.ts`). Try again saves the form as it is when
-   tapped, and does nothing once the account or the form has changed.
-4. **A Pause during the Submit save is a pause.** A Pause tapped while the draft
-   was being saved before upload ended as "Draft not saved ... check device
-   storage" although the save had worked. The save is now recorded before the
-   pause check, so the draft shows **Resume upload**.
-5. **Retries say so.** A re-sent file starts again from zero bytes while the bar
-   keeps its highest value, so a working retry looked frozen. The progress text
-   now reads "Retrying <file> (2 of 3)..." or "Sending <file> again...".
-6. **"Opening camera..." no longer stays up for good.** When the account or the
-   draft changed while the camera was open or its photos were being saved, the
-   screen kept its spinner with no camera behind it. It now shows "Camera
-   closed", says what happened, and offers **Close**. It does not close by
-   itself: nothing from the old launch may act on the new draft, which the
-   existing stale-handoff tests pin. The captured media stays in the original
-   draft's recovery journal.
-7. **Backend: the per-photo check reads one entry.**
-   `POST .../upload-session/:sessionId/files/:fileId/verify` loaded the whole
-   session, up to 5,000 file entries, for every photo checked during a resume.
-   It now reads only that photo's entry (`$elemMatch` projection, `.lean()`)
-   in `reportUploadSession.controller.ts`.
-
-Tests: `completionRetryReceipt.test.ts` (status checks),
-`uploadFallbackAndRetry.test.ts` (fallback deadline, retry text),
-`cameraOpenFailure.test.ts`, new cases in `AuctioneerForms.test.tsx` (both
-forms: pause during save, camera not opened, Try again and its account guard)
-and `NativeAuctionCameraScreen.test.tsx` (camera closed by an account or draft
-change). Backend: the photo-check cases in
-`report-upload-completion-verification.integration.test.ts`. Each new form and
-camera case was confirmed to fail with its fix removed. This is mocked-transport
-and component evidence, not a device or field-network run. A new native binary
-is required; there is no OTA channel.
-
-## Standard photo size restored — 2026-10-03 (local)
-
-**The 2026-10-02 change below is reverted.** Standard photos are again at most
-**3000 px on the longest side**, never enlarged. The Android camera steps JPEG
-quality down from 95 until the file is at most **700 KB** (WebP/AVIF 300 KB). The
-12 MP option keeps 6000 px and 1 MB, and the JS camera saves at quality 95, as
-before.
-
-Why: the 1200 × 900 cut was made on the understanding that installed builds
-already sent 1200 × 900 photos. They did not. The store build on the owner's
-phone, disassembled (`classes5.dex`, `processCapturedFile`), used
-`use12MP ? 6000 : 3000` and a 700 KB JPEG target. The "1200 × 900, ~235 KB"
-figure came from photos already resized after upload. The cut left about a sixth
-of the detail (a ninth for upright photos: 21 test photos measured 1200 × 671 and
-579 × 900 at quality 95), and the owner saw the difference on a real phone and
-asked for the old setting back.
-
-Today's crash fix is kept: the photo is decoded at up to twice the output size,
-now up to 6000 px for a 3000 px photo, and the decoder stays within the memory
-available. Tests: `cameraPhotoSize.test.ts`, `cameraPhotoWatermark.test.ts`,
-`nativeCapturePhotoSize.test.ts`.
-
-## Standard photo size — 2026-10-02 (local, reverted 2026-10-03)
-
-Installed builds send camera photos at 1200 × 900, about 235 KB (71 app-stamped
-staging photos). The source had since raised the Android camera's limit to a
-3000 px longest side and a 700 KB JPEG target, about 600 KB per photo, while a
-comment still read "keep existing 1200 px limit". The owner chose the office's
-own resize settings instead: **Fit** inside **1200 × 900** (width × height),
-**Do not enlarge if smaller**, **Maintain aspect ratio**, **Reverse width and
-height by orientation** off.
-
-- Both cameras now fit standard photos inside 1200 × 900 without enlarging or
-  changing shape, so a landscape photo is at most 1200 × 900 and a 3:4 portrait
-  photo at most 675 × 900. The JPEG then steps down from quality 95 until it is
-  at most 300 KB. Android: `fitInsideBox` and `STANDARD_PHOTO_MAX_*` in
-  `CameraViewEngine.kt`; JS camera: `src/utils/cameraPhotoSize.ts`.
-- Measured on 17 full-size originals with the camera's JPEG ladder: 232 KB on
-  average, 164 to 293 KB. With the old 700 KB target the same 1200 × 900 photos
-  averaged 385 KB.
-- Unchanged: the 12 MP option (6000 px longest side, 1 MB), WebP/AVIF output
-  choices (also held to 300 KB as before), and gallery imports, which still
-  upload the original the user picked.
-
-Tests: `cameraPhotoSize.test.ts`, the updated `cameraPhotoWatermark.test.ts`,
-and `nativeCapturePhotoSize.test.ts`, which pins the Kotlin source because the
-project has no Kotlin test runner. The Kotlin change was not compiled here (no
-JDK or Android SDK on this machine); the next Android build compiles it, and a
-real-phone capture should confirm the 1200 × 900 output before release.
-
-## Camera: the shutter, failed shots, large photos and long sessions — 2026-10-03 (local)
-
-Four defects in the native camera (`modules/auction-camera`), found in the
-2026-10-01 sweep and fixed once this machine could compile Kotlin.
-
-**The shutter locked after each shot, and sometimes for good.** The screen
-allows one shot in flight (`captureInFlight`) and used to free it only after
-the previous photo was fully processed — decoded, cropped, resized and
-compressed — so every shot locked the shutter for a second or more. It now
-frees as soon as the frame is on disk (`onCaptureSaved`), and the photo is
-processed while the next shot is taken. Because a tap can now land before the
-previous photo is filed, each shot carries its own request (`CaptureTicket`:
-mode, extra, tap time) instead of reading two shared "pending" fields, and
-processing runs on one thread so photos are filed in the order they were
-taken. Two taps that nothing ever answered left the shutter locked for good:
-a tap before the camera was bound (the engine returned silently) and a
-processing thread that died. Both now answer, and a watchdog frees the
-shutter after 12 seconds with "The camera did not return a photo. Try again."
-if nothing else has.
-
-**Failed shots vanished silently.** `onRecordingError` was set twice; the
-surviving copy treated every message containing "capture failed" as transient
-and showed nothing. One handler now shows every failure except a shot cut
-off by the camera closing during a lens or mode switch. A saved frame that
-cannot be processed reports through its own callback
-(`onPhotoProcessingFailed`), which also stops the thumbnail pulse.
-
-**Very large photos crashed the app.** Processing decoded the whole frame: a
-50 MP frame is 200 MB, and the upright copy another 200 MB. It now decodes
-only as large as the output needs — twice the output box, wider when a focus
-box keeps part of the frame — through `SafeBitmapDecoder`, which also stays
-inside the memory available. An `OutOfMemoryError` is not an `Exception`, so
-it escaped the catch and killed the processing thread; everything is caught
-now, and the shot is reported as failed instead.
-
-**The camera slowed down over a long session.** Every photo wrote the
-recovery journal on the main thread: read it back, work out what changed,
-rewrite the whole session. The cost grew with the session. The session is now
-snapshotted on the main thread and written on the journal thread, in order.
-Leaving the screen and Done still wait for the pending writes (up to 10 s)
-before going on, so nothing is reported saved before it is. A video still
-writes before "video saved" is shown.
-
-**Verification.** Compiled here with JDK 17 and the Android SDK 36 tools. The
-camera module has no JVM test harness (its tests are instrumented, under
-`android/app/src/androidTest`), so the behaviour is confirmed on a phone:
-take 20 photos as fast as the shutter allows and check the gallery order and
-count; switch lens mid-shot and expect no stuck shutter; take a 50 MP photo
-with the 12 MP option on and expect no crash; run a 300-photo session and
-watch the shutter-to-thumbnail time in the `AuctionCameraTiming` log stay
-flat; kill the app mid-session and reopen the draft.
-
-**Building here.** The Gradle wrapper could not download Gradle on this
-machine: Avast scans HTTPS and re-signs it with its own certificate, which
-the JDK does not trust, and the wrapper's 10-second network timeout trips
-while Avast holds the download. Builds run with the JDK pointed at Windows'
-certificate store (`JAVA_TOOL_OPTIONS=-Djavax.net.ssl.trustStoreType=WINDOWS-ROOT
--Djavax.net.ssl.trustStore=NONE`) and the Gradle package placed in the
-wrapper's folder by hand after a checksum check.
-
-## Finalizing safeguards — 2026-10-01 (local)
-
-Field reports: the bar stopped at "Finalizing Report", or the app announced
-"Earlier upload accepted" and the draft stayed on **Resume upload** while the
-report was in fact accepted and processing.
-
-- A completion retry that the server answers with `reusedAcceptance` is this
-  attempt's own acceptance: the first request reached the server and only its
-  answer was lost. `directR2UploadService` reports it with
-  `reusedAcceptance: false, acceptedOnRetry: true`, so the forms complete
-  normally. An acceptance that existed before the attempt began still arrives as
-  `alreadyQueued` and keeps the "Earlier upload accepted" review.
-- Finalizing cannot be paused. `beginUploadFinalization()` is set before the
-  "finalizing" stage is shown and cleared when the completion request settles
-  (120 s per attempt, idempotent on the server). Both forms hide **Pause upload**
-  and ignore Android back for that step. Account switch and sign-out still cancel
-  everything through `pauseActiveUploads()`.
-- The automatic pause on connection loss ignores `isInternetReachable`
-  (NetInfo's own probe of a public URL, false on weak signal or blocked URLs),
-  waits for a disconnect to last `DISCONNECT_PAUSE_DELAY_MS` (10 s, longer
-  than a Wi-Fi/cellular handover), and leaves a finalizing submission alone.
-  Real outages still stop transfers at the 120 s no-progress deadline.
-- Backend companion in Asset-Insight (`reportUploadSession.controller.ts`):
-  completion reuses verifications recorded in the last 30 minutes, records its
-  own progress as it goes, bounds each storage check at 15 s, and answers a
-  storage hiccup with a retryable 503 instead of failing the session as missing.
-  It helps installed builds too and should deploy before this binary.
-
-Tests: `completionRetryReceipt.test.ts`, `offlineQueueManual.test.ts` and a
-finalizing case in `AuctioneerForms.test.tsx` (both forms). Like the sections
-below, this is mocked-transport and component evidence, not a physical-device
-or field-network run. A new native binary is required; there is no OTA channel.
-No production data, APK build, push or deployment is part of this change.
+Tests cover five concurrent processing reports, partial/server/timeout failures,
+malformed responses, explicit retry, coalesced refresh, account fencing, completed
+Submitted rows, installed-version precedence and the actual request header.
+The full native suite, typecheck, Android/iOS Hermes exports and offline JDK17
+debug integration build pass. The debug APK reports 1.0.1/versionCode 3; it is not
+a signed production release and uses Metro for JavaScript. No device/emulator was
+connected for this task, so physical-device behavior remains unverified.
+No push, deployment or APK publication is included. Existing camera/upload/auth
+work remains intact; rebuild with production API settings for release.
 
 ## Upload acceptance and recovery — 2026-10-01 (local)
 
@@ -855,8 +577,9 @@ Report-context/request-revision guards ignore stale save/load responses and old
 delete confirmations instead of applying index selections to replacement lots.
 Bulk edits preserve other groups, narrative text, edited lot numbers, photo order
 and covers. Asset Running Condition synchronizes both Running/Working Condition
-spec aliases (N/A removes both); the older Lot Listing running-condition shortcut
-keeps its previous behavior. Completeness and Legal keep unrelated evidence fields.
+spec aliases (N/A removes both). The Lot Listing shortcut was subsequently removed
+on 2026-10-03; it does not apply to that workflow. Completeness and Legal keep
+unrelated Asset evidence fields.
 
 Verification: TypeScript and 48 Jest suites / 292 tests passed. The new focused
 gate includes 100-lot real PreviewScreen rendering, lots 4/8/9, all three groups,
@@ -1038,3 +761,179 @@ active/queued cancellation, native logo pixels and receipt idempotency.
 Full hardware capture endurance, physical iOS and production rollout remain
 unverified; these are not implied by metadata or emulator tests. This change
 requires backend support first and a new native binary, not an OTA-only release.
+
+## Combined Asset/Lot preview save and generation — 2026-10-05 (local)
+
+Asset and Lot Listing previews now expose one **Save & Generate** or
+**Save & Regenerate** action. The confirmation saves the entire current preview
+and queues all files through the existing submit/resubmit endpoint; it never
+performs a separate metadata save or CR-only refresh. Initial dirty Asset previews
+no longer require a separate Save first. Loaded status determines the endpoint;
+approved/failed previews regenerate even if their navigation mode is stale.
+
+Assigned approval remains explicit (**Save, Regenerate & Approve**), and Real
+Estate retains its separate save/submit workflow. Asset approval/release and Lot
+Listing automatic release are unchanged. This does not deliver to Auctioneer.
+
+Same-turn confirmation guards, report/revision fences and file-generation state
+prevent duplicate requests or an old dialog submitting a refreshed report.
+Failures retain edited values. Unit coverage includes the exact current snapshot,
+no extra PUT, duplicate confirmations, late receipts, stale dialogs and 100-lot
+condition/media preservation. Typecheck and Android/iOS Hermes export validation
+are local only; physical devices, production generation and a signed APK release
+remain unverified. A new binary is required for installed devices.
+
+Final local gates: all 97 Jest suites / 1,046 tests, TypeScript and both
+Android/iOS Hermes exports passed. Pending save-and-regenerate requests block
+form editing and accessibility interaction until acceptance or failure.
+
+## One logo per photo — 2026-10-03 (local)
+
+The owner asked for the company logo on every photo, added only where it is
+missing ("sometimes no logo and sometimes it's double"). Why both happened:
+
+- **No logo:** the 2026-09-11 rule left the upload switch ("Apply watermark")
+  off by default and meant it for imported photos only. Gallery imports and web
+  uploads therefore went up without a logo unless someone ticked it.
+- **Double logo:** ticking it made the server stamp every photo that had no
+  receipt. Photos that already showed the logo without a receipt got a second
+  one: camera photos from builds before receipts, photos re-saved by
+  WhatsApp/email/gallery editors, and photos downloaded from the website.
+
+What changed:
+
+- The server now checks every photo before stamping (backend
+  `src/utils/photoLogoDetection.ts`, called by `processImageWithLogo`): a valid
+  receipt, or the logo visible at the camera's placement (20% width, 3%
+  padding) or the server's (10% width, 20 px / 2% margin), means "leave the
+  pixels alone". Only photos without the logo get one. The check was tested
+  on 1,326 photos: no-logo photos scored at most 0.37, photos with a logo at
+  least 0.72 (threshold 0.55), including website re-saves, smaller copies, dark
+  scenes and photos with both logos.
+- The switch is now **"Add logo where missing"**, **on by default**
+  (`src/utils/watermarkPreference.ts`), for Asset and Lot Listing reports. Turning
+  it off still stores photos exactly as taken (camera photos keep the logo the
+  camera adds). A draft saved by an older build with the switch off keeps that
+  choice.
+- The server default for a missing choice is now on, so web uploads and older
+  app builds get the logo where it is missing. Once the server is deployed,
+  ticking the switch in the current field app is safe for every photo.
+- The camera is unchanged: it always stamps one logo and writes a receipt.
+
+Limit: a photo cropped after it was stamped, or a logo placed somewhere else by
+hand, is not recognised and gets a second logo.
+
+Verification: backend 11 logo-related test files (109 tests) and the type
+check; app Jest suites for the switch, transport and camera source.
+
+
+## Camera controls fit landscape screens — 2026-10-03 (local)
+
+Owner report with a screenshot (Galaxy S24 Ultra, large system text): in
+landscape, Done was missing and Next was half cut off. The right-hand column
+was a scroll view, so on that screen Done sat below the edge, and nothing showed
+that the column could scroll.
+
+`res/layout-land/activity_camera_view.xml` now has a fixed-height column
+(`rightPanelColumn`, a ConstraintLayout) instead of the scroll view:
+
+- the gallery row is pinned to the top;
+- Prev / Next / Done (`linearLayoutLotLeftRight`) are pinned to the bottom and
+  are always visible;
+- Bundle, Item, Photo and + Extra (`captureButtons`) share the height in between.
+  They keep their usual size (the box is at most 210dp) and shrink, with their
+  text (`autoSizeTextType="uniform"`, one line), when a short screen or a large
+  font leaves less room.
+
+View IDs used by `CameraViewActivity` are unchanged. Portrait already fits: Prev,
+Next, + Extra and Done sit in one row sized with sdp. The status bar strip
+at the top stays as it was (the owner withdrew that request).
+`src/config/cameraLandscapeLayout.test.ts` pins these rules.
+
+
+## Device approval: once per phone, opens by itself — 2026-10-03 (local)
+
+Owner request: approve a phone once, never again after an app update, and open
+the app by itself once approved.
+
+- **Once per phone already holds for official builds.** An in-place update keeps
+  the installation key, so the same registration is used. After uninstalling and
+  reinstalling, the app sends a hashed Android ID (`deviceReinstallIdentity.ts`)
+  and the backend rebinds the existing, still-approved registration
+  (`beginDeviceAwareSession`, "Android app reinstalled on an existing bound
+  device"). The store build already sends this ID.
+- **The signing key matters.** Android gives each signing key its own Android ID.
+  A build signed with a different key looks like a new phone and needs one
+  approval. That is what happened with the local test build (signed with this
+  PC's key); later test builds from this PC reuse that approval. **Every release
+  must be signed with the same upload key** (the EAS-managed keystore), or every
+  user's phone will need approving again.
+- **Opens by itself.** The waiting screen (`DeviceAccessScreen.tsx`) used to
+  check every 10 seconds, and only on that timer. It now checks straight away,
+  again whenever the app comes back to the front, and then every 5 seconds
+  (`APPROVAL_CHECK_INTERVAL_MS`). An approval found by any check signs in and
+  opens the app (`refreshDeviceStatus` -> `exchangeApproval`). Checks pause while
+  the app is in the background. The status check is one indexed read with no
+  rate limit. The waiting state is keyed on a flag, so storing a fresh pending
+  state never triggers an extra check.
+
+
+## Camera: the shutter, failed shots, large photos and long sessions — 2026-10-03 (local)
+
+Four defects in the native camera (`modules/auction-camera`), found in the
+2026-10-01 sweep and fixed once this machine could compile Kotlin.
+
+**The shutter locked after each shot, and sometimes for good.** The screen
+allows one shot in flight (`captureInFlight`) and used to free it only after
+the previous photo was fully processed — decoded, cropped, resized and
+compressed — so every shot locked the shutter for a second or more. It now
+frees as soon as the frame is on disk (`onCaptureSaved`), and the photo is
+processed while the next shot is taken. Because a tap can now land before the
+previous photo is filed, each shot carries its own request (`CaptureTicket`:
+mode, extra, tap time) instead of reading two shared "pending" fields, and
+processing runs on one thread so photos are filed in the order they were
+taken. Two taps that nothing ever answered left the shutter locked for good:
+a tap before the camera was bound (the engine returned silently) and a
+processing thread that died. Both now answer, and a watchdog frees the
+shutter after 12 seconds with "The camera did not return a photo. Try again."
+if nothing else has.
+
+**Failed shots vanished silently.** `onRecordingError` was set twice; the
+surviving copy treated every message containing "capture failed" as transient
+and showed nothing. One handler now shows every failure except a shot cut
+off by the camera closing during a lens or mode switch. A saved frame that
+cannot be processed reports through its own callback
+(`onPhotoProcessingFailed`), which also stops the thumbnail pulse.
+
+**Very large photos crashed the app.** Processing decoded the whole frame: a
+50 MP frame is 200 MB, and the upright copy another 200 MB. It now decodes
+only as large as the output needs — twice the output box, wider when a focus
+box keeps part of the frame — through `SafeBitmapDecoder`, which also stays
+inside the memory available. An `OutOfMemoryError` is not an `Exception`, so
+it escaped the catch and killed the processing thread; everything is caught
+now, and the shot is reported as failed instead.
+
+**The camera slowed down over a long session.** Every photo wrote the
+recovery journal on the main thread: read it back, work out what changed,
+rewrite the whole session. The cost grew with the session. The session is now
+snapshotted on the main thread and written on the journal thread, in order.
+Leaving the screen and Done still wait for the pending writes (up to 10 s)
+before going on, so nothing is reported saved before it is. A video still
+writes before "video saved" is shown.
+
+**Verification.** Compiled here with JDK 17 and the Android SDK 36 tools. The
+camera module has no JVM test harness (its tests are instrumented, under
+`android/app/src/androidTest`), so the behaviour is confirmed on a phone:
+take 20 photos as fast as the shutter allows and check the gallery order and
+count; switch lens mid-shot and expect no stuck shutter; take a 50 MP photo
+with the 12 MP option on and expect no crash; run a 300-photo session and
+watch the shutter-to-thumbnail time in the `AuctionCameraTiming` log stay
+flat; kill the app mid-session and reopen the draft.
+
+**Building here.** The Gradle wrapper could not download Gradle on this
+machine: Avast scans HTTPS and re-signs it with its own certificate, which
+the JDK does not trust, and the wrapper's 10-second network timeout trips
+while Avast holds the download. Builds run with the JDK pointed at Windows'
+certificate store (`JAVA_TOOL_OPTIONS=-Djavax.net.ssl.trustStoreType=WINDOWS-ROOT
+-Djavax.net.ssl.trustStore=NONE`) and the Gradle package placed in the
+wrapper's folder by hand after a checksum check.

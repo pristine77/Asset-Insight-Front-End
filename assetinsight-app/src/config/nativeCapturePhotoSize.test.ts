@@ -1,10 +1,9 @@
 /**
- * The Android camera sizes standard photos by the same longest side as the JS
- * camera (src/utils/cameraPhotoSize.ts): at most 3000 px, never enlarged, then a
- * JPEG of at most 700 KB (WebP/AVIF 300 KB). These are the installed app's
- * values, restored by the owner on 2026-10-03 after the 1200 x 900 cut. There
- * is no Kotlin test runner in this project, so the native source is pinned here,
- * as nativeCaptureWatermark.test.ts does.
+ * The Android camera sizes standard photos by the same rule as the JS camera
+ * (src/utils/cameraPhotoSize.ts): 3000 px longest side, never enlarged, with
+ * the previous 700 KiB JPEG / 300 KiB WebP/AVIF encoding targets restored.
+ * Targets are not hard caps. There is no Kotlin test runner here, so the
+ * native source is pinned here, as nativeCaptureWatermark.test.ts does.
  */
 import fs from 'node:fs';
 import path from 'node:path';
@@ -34,7 +33,7 @@ function section(start: string, end: string): string {
 }
 
 describe('Android standard photo size', () => {
-  it('declares the 3000 px longest side and the 700 KB / 300 KB targets', () => {
+  it('restores the pre-reduction dimensions and per-format encoding targets', () => {
     expect(code).toContain('internal const val STANDARD_PHOTO_MAX_SIDE = 3000');
     expect(code).toContain('internal const val STANDARD_PHOTO_MAX_JPEG_BYTES = 700 * 1024');
     expect(code).toContain('internal const val STANDARD_PHOTO_MAX_OTHER_BYTES = 300 * 1024');
@@ -60,8 +59,10 @@ describe('Android standard photo size', () => {
     expect(processing).toContain('fmt == ImageFormatStore.Format.JPEG -> STANDARD_PHOTO_MAX_JPEG_BYTES');
     expect(processing).toContain('else -> STANDARD_PHOTO_MAX_OTHER_BYTES');
     expect(processing).toContain('use12MPOutput -> 1 * 1024 * 1024');
-    // The decode keeps enough detail for a 3000 px photo (today's crash fix scales with it).
-    expect(code).toContain('if (use12MP) 6000 to 6000 else STANDARD_PHOTO_MAX_SIDE to STANDARD_PHOTO_MAX_SIDE');
+    // Keep the existing Android JPEG quality ladder, not a new fixed-quality policy.
+    expect(processing).toContain('var currentQuality = 95');
+    expect(processing).toContain('while (stream.size() > TARGET_SIZE_BYTES && currentQuality > 50)');
+    expect(processing).toContain('currentQuality -= 10');
     // Resized before the watermark is drawn, so the logo is sized to the final photo.
     expect(processing.indexOf('STANDARD_PHOTO_MAX_SIDE)')).toBeLessThan(
       processing.indexOf('CameraPhotoWatermark.stamp(context, bitmap)')

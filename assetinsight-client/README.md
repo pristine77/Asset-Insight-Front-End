@@ -106,6 +106,14 @@ are sent. Deploy the backend first. Coverage: `services/auctioneer.test.ts`,
 `components/reports/AuctioneerDeliveryDialog.test.tsx` and
 `app/(main)/reports/page.test.tsx`.
 
+Local integration hardening (2026-10-03): closing requires a complete matching
+server receipt, never an empty200 or an invented timestamp. The action is
+single-flight, does not automatically replay after401, and is fenced to the
+session that loaded its delivery plus the current owner. Pre-close refreshes
+cannot replace the confirmed result. Revoked assignments display "assignment
+removed", not a successful close; mobile cards retain the same delivery status
+as the desktop table. Only synthetic local contracts are used in verification.
+
 ### Failed Asset and Lot Listing preview recovery
 
 The preview queue and report deep links keep Preview available after generation

@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import PreviewModal from "./PreviewModal";
 import LotListingPreviewModal from "./LotListingPreviewModal";
@@ -23,6 +23,30 @@ describe.each(["asset", "lotListing"] as const)("%s preview integrity", (type) =
     vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockReturnValue(null);
   });
 
+  it("ignores a late generation receipt after switching reports", async () => {
+    let resolve!: (value: any) => void;
+    const generate = vi.fn().mockReturnValue(new Promise(done => { resolve = done; }));
+    const load = vi.fn().mockImplementation(async id => ({ data: {
+      status: "approved", imageUrls: [], preview_data: {
+        contract_no: id, client_name: "Fixture", currency: "CAD", location: "Fixture yard", lots: [],
+      },
+    } }));
+    const onClose = vi.fn(), onSuccess = vi.fn();
+    const Component = type === "asset" ? PreviewModal : LotListingPreviewModal;
+    const props = { isOpen: true, onClose, onSuccess, loadPreviewDataOverride: load, resubmitReportOverride: generate };
+    const view = render(<Component {...props} reportId="first-report" />);
+    await screen.findByDisplayValue("first-report");
+    fireEvent.click(screen.getByRole("button", { name: "Save & Regenerate" }));
+    expect(generate).toHaveBeenCalledOnce();
+    view.rerender(<Component {...props} reportId="second-report" />);
+    await screen.findByDisplayValue("second-report");
+    await act(async () => resolve({ data: {}, message: "Queued" }));
+    expect(onClose).not.toHaveBeenCalled();
+    expect(onSuccess).not.toHaveBeenCalled();
+    expect(screen.getByDisplayValue("second-report")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Save & Regenerate" })).toBeEnabled();
+  });
+
   it("saves a serial correction without changing separate lot photo order or cover choices", async () => {
     const photos = Array.from({ length: 41 }, (_, index) => `https://images.test/lot-222-${index}.jpg`);
     const secondPhotos = ["https://images.test/lot-223-front.jpg", "https://images.test/lot-223-rear.jpg"];
@@ -42,13 +66,13 @@ describe.each(["asset", "lotListing"] as const)("%s preview integrity", (type) =
       cover_image_urls: [photos[2], photos[0]],
     };
     const imageUrls = [...photos, ...secondPhotos];
-    const load = vi.fn().mockResolvedValue({ data: { status: "preview", grouping_mode: "mixed", imageUrls, preview_data: preview } });
+    const load = vi.fn().mockResolvedValue({ data: { status: "approved", grouping_mode: "mixed", imageUrls, preview_data: preview } });
     const save = vi.fn().mockImplementation(async (_id, submitted) => ({
       data: type === "asset" ? submitted : { preview_data: submitted, imageUrls }, imageUrls,
     }));
     const Component = type === "asset" ? PreviewModal : LotListingPreviewModal;
     render(<Component isOpen reportId="integrity-report" onClose={vi.fn()}
-      loadPreviewDataOverride={load} updatePreviewDataOverride={save} />);
+      loadPreviewDataOverride={load} resubmitReportOverride={save} />);
 
     if (type === "asset") {
       fireEvent.click((await screen.findAllByRole("button", { name: "OLD-SERIAL" }))[0]);
@@ -56,7 +80,7 @@ describe.each(["asset", "lotListing"] as const)("%s preview integrity", (type) =
     const serial = (await screen.findAllByDisplayValue("OLD-SERIAL"))[0];
     fireEvent.change(serial, { target: { value: "1FTWW3DR9AEA01459" } });
     if (type === "asset") fireEvent.click(screen.getByRole("button", { name: "Save" }));
-    fireEvent.click(screen.getByRole("button", { name: /save changes/i }));
+    fireEvent.click(screen.getByRole("button", { name: /save & regenerate/i }));
     await waitFor(() => expect(save).toHaveBeenCalledTimes(1));
     const saved = save.mock.calls[0][1];
     expect(saved.lots).toHaveLength(2);
@@ -90,16 +114,16 @@ describe.each(["asset", "lotListing"] as const)("%s preview integrity", (type) =
       ],
     };
     const secondLot = structuredClone(preview.lots[1]);
-    const load = vi.fn().mockImplementation(async () => ({ data: { status: "preview", grouping_mode: "mixed", imageUrls, preview_data: preview } }));
+    const load = vi.fn().mockImplementation(async () => ({ data: { status: "approved", grouping_mode: "mixed", imageUrls, preview_data: preview } }));
     const save = vi.fn().mockImplementation(async (_id, submitted) => {
       preview = submitted;
       return { data: type === "asset" ? submitted : { preview_data: submitted, imageUrls }, imageUrls };
     });
     const Component = type === "asset" ? PreviewModal : LotListingPreviewModal;
-    const props = { isOpen: true, reportId: "deletion-integrity", onClose: vi.fn(), loadPreviewDataOverride: load, updatePreviewDataOverride: save };
+    const props = { isOpen: true, reportId: "deletion-integrity", onClose: vi.fn(), loadPreviewDataOverride: load, resubmitReportOverride: save };
     const view = render(<Component {...props} />);
     fireEvent.click((await screen.findAllByRole("button", { name: "Remove photo 1" }))[0]);
-    fireEvent.click(screen.getByRole("button", { name: /save changes/i }));
+    fireEvent.click(screen.getByRole("button", { name: /save & regenerate/i }));
     await waitFor(() => expect(save).toHaveBeenCalledTimes(1));
     const saved = save.mock.calls[0][1];
     expect(saved.lots[0].image_urls).toEqual([remaining]);

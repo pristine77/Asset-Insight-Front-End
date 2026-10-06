@@ -39,7 +39,7 @@ test('startup, reconnect and refresh never submit queued photos; a lasting disco
   expect(pauseActiveUploads).not.toHaveBeenCalled();
   jest.advanceTimersByTime(DISCONNECT_PAUSE_DELAY_MS);
   expect(pauseActiveUploads).toHaveBeenCalledTimes(1);
-  // Marked as a connection pause, so an open report resumes it by itself.
+  // Marked for feedback only; resume still requires explicit user action.
   expect(pauseActiveUploads).toHaveBeenCalledWith('connection');
 });
 

@@ -166,8 +166,8 @@ const salvageService = {
     return response.data;
   },
 
-  async list(): Promise<SalvageReport[]> {
-    const response = await api.get<{ data: SalvageReport[] }>('/salvage');
+  async list(view?: 'previews'): Promise<SalvageReport[]> {
+    const response = await (view ? api.get<{ data: SalvageReport[] }>('/salvage', { params: { view } }) : api.get<{ data: SalvageReport[] }>('/salvage'));
     return response.data.data;
   },
 

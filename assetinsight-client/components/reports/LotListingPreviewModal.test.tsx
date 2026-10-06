@@ -91,6 +91,24 @@ function makeListingPreview() {
 }
 
 describe("LotListingPreviewModal inspection location", () => {
+  it("submits without FMV or appraisal selections and does not display their required blocks", async () => {
+    const response = makeListingPreview();
+    response.data.preview_data.lots[0].estimated_value = "";
+    response.data.preview_data.lots[0].condition_report_selections = { condition: "", completeness: "", legal: "" };
+    mocks.submitForApproval.mockResolvedValue({ status: "processing", files_generating: true });
+    render(<LotListingPreviewModal isOpen reportId="optional-lot-values" onClose={vi.fn()}
+      loadPreviewDataOverride={vi.fn().mockResolvedValue(response)} />);
+    await screen.findByDisplayValue("LOT-LOCATION-1");
+    expect(screen.queryByText("Required selections")).toBeNull();
+    expect(screen.queryByText(/Set Running Condition for all lots/i)).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Save & Generate" }));
+    await waitFor(() => expect(mocks.submitForApproval).toHaveBeenCalledTimes(1));
+    expect(mocks.submitForApproval.mock.calls[0][1].preview_data.lots[0]).toMatchObject({
+      lot_id: "lot-1", description: "Test description", estimated_value: "",
+      condition_report_selections: { condition: "", completeness: "", legal: "" },
+    });
+  });
+
   it("resubmits an edited failed preview instead of calling the preview-only submit endpoint", async () => {
     const response = makeListingPreview();
     response.data.status = "error";
@@ -100,7 +118,7 @@ describe("LotListingPreviewModal inspection location", () => {
     const contract = await screen.findByDisplayValue("LOT-LOCATION-1");
     expect(screen.getByRole("alert")).toHaveTextContent("saved preview is available");
     fireEvent.change(contract, { target: { value: "93530" } });
-    fireEvent.click(screen.getByRole("button", { name: "Regenerate Approved Files" }));
+    fireEvent.click(screen.getByRole("button", { name: "Save & Regenerate" }));
     await waitFor(() => expect(retry).toHaveBeenCalledWith("failed-lot", expect.objectContaining({ contract_no: "93530" })));
     expect(mocks.submitForApproval).not.toHaveBeenCalled();
   });
@@ -119,7 +137,7 @@ describe("LotListingPreviewModal inspection location", () => {
       status: "approved",
       files_generating: true,
     });
-    mocks.submitForApproval.mockReset();
+    mocks.submitForApproval.mockReset().mockResolvedValue({ status: "processing", files_generating: true });
   });
 
   it("reloads for a mode switch and ignores the older in-flight listing", async () => {
@@ -197,6 +215,7 @@ describe("LotListingPreviewModal inspection location", () => {
       data: { preview_data: response.data.preview_data, imageUrls: [] },
     });
 
+    mocks.submitForApproval.mockImplementation((id, body) => updatePreview(id, body.preview_data));
     render(
       <LotListingPreviewModal
         isOpen
@@ -214,7 +233,7 @@ describe("LotListingPreviewModal inspection location", () => {
       name: "Inspection Location *",
     });
     fireEvent.change(location, { target: { value: "New Inspection Yard" } });
-    fireEvent.click(screen.getByRole("button", { name: /save changes/i }));
+    fireEvent.click(screen.getByRole("button", { name: /save & generate/i }));
 
     await waitFor(() => expect(updatePreview).toHaveBeenCalled());
     const savedPreview = updatePreview.mock.calls[0][1];
@@ -246,7 +265,7 @@ describe("LotListingPreviewModal inspection location", () => {
 
     const contract = await screen.findByDisplayValue("LOT-LOCATION-1");
     fireEvent.change(contract, { target: { value: "LOT-EDITED-1" } });
-    fireEvent.click(screen.getByRole("button", { name: "Save & Submit" }));
+    fireEvent.click(screen.getByRole("button", { name: "Save & Generate" }));
 
     await waitFor(() =>
       expect(mocks.promoteDraftPreview).toHaveBeenCalledWith(
@@ -268,162 +287,57 @@ describe("LotListingPreviewModal inspection location", () => {
     expect(onClose).toHaveBeenCalledTimes(1);
   });
 
-  it("saves Lot Listing draft edits without generating partial hidden CR files", async () => {
-    const response = makeListingPreview();
-    const updatePreview = vi.fn().mockResolvedValue({
-      data: { preview_data: response.data.preview_data, imageUrls: [] },
-    });
-    const refreshSpecPdf = vi.fn();
 
-    render(
-      <LotListingPreviewModal
-        isOpen
-        reportId="hidden-lot-save-only"
-        draftPreviewId="lot-draft-save-only"
-        onClose={vi.fn()}
-        loadPreviewDataOverride={vi.fn().mockResolvedValue(response)}
-        updatePreviewDataOverride={updatePreview}
-        refreshSpecPdfOverride={refreshSpecPdf}
-      />
-    );
-
-    const contract = await screen.findByDisplayValue("LOT-LOCATION-1");
-    fireEvent.change(contract, { target: { value: "LOT-SAVED-ONLY" } });
-    fireEvent.click(screen.getByRole("button", { name: /save changes/i }));
-
-    await waitFor(() => expect(updatePreview).toHaveBeenCalledTimes(1));
-    expect(refreshSpecPdf).not.toHaveBeenCalled();
-    expect(mocks.promoteDraftPreview).not.toHaveBeenCalled();
-  });
-
-  it("serializes Save and Resubmit without starting a second client regeneration", async () => {
+  it("saves and regenerates the latest listing once without separate save or CR requests", async () => {
     const response = makeListingPreview();
     response.data.status = "approved";
-    const pendingSave = deferred<{
-      data: typeof response.data.preview_data;
-      files_regeneration_queued?: boolean;
-    }>();
-    const updatePreview = vi.fn().mockReturnValue(pendingSave.promise);
-    const resubmit = vi.fn();
-    const uploadImages = vi.fn();
-    const refreshSpecPdf = vi.fn();
-    const onClose = vi.fn();
-
-    render(
-      <LotListingPreviewModal
-        isOpen
-        reportId="approved-lot-exclusive-save"
-        onClose={onClose}
-        loadPreviewDataOverride={vi.fn().mockResolvedValue(response)}
-        updatePreviewDataOverride={updatePreview}
-        resubmitReportOverride={resubmit}
-        uploadPreviewLotImagesOverride={uploadImages}
-        refreshSpecPdfOverride={refreshSpecPdf}
-      />
-    );
-
-    const contract = await screen.findByDisplayValue("LOT-LOCATION-1");
-    fireEvent.change(contract, { target: { value: "LOT-LOCKED" } });
-    const saveButton = screen.getByRole("button", { name: /save changes/i });
-    const resubmitButton = screen.getByRole("button", {
-      name: "Regenerate Approved Files",
-    });
-
-    fireEvent.click(saveButton);
-    fireEvent.click(saveButton);
-    fireEvent.click(resubmitButton);
+    const pending = deferred<any>();
+    const resubmit = vi.fn().mockReturnValue(pending.promise);
+    const updatePreview = vi.fn(), refreshSpecPdf = vi.fn(), uploadImages = vi.fn(), onClose = vi.fn();
+    render(<LotListingPreviewModal isOpen reportId="combined-listing" onClose={onClose}
+      loadPreviewDataOverride={vi.fn().mockResolvedValue(response)}
+      updatePreviewDataOverride={updatePreview} resubmitReportOverride={resubmit}
+      uploadPreviewLotImagesOverride={uploadImages} refreshSpecPdfOverride={refreshSpecPdf} />);
+    fireEvent.change(await screen.findByDisplayValue("Test description"), { target: { value: "Complete edited description" } });
+    expect(screen.queryByRole("button", { name: /^Save changes$/i })).toBeNull();
+    const action = screen.getByRole("button", { name: "Save & Regenerate" });
+    fireEvent.click(action); fireEvent.click(action);
     fireEvent.change(document.querySelector('input[type="file"]')!, {
-      target: {
-        files: [new File(["photo"], "locked.jpg", { type: "image/jpeg" })],
-      },
+      target: { files: [new File(["photo"], "locked.jpg", { type: "image/jpeg" })] },
     });
-
-    expect(updatePreview).toHaveBeenCalledTimes(1);
-    expect(resubmit).not.toHaveBeenCalled();
+    expect(resubmit).toHaveBeenCalledTimes(1);
+    expect(resubmit).toHaveBeenCalledWith("combined-listing", expect.objectContaining({
+      lots: [expect.objectContaining({ lot_id: "lot-1", description: "Complete edited description" })],
+    }));
+    expect(updatePreview).not.toHaveBeenCalled();
     expect(uploadImages).not.toHaveBeenCalled();
-    expect(saveButton).toBeDisabled();
-    expect(resubmitButton).toBeDisabled();
+    expect(action).toBeDisabled();
     expect(screen.getByRole("button", { name: "Close panel" })).toBeDisabled();
-    expect(screen.getByRole("status")).toHaveTextContent(
-      "Saving preview changes"
-    );
     expect(document.querySelector(".preview-editor [inert]")).not.toBeNull();
-
-    pendingSave.resolve({
-      data: response.data.preview_data,
-      files_regeneration_queued: true,
-    });
-
-    await waitFor(() => expect(screen.queryByRole("status")).toBeNull());
+    pending.resolve({ status: "processing", files_generating: true });
+    await waitFor(() => expect(onClose).toHaveBeenCalledOnce());
     expect(refreshSpecPdf).not.toHaveBeenCalled();
-    expect(onClose).toHaveBeenCalledOnce();
-    expect(resubmitButton).toBeDisabled();
+    expect(action).toBeDisabled();
   });
 
-  it("keeps the server-normalized listing preview after Save when no newer edit exists", async () => {
+  it("keeps edits and shows the actual generation error for a deliberate retry", async () => {
     const response = makeListingPreview();
-    const canonicalPreview = JSON.parse(JSON.stringify({
-      ...response.data.preview_data,
-      contract_no: "LOT-CANONICAL",
-      location: "Canonical Listing Yard",
-      latitude: undefined,
-      longitude: undefined,
-      lots: [
-        {
-          ...response.data.preview_data.lots[0],
-          title: "Canonical listing title",
-          location: "Canonical Listing Yard",
-          latitude: undefined,
-          longitude: undefined,
-        },
-      ],
-    }));
-    const updatePreview = vi.fn().mockResolvedValue({ data: canonicalPreview });
-    mocks.submitForApproval.mockResolvedValue({
-      ...response.data,
-      status: "processing",
-      files_generating: true,
-      preview_data: canonicalPreview,
-    });
-
-    render(
-      <LotListingPreviewModal
-        isOpen
-        reportId="listing-canonical-save"
-        onClose={vi.fn()}
-        loadPreviewDataOverride={vi.fn().mockResolvedValue(response)}
-        updatePreviewDataOverride={updatePreview}
-      />
-    );
-
-    const contract = await screen.findByDisplayValue("LOT-LOCATION-1");
-    fireEvent.change(contract, { target: { value: "LOT-EDITED-LOCALLY" } });
-    fireEvent.click(screen.getByRole("button", { name: /save changes/i }));
-
-    await waitFor(() => {
-      expect(screen.getByRole("textbox", { name: "Inspection Location *" })).toHaveValue(
-        "Canonical Listing Yard"
-      );
-      expect(screen.getByDisplayValue("LOT-CANONICAL")).toBeInTheDocument();
-    });
-
-    fireEvent.click(screen.getByRole("button", { name: "Generate Approved Files" }));
-    await waitFor(() => expect(mocks.submitForApproval).toHaveBeenCalledTimes(1));
-    const submittedPreview = mocks.submitForApproval.mock.calls[0]?.[1]?.preview_data;
-    expect(submittedPreview).toMatchObject({
-      contract_no: "LOT-CANONICAL",
-      location: "Canonical Listing Yard",
-      lots: [
-        expect.objectContaining({
-          title: "Canonical listing title",
-          location: "Canonical Listing Yard",
-        }),
-      ],
-    });
-    expect(submittedPreview).not.toHaveProperty("latitude");
-    expect(submittedPreview).not.toHaveProperty("longitude");
-    expect(submittedPreview.lots[0]).not.toHaveProperty("latitude");
-    expect(submittedPreview.lots[0]).not.toHaveProperty("longitude");
+    response.data.status = "approved";
+    const resubmit = vi.fn()
+      .mockRejectedValueOnce({ response: { data: { message: "Another file generation is in progress. Try again when it finishes." } } })
+      .mockResolvedValueOnce({ status: "processing" });
+    const onClose = vi.fn();
+    render(<LotListingPreviewModal isOpen reportId="retry-listing" onClose={onClose}
+      loadPreviewDataOverride={vi.fn().mockResolvedValue(response)} resubmitReportOverride={resubmit} />);
+    const description = await screen.findByDisplayValue("Test description");
+    fireEvent.change(description, { target: { value: "Retain this edit" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save & Regenerate" }));
+    await waitFor(() => expect(mocks.toastError).toHaveBeenCalledWith("Another file generation is in progress. Try again when it finishes."));
+    expect(description).toHaveValue("Retain this edit");
+    expect(onClose).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Save & Regenerate" }));
+    await waitFor(() => expect(onClose).toHaveBeenCalledOnce());
+    expect(resubmit.mock.calls[0][1]).toEqual(resubmit.mock.calls[1][1]);
   });
 
   it("submits a dirty listing snapshot once without requiring a file-generating Save", async () => {
@@ -443,7 +357,7 @@ describe("LotListingPreviewModal inspection location", () => {
     const contract = await screen.findByDisplayValue("LOT-LOCATION-1");
     fireEvent.change(contract, { target: { value: "LOT-FINAL-SNAPSHOT" } });
     const submitButton = screen.getByRole("button", {
-      name: "Generate Approved Files",
+      name: "Save & Generate",
     });
     expect(submitButton).toBeEnabled();
 
@@ -459,7 +373,7 @@ describe("LotListingPreviewModal inspection location", () => {
         }),
       })
     );
-    expect(screen.getByRole("button", { name: /save changes/i })).toBeDisabled();
+    expect(submitButton).toBeDisabled();
     expect(screen.getByRole("button", { name: "Close panel" })).toBeDisabled();
 
     pendingSubmit.resolve({

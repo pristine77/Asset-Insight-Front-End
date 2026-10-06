@@ -36,6 +36,35 @@ describe('Google Play production compatibility', () => {
     expect(easConfig.build.production.autoIncrement).toBe(true);
   });
 
+  it('pins the Play AAB and sideload APK to production without loading local dotenv fixtures', () => {
+    const { build } = readJson('eas.json');
+    expect(build.production.environment).toBe('production');
+    expect(build.production.developmentClient).toBe(false);
+    expect(build.production.env).toEqual({
+      EXPO_NO_DOTENV: '1',
+      EXPO_PUBLIC_API_BASE_URL: 'https://api.assetinsightvaluator.com/api',
+    });
+    expect(build.production.android).toMatchObject({ buildType: 'app-bundle', credentialsSource: 'remote' });
+    expect(build['production-apk'].extends).toBe('production');
+    expect(build['production-apk'].android).toMatchObject({ buildType: 'apk', credentialsSource: 'remote' });
+    expect(build['production-apk'].env).toEqual(build.production.env);
+  });
+
+  it('keeps the 1.0.2 marketing version consistent without resetting the remote Android counter', () => {
+    const appConfig = readJson('app.json');
+    const packageJson = readJson('package.json');
+    const lock = readJson('package-lock.json');
+    const gradle = fs.readFileSync(path.join(projectRoot, 'android/app/build.gradle'), 'utf8');
+    expect(appConfig.expo.version).toBe('1.0.2');
+    expect(packageJson.version).toBe(appConfig.expo.version);
+    expect(lock.version).toBe(appConfig.expo.version);
+    expect(lock.packages[''].version).toBe(appConfig.expo.version);
+    expect(gradle).toContain(`versionName "${appConfig.expo.version}"`);
+    expect(gradle).toContain(`versionCode ${appConfig.expo.android.versionCode}`);
+    expect(appConfig.expo.android.versionCode).toBeGreaterThan(3);
+    expect(readJson('eas.json').cli.appVersionSource).toBe('remote');
+  });
+
   it('does not ship the custom APK installer dependency', () => {
     const packageJson = readJson('package.json');
     const appSource = fs.readFileSync(path.join(projectRoot, 'App.tsx'), 'utf8');

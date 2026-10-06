@@ -69,7 +69,7 @@ it('stamps one logo before saving a receipt-bearing camera JPEG with bounded dim
   const { fixture } = jest.requireMock('@shopify/react-native-skia');
   expect(result).toBe('file:///test/camera-photos/test-capture.jpg');
   expect(ImageManipulator.manipulateAsync).toHaveBeenCalledTimes(1);
-  // At most 3000 px on the longest side (cameraPhotoSize.ts, restored 2026-10-03).
+  // Restore the pre-reduction camera dimensions; keep the stamp/receipt flow.
   expect(Skia.Surface.MakeOffscreen).toHaveBeenCalledWith(3000, 2250);
   expect(fixture.snapshot.encodeToBytes).toHaveBeenCalledTimes(1);
   expect(fixture.snapshot.encodeToBytes).toHaveBeenCalledWith('jpeg', 95);
@@ -85,7 +85,7 @@ it('stamps one logo before saving a receipt-bearing camera JPEG with bounded dim
   });
 });
 
-it('limits a portrait photo to 3000 px tall', async () => {
+it('preserves portrait detail with a 3000 px longest side', async () => {
   const { fixture } = jest.requireMock('@shopify/react-native-skia');
   const original = { width: fixture.image.width, height: fixture.image.height };
   fixture.image.width = () => 3024;
@@ -111,7 +111,7 @@ it('does not enlarge a photo smaller than the box', async () => {
   }
 });
 
-it('saves once at quality 95, however large the photo, as before 2026-10-02', async () => {
+it('encodes once at quality 95 even above the former 300 KiB budget', async () => {
   const { fixture } = jest.requireMock('@shopify/react-native-skia');
   const jpegOf = (size: number) => {
     const bytes = new Uint8Array(size);

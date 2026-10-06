@@ -27,11 +27,13 @@ describe("public privacy notice", () => {
     (cookie) => {
       expect(location("/privacy", cookie)).toBeNull();
       expect(location("/privacy?source=google", cookie)).toBeNull();
+      expect(location("/account-deletion", cookie)).toBeNull();
+      expect(location("/account-deletion?source=google-play", cookie)).toBeNull();
       expect(location("/terms/youtube", cookie)).toBeNull();
     },
   );
 
-  it.each(["/privacy-settings", "/privacy/export", "/terms/youtube/settings", "/terms", "/reports", "/previews", "/settings"])(
+  it.each(["/privacy-settings", "/privacy/export", "/account-deletion/settings", "/account-deletion-confirm", "/terms/youtube/settings", "/terms", "/reports", "/previews", "/settings"])(
     "does not make a neighbouring or protected route public: %s",
     (path) => {
       expect(location(path, "")).toBe(`https://app.test/login?next=${encodeURIComponent(path)}`);

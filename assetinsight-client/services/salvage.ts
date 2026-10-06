@@ -128,8 +128,8 @@ export function salvageEditableData(data: SalvagePreviewData): SalvagePreviewDat
 }
 
 export const SalvageService = {
-  async getReports(): Promise<{ data: SalvageReport[] }> {
-    const { data } = await API.get<{ data: SalvageReport[] }>("/salvage");
+  async getReports(view?: "previews"): Promise<{ data: SalvageReport[] }> {
+    const { data } = await (view ? API.get<{ data: SalvageReport[] }>("/salvage", { params: { view }, timeout: 30000 }) : API.get<{ data: SalvageReport[] }>("/salvage"));
     return data;
   },
   async getPreview(id: string): Promise<{ data: SalvageReport }> {

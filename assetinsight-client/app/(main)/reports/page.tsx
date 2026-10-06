@@ -39,6 +39,7 @@ import { ReportThumbnail } from "@/components/reports/ReportThumbnail";
 import { SERVER_BASE } from "@/lib/config";
 import { SalvageService, salvagePreviewPath, salvageStatusPath, salvageIsProcessing, type SalvageReport } from "@/services/salvage";
 import { salvageSystemText } from "@/lib/salvagePresentation";
+import { captureAuthSession, isAuthSessionCurrent, type AuthSessionSnapshot } from "@/lib/auth-storage";
 
 const AssetMergeDialog = dynamic(
   () => import("@/components/reports/AssetMergeDialog"),
@@ -146,6 +147,8 @@ function auctioneerDeliveryPresentation(
         ? delivery.contractTaskCompleted ||
           delivery.contractCompletionScope === "contract"
           ? "Sent · contract complete"
+          : delivery.contractCloseUserStatus === "revoked"
+            ? "Sent · assignment removed"
           : "Sent · your part closed"
         : "Sent",
       color: "var(--app-success)",
@@ -528,6 +531,16 @@ export default function ReportsPage() {
   const [deliveryDialogItem, setDeliveryDialogItem] =
     useState<AuctioneerDeliverySummary | null>(null);
   const [closingContractId, setClosingContractId] = useState<string | null>(null);
+  const closeFlightRef = useRef<symbol | null>(null);
+  const deliveryRevisionRef = useRef(0);
+  const deliverySessionRef = useRef<AuthSessionSnapshot | null>(null);
+  const closeMountedRef = useRef(true);
+  const currentOwnerRef = useRef(user?._id);
+  currentOwnerRef.current = user?._id;
+  useEffect(() => {
+    closeMountedRef.current = true;
+    return () => { closeMountedRef.current = false; };
+  }, []);
   const loadingReportsRef = useRef(false);
   const retryingKeysRef = useRef(new Set<string>());
   const [retryingKeys, setRetryingKeys] = useState<ReadonlySet<string>>(() => new Set());
@@ -554,6 +567,9 @@ export default function ReportsPage() {
   ) => {
     if (loadingReportsRef.current) return false;
     loadingReportsRef.current = true;
+    const deliveryRevision = deliveryRevisionRef.current;
+    const deliverySession = captureAuthSession();
+    const deliveryOwner = currentOwnerRef.current;
     const showFullLoading = options.showLoading === true;
     try {
       if (showFullLoading) {
@@ -615,7 +631,11 @@ export default function ReportsPage() {
             isFileGenerationActive(report)
           )
       );
-      setAuctioneerDeliveries(deliveryResponse);
+      if (!closeFlightRef.current && deliveryRevision === deliveryRevisionRef.current &&
+        deliveryOwner === currentOwnerRef.current && isAuthSessionCurrent(deliverySession)) {
+        deliverySessionRef.current = deliverySession;
+        setAuctioneerDeliveries(deliveryResponse);
+      }
       setSalvageReports(salvageResponse?.data || []);
       setError(null);
       if (options.successToast) {
@@ -672,7 +692,14 @@ export default function ReportsPage() {
 
   async function handleCloseContractPart(delivery: AuctioneerDeliverySummary) {
     const contractId = delivery.contractId;
-    if (!contractId || closingContractId) return;
+    const ownerId = user?._id;
+    if (!contractId || !ownerId || closeFlightRef.current || !canCloseContractPart(delivery)) return;
+    if (!deliverySessionRef.current || !isAuthSessionCurrent(deliverySessionRef.current)) {
+      toast.error("Your account session changed. Refresh Reports before closing your part of a contract.");
+      return;
+    }
+    const session = captureAuthSession();
+    const isCurrent = () => closeMountedRef.current && currentOwnerRef.current === ownerId && isAuthSessionCurrent(session);
     const label = delivery.contractNo
       ? `contract ${delivery.contractNo}`
       : "this contract";
@@ -683,9 +710,14 @@ export default function ReportsPage() {
     ) {
       return;
     }
+    if (!isCurrent()) return;
+    const flight = Symbol("close-contract-part");
+    closeFlightRef.current = flight;
+    deliveryRevisionRef.current += 1;
     try {
       setClosingContractId(contractId);
       const result = await AuctioneerService.closeContractPart(contractId);
+      if (!isCurrent()) return;
       // The server records the close on every one of this user's assigned
       // deliveries for the contract, so every such row changes, not just this
       // one. Older whole-contract rows are not parts and keep their own state.
@@ -695,8 +727,9 @@ export default function ReportsPage() {
           item.contractCompletionScope === "user"
             ? {
                 ...item,
-                contractClosedAt: result.closedAt || new Date().toISOString(),
+                contractClosedAt: result.closedAt,
                 contractTaskCompleted: result.taskCompleted,
+                contractCloseUserStatus: result.userStatus === "revoked" ? "revoked" : result.userStatus === "completed" ? "completed" : undefined,
               }
             : item
         )
@@ -715,12 +748,19 @@ export default function ReportsPage() {
         );
       }
     } catch (closeError: any) {
-      toast.error(
-        closeError?.response?.data?.message ||
-          "Your part of the contract could not be closed. Try again."
-      );
+      if (!isCurrent()) return;
+      const serverMessage = closeError?.response?.data?.message;
+      toast.error(typeof serverMessage === "string" && serverMessage.trim()
+        ? serverMessage.trim()
+        : closeError instanceof Error && !closeError.name.includes("Axios") && !/network|status code|timeout/i.test(closeError.message)
+          ? closeError.message
+          : "Your contract completion could not be confirmed. Refresh Reports to check its status before trying again.");
     } finally {
-      setClosingContractId(null);
+      if (closeFlightRef.current === flight) {
+        closeFlightRef.current = null;
+        deliveryRevisionRef.current += 1;
+        if (closeMountedRef.current) setClosingContractId(null);
+      }
     }
   }
 
@@ -1252,7 +1292,7 @@ export default function ReportsPage() {
     */
     const partClosesByContract = new Map<
       string,
-      { closedAt: string; taskCompleted: boolean }
+      { closedAt: string; taskCompleted: boolean; userStatus?: "completed" | "revoked" }
     >();
     for (const delivery of auctioneerDeliveries) {
       if (
@@ -1268,6 +1308,7 @@ export default function ReportsPage() {
         taskCompleted: Boolean(
           known?.taskCompleted || delivery.contractTaskCompleted
         ),
+        userStatus: delivery.contractCloseUserStatus || known?.userStatus,
       });
     }
 
@@ -1284,6 +1325,7 @@ export default function ReportsPage() {
             ...delivery,
             contractClosedAt: delivery.contractClosedAt || partClose.closedAt,
             contractTaskCompleted: partClose.taskCompleted,
+            contractCloseUserStatus: partClose.userStatus,
           }
         : delivery;
     }
@@ -1732,10 +1774,10 @@ export default function ReportsPage() {
             ) : (
               <CircleCheck className="size-3.5 shrink-0 text-[var(--app-success)]" />
             )}
-            <span className="truncate">
+            <span className="min-w-0 whitespace-normal">
               {closingContractId === delivery.contractId
                 ? "Closing…"
-                : "Close my part of this contract"}
+                : "Close my part"}
             </span>
           </button>
         ) : null}
@@ -2026,7 +2068,7 @@ export default function ReportsPage() {
         <>
           <ul className="divide-y divide-[var(--app-border)] overflow-hidden rounded-lg border border-[var(--app-border)] bg-[var(--app-panel)] shadow-[var(--app-shadow-card)] min-[1440px]:hidden">
             {paginatedGroups.map((group) => {
-              const { status, title, subtitle, thumbnailTitle } =
+              const { status, deliveryStatus, title, subtitle, thumbnailTitle } =
                 reportPresentation(group);
               return (
                 <li
@@ -2064,6 +2106,11 @@ export default function ReportsPage() {
                       {status.label}
                     </span>
                   </div>
+                  {deliveryStatus ? (
+                    <p className="mt-2 break-words text-xs font-medium" style={{ color: deliveryStatus.color }}>
+                      {deliveryStatus.label}
+                    </p>
+                  ) : null}
 
                   <div className="mt-3.5 flex flex-col gap-3 border-t border-[var(--app-border)] pt-3 sm:flex-row sm:items-end sm:justify-between">
                     <div className="grid grid-cols-2 gap-x-8 gap-y-3">

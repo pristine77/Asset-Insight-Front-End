@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
@@ -20,6 +20,8 @@ import AssetMergeSheet from '../components/AssetMergeSheet';
 import { useAppTheme, type AppThemeColors } from '../context/ThemeContext';
 import salvageService from '../services/salvageService';
 import { salvageDisplayText } from '../utils/salvageDisplayText';
+import { previewLoadError } from '../services/previewLoadError';
+import { getAuthOperationEpoch } from '../services/authSessionOperation';
 
 type ReportType = 'Asset' | 'RealEstate' | 'LotListing' | 'Salvage';
 type PreviewMode = 'pending' | 'submitted';
@@ -90,21 +92,40 @@ const PreviewsScreen = ({
   const [draftActionId, setDraftActionId] = useState<string | null>(null);
   const [mergeAnchorId, setMergeAnchorId] = useState<string | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
+  const loadingRef = useRef(false);
+  const mountedRef = useRef(true);
+  const [lastLoadedAt, setLastLoadedAt] = useState<Date | null>(null);
 
   const fetchItems = useCallback(async () => {
+    if (loadingRef.current) return;
+    loadingRef.current = true;
+    const epoch = getAuthOperationEpoch();
+    const current = () => mountedRef.current && epoch === getAuthOperationEpoch();
     try {
-      setLoadError(null);
-      const [assetReports, realEstateResponse, lotListingResponse, drafts, salvageReports] = await Promise.all([
-        assetService.getAssetReports(),
-        api.get('/real-estate'),
-        api.get('/lot-listing').catch(() => ({ data: { data: [] } })),
-        reportDraftService.list().catch(() => []),
-        salvageService.list(),
+      const rows = async (promise: Promise<any>, envelope = false, drafts = false) => {
+        const value = await promise;
+        const data = envelope ? value?.data?.data : value;
+        if (!Array.isArray(data) || data.some(item => !item || typeof item !== 'object' ||
+          (drafts ? typeof (item.id || item._id) !== 'string' : typeof item._id !== 'string' || typeof item.status !== 'string'))) throw new Error('Incomplete preview response');
+        return data;
+      };
+      const results = await Promise.allSettled([
+        rows(assetService.getAssetReports('previews')),
+        rows(api.get('/real-estate', { params: { view: 'previews' } }), true),
+        rows(api.get('/lot-listing', { params: { view: 'previews' } }), true),
+        rows(reportDraftService.list(), false, true),
+        rows(salvageService.list('previews')),
       ]);
+      if (!current()) return;
+      const [assetReports, realEstateReports, lotListingReports, drafts, salvageReports] = results.map(result => result.status === 'fulfilled' ? result.value : []);
+      const labels = ['Asset', 'Real Estate', 'Lot Listing', 'Drafts', 'Salvage'];
+      const kinds = ['Asset', 'RealEstate', 'LotListing', 'Drafts', 'Salvage'];
+      const succeeded = new Set(results.flatMap((result, index) => result.status === 'fulfilled' ? [kinds[index]] : []));
+      const issues = results.flatMap((result, index) => result.status === 'rejected' ? [`${labels[index]}: ${previewLoadError(result.reason)}`] : []);
+      setLoadError(issues.length ? issues.join('\n') : null);
+      if (!issues.length) setLastLoadedAt(new Date());
 
       const next: PreviewItem[] = [];
-      const realEstateReports = realEstateResponse.data?.data || [];
-      const lotListingReports = lotListingResponse.data?.data || [];
 
       for (const report of assetReports) {
         if (!report?._id) continue;
@@ -124,22 +145,22 @@ const PreviewsScreen = ({
           jobError: report.job_error,
           wasSubmitted: Boolean(
             report.status === 'pending_approval' ||
-              report.status === 'approved' ||
+            report.status === 'approved' ||
+              ['approved', 'pending_approval'].includes((report as any).generation_target_status) ||
               (report as any).preview_submitted_at ||
               (report as any).approval_requested_at
           ),
           wasTransferred: Boolean(report.preview_transferred_at),
           isMergedReport: report.is_merged_report === true,
-          mergedSourceCount: Array.isArray(report.merged_from_report_ids)
+          mergedSourceCount: (report as any).merged_source_count ?? (Array.isArray(report.merged_from_report_ids)
             ? report.merged_from_report_ids.length
-            : 0,
+            : 0),
         });
       }
 
       for (const report of realEstateReports) {
         if (!report?._id) continue;
         if (!['processing', 'error', 'preview', 'declined', 'pending_approval', 'approved'].includes(report.status)) continue;
-        if (report.status === 'approved' && report.files_ready === true) continue;
         next.push({
           id: report._id,
           type: 'RealEstate',
@@ -159,6 +180,7 @@ const PreviewsScreen = ({
           wasSubmitted: Boolean(
             report.status === 'pending_approval' ||
               report.status === 'approved' ||
+              ['approved', 'pending_approval'].includes(report.generation_target_status) ||
               report.preview_submitted_at ||
               report.approval_requested_at
           ),
@@ -200,12 +222,12 @@ const PreviewsScreen = ({
           title: report.file_number || 'Salvage report', createdAt: report.createdAt || '',
           generationState: report.generation_state, workflowStage: report.workflow_stage,
           workflowMessage: salvageDisplayText(report.workflow_message), workflowProgressPercent: report.workflow_progress_percent,
-          jobError: salvageDisplayText(report.job_error), wasSubmitted: ['approved', 'pending_approval', 'declined'].includes(report.status) || report.workflow_stage === 'generating_files',
+          jobError: salvageDisplayText(report.job_error), wasSubmitted: ['approved', 'pending_approval'].includes(report.status) || report.workflow_stage === 'generating_files' || report.generation_kind === 'files',
         });
       }
       next.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
-      setItems(next);
-      setDraftItems(
+      setItems(previous => [...previous.filter(item => !succeeded.has(item.type)), ...next].sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()));
+      if (succeeded.has('Drafts')) setDraftItems(
         [...drafts].sort(
           (a, b) =>
             new Date(b.updatedAt || b.createdAt).getTime() -
@@ -213,16 +235,17 @@ const PreviewsScreen = ({
         )
       );
     } catch (error) {
-      console.error('[Previews] Failed to fetch:', error);
-      setLoadError('Previews could not be loaded. Check your connection and try again.');
+      if (current()) setLoadError(previewLoadError(error));
     } finally {
-      setLoading(false);
-      setRefreshing(false);
+      loadingRef.current = false;
+      if (current()) { setLoading(false); setRefreshing(false); }
     }
   }, []);
 
   useEffect(() => {
+    mountedRef.current = true;
     void fetchItems();
+    return () => { mountedRef.current = false; };
   }, [fetchItems]);
 
   useEffect(() => {
@@ -284,13 +307,13 @@ const PreviewsScreen = ({
 
   useEffect(() => {
     if (activeJobCount === 0) return;
-    const interval = setInterval(() => void fetchItems(), 10_000);
+    const interval = setInterval(() => { if (AppState.currentState === 'active') void fetchItems(); }, 10_000);
     return () => clearInterval(interval);
   }, [activeJobCount, fetchItems]);
 
   useEffect(() => {
     if (activeJobCount > 0) return;
-    const interval = setInterval(() => void fetchItems(), 60_000);
+    const interval = setInterval(() => { if (AppState.currentState === 'active') void fetchItems(); }, 60_000);
     return () => clearInterval(interval);
   }, [activeJobCount, fetchItems]);
 
@@ -735,17 +758,17 @@ const PreviewsScreen = ({
 
         <View style={styles.queueSummary}>
           <View style={styles.queueSummaryItem}>
-            <Text style={styles.queueSummaryValue}>{pendingItems.length}</Text>
+            <Text style={styles.queueSummaryValue}>{loading || loadError ? (pendingItems.length ? `${pendingItems.length}*` : '—') : pendingItems.length}</Text>
             <Text style={styles.queueSummaryLabel}>New previews</Text>
           </View>
           <View style={styles.queueSummaryDivider} />
           <View style={styles.queueSummaryItem}>
-            <Text style={styles.queueSummaryValue}>{submittedItems.length}</Text>
+            <Text style={styles.queueSummaryValue}>{loading || loadError ? (submittedItems.length ? `${submittedItems.length}*` : '—') : submittedItems.length}</Text>
             <Text style={styles.queueSummaryLabel}>Submitted</Text>
           </View>
           <View style={styles.queueSummaryDivider} />
           <View style={styles.queueSummaryItem}>
-            <Text style={styles.queueSummaryValue}>{draftItems.length}</Text>
+            <Text style={styles.queueSummaryValue}>{loading || loadError ? (draftItems.length ? `${draftItems.length}*` : '—') : draftItems.length}</Text>
             <Text style={styles.queueSummaryLabel}>Draft previews</Text>
           </View>
         </View>
@@ -757,6 +780,8 @@ const PreviewsScreen = ({
           <Text style={styles.backButtonText}>Dashboard</Text>
         </TouchableOpacity>
         <TouchableOpacity
+          accessibilityRole="button"
+          accessibilityLabel="Refresh previews"
           onPress={onRefresh}
           disabled={refreshing || loading}
           style={styles.refreshButton}
@@ -777,7 +802,7 @@ const PreviewsScreen = ({
           <Text style={[styles.segmentText, activeTab === 'pending' && styles.segmentTextActive]}>New</Text>
           <View style={[styles.segmentCount, activeTab === 'pending' && styles.segmentCountActive]}>
             <Text style={[styles.segmentCountText, activeTab === 'pending' && styles.segmentCountTextActive]}>
-              {pendingItems.length}
+              {loading || loadError ? (pendingItems.length ? `${pendingItems.length}*` : '—') : pendingItems.length}
             </Text>
           </View>
         </TouchableOpacity>
@@ -788,7 +813,7 @@ const PreviewsScreen = ({
           <Text style={[styles.segmentText, activeTab === 'submitted' && styles.segmentTextActive]}>Submitted</Text>
           <View style={[styles.segmentCount, activeTab === 'submitted' && styles.segmentCountActive]}>
             <Text style={[styles.segmentCountText, activeTab === 'submitted' && styles.segmentCountTextActive]}>
-              {submittedItems.length}
+              {loading || loadError ? (submittedItems.length ? `${submittedItems.length}*` : '—') : submittedItems.length}
             </Text>
           </View>
         </TouchableOpacity>
@@ -799,7 +824,7 @@ const PreviewsScreen = ({
           <Text style={[styles.segmentText, activeTab === 'drafts' && styles.segmentTextActive]}>Drafts</Text>
           <View style={[styles.segmentCount, activeTab === 'drafts' && styles.segmentCountActive]}>
             <Text style={[styles.segmentCountText, activeTab === 'drafts' && styles.segmentCountTextActive]}>
-              {draftItems.length}
+              {loading || loadError ? (draftItems.length ? `${draftItems.length}*` : '—') : draftItems.length}
             </Text>
           </View>
         </TouchableOpacity>
@@ -807,13 +832,14 @@ const PreviewsScreen = ({
 
       {loadError ? (
         <View style={styles.loadErrorPanel}>
-          <Feather name="wifi-off" size={17} color={colors.danger} />
-          <Text style={styles.loadErrorText}>{loadError}</Text>
-          <TouchableOpacity onPress={onRefresh} style={styles.retryButton}>
+          <Feather name="alert-circle" size={17} color={colors.danger} />
+          <Text accessibilityRole="alert" style={styles.loadErrorText}>{loadError}{'\n'}Available previews remain below. Counts marked * are last loaded and may be out of date.</Text>
+          <TouchableOpacity accessibilityRole="button" accessibilityLabel="Retry loading previews" onPress={onRefresh} disabled={refreshing || loading} style={styles.retryButton}>
             <Text style={styles.retryButtonText}>Retry</Text>
           </TouchableOpacity>
         </View>
       ) : null}
+      {lastLoadedAt ? <Text style={styles.emptySubtitle}>Last complete refresh: {lastLoadedAt.toLocaleTimeString()}</Text> : null}
     </>
   );
 
@@ -846,19 +872,22 @@ const PreviewsScreen = ({
                 />
               </View>
               <Text style={styles.emptyTitle}>
-                {activeTab === 'pending'
+                {loadError ? 'Preview list unavailable' : activeTab === 'pending'
                   ? 'No new previews'
                   : activeTab === 'submitted'
                     ? 'No submitted previews'
                     : 'No saved draft previews'}
               </Text>
               <Text style={styles.emptySubtitle}>
-                {activeTab === 'pending'
+                {loadError ? 'Retry loading above. Your saved reports and photos are unchanged.' : activeTab === 'pending'
                   ? 'New report previews and processing updates will appear here.'
                   : activeTab === 'submitted'
                     ? 'Reports move here as soon as they are submitted.'
                     : 'Use Save Draft & Create Preview in an Asset or Lot Listing form.'}
               </Text>
+              {activeTab === 'pending' && submittedItems.length > 0 ? <TouchableOpacity accessibilityRole="button" onPress={() => setActiveTab('submitted')} style={styles.backButton}>
+                <Text style={styles.backButtonText}>View submitted previews ({submittedItems.length})</Text>
+              </TouchableOpacity> : null}
             </View>
           }
           contentContainerStyle={styles.listContent}

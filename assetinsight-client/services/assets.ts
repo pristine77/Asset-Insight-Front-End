@@ -299,8 +299,8 @@ export const declineReport = async (
 /**
  * Get all asset reports
  */
-export const getAssetReports = async (): Promise<{ message: string; data: AssetReport[] }> => {
-  const { data } = await API.get<{ message: string; data: AssetReport[] }>(`/asset`);
+export const getAssetReports = async (view?: "previews"): Promise<{ message: string; data: AssetReport[] }> => {
+  const { data } = await API.get<{ message: string; data: AssetReport[] }>(`/asset`, view ? { params: { view }, timeout: 30000 } : undefined);
   return data;
 };
 

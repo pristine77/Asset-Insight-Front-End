@@ -3,6 +3,24 @@ import { describe, expect, it } from "vitest";
 import PrivacyPage, { metadata } from "./page";
 
 describe("public privacy notice", () => {
+  it("covers the web/mobile account, report, media, CRM and offline operational data used by the service", () => {
+    render(<PrivacyPage />);
+    for (const heading of ["Account and profile information", "Reports, photos and videos", "Camera, microphone, photos and location permissions", "CRM and support information", "Offline work and operational activity", "Service providers and optional sharing", "Report records and retention"]) {
+      expect(screen.getByRole("heading", { name: heading })).toBeInTheDocument();
+    }
+    expect(screen.getByText(/Offline photographs are not cloud-backed up/)).toHaveTextContent("does not automatically upload offline photos or submit a report");
+    expect(screen.getByText(/Optional location access can add location information/)).toBeInTheDocument();
+    expect(screen.getByText(/Optional Outlook exports send selected CRM task details/)).toBeInTheDocument();
+  });
+
+  it("links public account/data deletion instructions without implying all associated records are purged", () => {
+    render(<PrivacyPage />);
+    expect(screen.getByRole("link", { name: "How to delete your account and request data removal" })).toHaveAttribute("href", "/account-deletion");
+    expect(screen.getByRole("link", { name: "Account and data deletion" })).toHaveAttribute("href", "#account-and-data-deletion");
+    expect(screen.getByText(/Account deletion does not automatically purge report or cloud-draft data/)).toHaveTextContent("no automatic expiry");
+    expect(screen.getByText(/Account deletion does not automatically purge report or cloud-draft data/)).toHaveTextContent("not confirmation that removal has completed");
+  });
+
   it("renders device and YouTube disclosures without authentication or a consent form", () => {
     render(<PrivacyPage />);
     expect(screen.getByRole("heading", { level: 1, name: "Asset Insight privacy notice" })).toBeInTheDocument();

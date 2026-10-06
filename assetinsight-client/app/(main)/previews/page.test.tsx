@@ -44,11 +44,13 @@ vi.mock("next/dynamic", () => ({
       reportId,
       isResubmitMode,
       draftPreviewId,
+      onSuccess,
     }: {
       isOpen?: boolean;
       reportId?: string;
       isResubmitMode?: boolean;
       draftPreviewId?: string;
+      onSuccess?: (report: unknown) => void;
     }) {
       if (!isOpen) return null;
       if (componentIndex === 1) {
@@ -58,7 +60,7 @@ vi.mock("next/dynamic", () => ({
             aria-label={`Asset preview editor: ${reportId}`}
             data-resubmit={isResubmitMode}
             data-draft-preview-id={draftPreviewId}
-          />
+          ><button onClick={() => onSuccess?.({ _id: reportId, status: "processing", generation_target_status: "approved" })}>Complete fixture submission</button></div>
         );
       }
       if (componentIndex === 2) {
@@ -188,6 +190,7 @@ describe("Preview queue affordances", () => {
   });
 
   beforeEach(() => {
+    mocks.getSalvageReports.mockReset().mockResolvedValue({ data: [] });
     mocks.getAssetReports.mockReset().mockResolvedValue({
       data: [assetPreview],
     });
@@ -207,6 +210,66 @@ describe("Preview queue affordances", () => {
 
   afterEach(() => {
     window.history.replaceState({}, "", "/");
+  });
+
+  it("keeps successful report types visible and exposes a server failure instead of a false empty queue", async () => {
+    mocks.getAssetReports.mockRejectedValue({ response: { status: 503 } });
+    render(<PreviewsPage />);
+    expect(await screen.findByRole("alert")).toHaveTextContent("Asset: The server could not load");
+    expect(screen.getByRole("button", { name: /Preview Lot Listing report/ })).toBeVisible();
+    expect(screen.queryByText("No new previews")).not.toBeInTheDocument();
+    expect(mocks.getSubmittedReports).not.toHaveBeenCalled();
+    expect(mocks.getSubmittedLotListings).not.toHaveBeenCalled();
+    mocks.getAssetReports.mockResolvedValue({ data: [assetPreview] });
+    fireEvent.click(screen.getByRole("button", { name: "Retry loading previews" }));
+    expect(await screen.findByRole("button", { name: /Preview Asset report/ })).toBeVisible();
+    await waitFor(() => expect(screen.queryByRole("alert")).not.toBeInTheDocument());
+  });
+
+  it("retains a previously loaded list after timeout and does not label it deleted or empty", async () => {
+    render(<PreviewsPage />);
+    await screen.findByRole("button", { name: /Preview Lot Listing report/ });
+    mocks.getLotListings.mockRejectedValue({ code: "ECONNABORTED" });
+    fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("request timed out");
+    expect(screen.getByRole("button", { name: /Preview Lot Listing report/ })).toBeVisible();
+  });
+
+  it("keeps five simultaneous processing uploads visible in New and their accepted successors in Submitted", async () => {
+    const rows = Array.from({ length: 5 }, (_, index) => ({ ...lotListingPreview, _id: `new-${index}`, files_generating: true, workflow_stage: "preparing_preview" }));
+    mocks.getAssetReports.mockResolvedValue({ data: [] });
+    mocks.getLotListings.mockResolvedValue({ data: rows });
+    render(<PreviewsPage />);
+    expect(await screen.findByRole("tab", { name: "New (5)" })).toBeVisible();
+    mocks.getLotListings.mockResolvedValue({ data: rows.map(row => ({ ...row, generation_target_status: "approved", workflow_stage: "generating_files" })) });
+    fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
+    fireEvent.click(await screen.findByRole("button", { name: "View submitted previews (5)" }));
+    expect(screen.getByRole("tab", { name: "Submitted (5)" })).toHaveAttribute("aria-selected", "true");
+    expect(screen.getAllByText(/Generating files/).length).toBeGreaterThanOrEqual(5);
+  });
+
+  it.each([{ message: "incomplete" }, { data: [null] }])("reports malformed list responses and preserves the previous list: %j", async (response) => {
+    render(<PreviewsPage />);
+    await screen.findByRole("button", { name: /Preview Asset report/ });
+    mocks.getAssetReports.mockResolvedValue(response);
+    fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("could not be read");
+    expect(screen.getByRole("button", { name: /Preview Asset report/ })).toBeVisible();
+  });
+
+  it("discards a poll started before submission and reloads the accepted report into Submitted", async () => {
+    render(<PreviewsPage />);
+    await screen.findByRole("button", { name: /Preview Asset report/ });
+    let finishOld!: (value: any) => void;
+    mocks.getAssetReports.mockImplementationOnce(() => new Promise(resolve => { finishOld = resolve; }));
+    fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
+    fireEvent.click(screen.getByRole("button", { name: /Preview Asset report/ }));
+    mocks.getAssetReports.mockResolvedValue({ data: [{ ...assetPreview, preview_submitted_at: "2026-10-02T12:00:00Z", generation_target_status: "approved" }] });
+    fireEvent.click(await screen.findByRole("button", { name: "Complete fixture submission" }));
+    finishOld({ data: [assetPreview] });
+    await waitFor(() => expect(screen.getByRole("tab", { name: "Submitted (1)" })).toHaveAttribute("aria-selected", "true"));
+    await waitFor(() => expect(mocks.getAssetReports).toHaveBeenCalledTimes(3));
+    expect(screen.getByRole("tab", { name: "New (1)" })).toBeVisible();
   });
 
   it("keeps an Asset preview action visible and opens the exact lazy editor", async () => {

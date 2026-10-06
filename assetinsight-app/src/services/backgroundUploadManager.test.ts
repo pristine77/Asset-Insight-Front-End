@@ -28,7 +28,6 @@ import OfflineCaptureStore from './offlineCaptureStore';
 import OfflineQueueService from './offlineQueueService';
 import AutoSaveService, { type OfflineReportDraft } from './autoSaveService';
 import { prepareOfflineSubmission } from './offlineSubmissionService';
-import { waitForStableConnection } from './uploadAutoResume';
 import type { DirectUploadProgressCallback, DirectUploadProgressStage } from './directR2UploadService';
 
 let mockOwner: string | null = 'owner';
@@ -45,11 +44,6 @@ jest.mock('./offlineQueueService', () => ({ __esModule: true, default: {
   getSubmissionError: jest.fn((error: unknown) => jest.requireActual('./connectivityService').getSubmissionError(error)),
 } }));
 jest.mock('./autoSaveService', () => ({ __esModule: true, default: { cleanupOrphanedMedia: jest.fn(async () => 0) } }));
-// The wait for a steady connection is driven by each test (see signalWaits).
-jest.mock('./uploadAutoResume', () => ({
-  ...jest.requireActual('./uploadAutoResume'),
-  waitForStableConnection: jest.fn(),
-}));
 
 const setSubmissionState = jest.mocked(OfflineCaptureStore.setSubmissionState);
 
@@ -104,12 +98,6 @@ function job(name: string) {
   return { draftId, request, ...fake };
 }
 
-/** Each wait for a steady connection ends when the test says the signal is back. */
-function signalWaits() {
-  const waits: Array<{ signal: AbortSignal; ready: (value: boolean) => void }> = [];
-  jest.mocked(waitForStableConnection).mockImplementation(({ signal }) => new Promise<boolean>((resolve) => { waits.push({ signal, ready: resolve }); }));
-  return waits;
-}
 
 const networkError = () => Object.assign(new Error('Network Error'), { code: 'ERR_NETWORK' });
 const activeReport = () => ({ response: { status: 409, data: { code: 'ACTIVE_REPORT_EXISTS' } }, message: 'Request failed with status code 409' });
@@ -124,8 +112,6 @@ beforeEach(() => {
   setUploadOwner('owner');
   setSubmissionState.mockReset().mockResolvedValue(undefined as any);
   jest.mocked(OfflineQueueService.getConnectivityStatus).mockResolvedValue({ status: 'online' } as any);
-  // By default the signal never comes back during a test.
-  jest.mocked(waitForStableConnection).mockReset().mockImplementation(() => new Promise<boolean>(() => {}));
   manager = createBackgroundUploadManager();
 });
 afterEach(() => { manager.resetForTests(); });
@@ -174,8 +160,7 @@ describe('the line', () => {
     expect(manager.statusFor(a.draftId)).toBeUndefined();
   });
 
-  it('refuses a draft that is already uploading, waiting in line or waiting for signal', async () => {
-    signalWaits();
+  it('refuses active or queued duplicates and permits an explicit new attempt after pause', async () => {
     const [a, b] = ['a', 'b'].map(job);
     expect(manager.enqueue(a.request)).toBe(true);
     expect(manager.enqueue(a.request)).toBe(false);
@@ -184,11 +169,10 @@ describe('the line', () => {
     await flush();
     a.last().fail(networkError());
     await flush();
-    expect(snapshot().active).toMatchObject({ draftId: a.draftId, status: 'waiting' });
-    expect(manager.enqueue(a.request)).toBe(false);
-    expect(manager.isBusy(a.draftId) && manager.isBusy(b.draftId)).toBe(true);
+    expect(snapshot().held).toEqual([expect.objectContaining({ draftId: a.draftId, status: 'paused' })]);
+    expect(manager.isBusy(a.draftId)).toBe(false);
+    expect(manager.isBusy(b.draftId)).toBe(true);
     // Once paused, the draft belongs to the person again; a new Submit replaces the paused entry.
-    manager.pause(activeId());
     expect(manager.isBusy(a.draftId)).toBe(false);
     expect(manager.enqueue(a.request)).toBe(true);
     expect(snapshot().held).toEqual([]);
@@ -219,7 +203,6 @@ describe('Pause and Resume in the bar', () => {
     expect(b.upload).toHaveBeenCalledTimes(1);
     expect(b.last().operation.isActive()).toBe(true);
     expect(formUpload.isActive()).toBe(true);
-    expect(waitForStableConnection).not.toHaveBeenCalled();
   });
 
   it('puts a resumed upload at the end of the line, as the person\'s own action', async () => {
@@ -279,6 +262,42 @@ describe('Pause and Resume in the bar', () => {
     expect(b.upload).toHaveBeenCalledTimes(1);
   });
 
+  it('settles Pause even when ready and paused state writes never answer', async () => {
+    const [a, b] = ['a', 'b'].map(job);
+    let finishReady!: () => void;
+    setSubmissionState.mockImplementation((id, state) => {
+      if (id === a.draftId && state === 'ready') return new Promise(resolve => { finishReady = resolve as () => void; });
+      if (id === a.draftId && state === 'paused') return new Promise(() => {});
+      return Promise.resolve(undefined as any);
+    });
+    manager.enqueue(a.request); manager.enqueue(b.request);
+    await flush();
+    expect(finishReady).toBeDefined();
+    expect(manager.pause(activeId())).toBe(true);
+    await flush();
+    expect(snapshot().held).toEqual([expect.objectContaining({ draftId: a.draftId, status: 'paused' })]);
+    expect(b.upload).toHaveBeenCalledTimes(1);
+    expect(a.upload).not.toHaveBeenCalled();
+    // A late local write cannot authorize transport or remove the held draft.
+    finishReady();
+    await flush();
+    expect(a.upload).not.toHaveBeenCalled();
+    expect(snapshot().held[0]).toMatchObject({ draftId: a.draftId, status: 'paused' });
+  });
+
+  it('bounds a stalled local ready write without sending any originals', async () => {
+    jest.useFakeTimers();
+    try {
+      const a = job('a');
+      setSubmissionState.mockImplementation((_id, state) => state === 'ready' ? new Promise(() => {}) : Promise.resolve(undefined as any));
+      manager.enqueue(a.request);
+      await jest.advanceTimersByTimeAsync(30_001);
+      expect(a.upload).not.toHaveBeenCalled();
+      expect(snapshot().active).toBeNull();
+      expect(snapshot().held).toEqual([expect.objectContaining({ draftId: a.draftId, status: 'paused' })]);
+    } finally { jest.useRealTimers(); }
+  });
+
   // 2026-10-01: pausing during "Finalizing" threw away the server's acceptance.
   it('refuses Pause while the submission is being finalized', async () => {
     const a = job('a');
@@ -295,7 +314,7 @@ describe('Pause and Resume in the bar', () => {
     expect(setSubmissionState).not.toHaveBeenCalledWith(a.draftId, 'paused', expect.anything(), expect.anything());
   });
 
-  it('leaves a finalizing submission alone when Offline is chosen on a new report', async () => {
+  it('preserves an uncertain finalizing draft after an explicit Offline choice', async () => {
     const a = job('a');
     manager.enqueue(a.request);
     await flush();
@@ -303,24 +322,23 @@ describe('Pause and Resume in the bar', () => {
     const endFinalization = beginUploadFinalization();
     a.last().progress(160, 'finalizing');
     setDraftCaptureMode('new-report', 'offline');
-    expect(a.last().operation.isActive()).toBe(true);
+    expect(a.last().operation.isActive()).toBe(false);
     a.last().accept();
     endFinalization();
     await flush();
     expect(a.upload).toHaveBeenCalledTimes(1);
-    expect(setSubmissionState).toHaveBeenLastCalledWith(a.draftId, 'accepted', `report-${a.draftId}`);
-    expect(snapshot().notices).toEqual([expect.objectContaining({ kind: 'sent' })]);
+    expect(snapshot().held).toEqual([expect.objectContaining({ draftId: a.draftId, status: 'paused' })]);
+    expect(snapshot().notices).toEqual([]);
   });
 
-  it('refuses Pause while any submission is being finalized', async () => {
+  it('can pause this report while an unrelated submission is being finalized', async () => {
     const a = job('a');
     manager.enqueue(a.request);
     await flush();
     const endFinalization = beginUploadFinalization();
-    expect(manager.pause(activeId())).toBe(false);
-    expect(a.last().operation.isActive()).toBe(true);
-    endFinalization();
     expect(manager.pause(activeId())).toBe(true);
+    expect(a.last().operation.isActive()).toBe(false);
+    endFinalization();
     await flush();
     expect(snapshot().held).toEqual([expect.objectContaining({ draftId: a.draftId, status: 'paused' })]);
   });
@@ -354,7 +372,6 @@ describe('outcomes that need the person', () => {
     ['a sign-in problem', { response: { status: 401 }, message: 'Unauthorized' }, 'Sign In Required'],
     ['a rejected request', { response: { status: 400, data: { message: 'Contract number is not valid.' } }, message: 'Bad request' }, 'Report Needs Attention'],
   ])('stops for %s, keeps the draft paused and marks it for the form', async (_name, error, heading) => {
-    const waits = signalWaits();
     const [a, b] = ['a', 'b'].map(job);
     manager.enqueue(a.request);
     manager.enqueue(b.request);
@@ -367,7 +384,6 @@ describe('outcomes that need the person', () => {
     expect(snapshot().notices).toEqual([expect.objectContaining({ kind: 'attention', heading, draftId: a.draftId })]);
     expect(manager.prefersForeground(a.draftId)).toBe(true);
     expect(manager.resume(snapshot().held[0].id)).toBe(false);
-    expect(waits).toHaveLength(0);
     expect(a.upload).toHaveBeenCalledTimes(1);
     expect(b.upload).toHaveBeenCalledTimes(1);
   });
@@ -417,141 +433,139 @@ describe('outcomes that need the person', () => {
   });
 });
 
-describe('waiting for signal', () => {
-  it('waits after a lost connection, keeps its turn, and continues the same upload', async () => {
-    const waits = signalWaits();
+describe('manual-only recovery', () => {
+  it('holds a lost connection and every queued report until explicit Resume', async () => {
     const [a, b] = ['a', 'b'].map(job);
-    manager.enqueue(a.request);
-    manager.enqueue(b.request);
+    manager.enqueue(a.request); manager.enqueue(b.request);
     await flush();
     a.last().progress(64);
-    // The automatic pause on a lost connection (offlineQueueService.ts).
     pauseActiveUploads('connection');
     await flush();
-    expect(snapshot().active).toMatchObject({ draftId: a.draftId, status: 'waiting', completedFiles: 64, canPause: true });
-    expect(describeBackgroundUpload(snapshot().active!)).toBe('Waiting for signal');
-    expect(setSubmissionState).toHaveBeenLastCalledWith(a.draftId, 'paused', undefined, expect.any(String));
+    expect(snapshot().active).toBeNull();
+    expect(snapshot().queued).toEqual([]);
+    expect(snapshot().held).toEqual(expect.arrayContaining([
+      expect.objectContaining({ draftId: a.draftId, status: 'paused', completedFiles: 64 }),
+      expect.objectContaining({ draftId: b.draftId, status: 'paused' }),
+    ]));
+    await flush();
+    expect(a.upload).toHaveBeenCalledTimes(1);
     expect(b.upload).not.toHaveBeenCalled();
-    expect(waits).toHaveLength(1);
-    await waits[0].ready(true);
+    expect(manager.resume(snapshot().held.find(row => row.draftId === a.draftId)!.id)).toBe(true);
     await flush();
     expect(a.upload).toHaveBeenCalledTimes(2);
-    expect(a.upload.mock.calls[1][1]).not.toBe(a.upload.mock.calls[0][1]);
-    expect(setSubmissionState).toHaveBeenLastCalledWith(a.draftId, 'ready');
-    expect(snapshot().active).toMatchObject({ draftId: a.draftId, status: 'uploading' });
     expect(b.upload).not.toHaveBeenCalled();
   });
 
-  it('waits when there is no connection at all, without starting the transfer', async () => {
-    const waits = signalWaits();
+  it('keeps an offline submission paused without a watcher or future upload', async () => {
     jest.mocked(OfflineQueueService.getConnectivityStatus).mockResolvedValueOnce({ status: 'offline' } as any);
-    const a = job('a');
-    manager.enqueue(a.request);
+    const a = job('a'); manager.enqueue(a.request);
     await flush();
     expect(a.upload).not.toHaveBeenCalled();
-    expect(snapshot().active).toMatchObject({ status: 'waiting' });
-    waits[0].ready(true);
+    expect(snapshot().active).toBeNull();
+    expect(snapshot().held).toEqual([expect.objectContaining({ draftId: a.draftId, status: 'paused' })]);
+    await flush();
+    expect(a.upload).not.toHaveBeenCalled();
+    expect(manager.resume(snapshot().held[0].id)).toBe(true);
     await flush();
     expect(a.upload).toHaveBeenCalledTimes(1);
   });
 
-  it('Resume now tries at once and stops waiting', async () => {
-    const waits = signalWaits();
-    const a = job('a');
-    manager.enqueue(a.request);
+  it('never bypasses an explicit Offline choice on another report', async () => {
+    const [a, b] = ['a', 'b'].map(job);
+    manager.enqueue(a.request); manager.enqueue(b.request);
     await flush();
-    a.last().fail(networkError());
+    setDraftCaptureMode('new-report', 'offline');
     await flush();
-    expect(manager.resumeNow()).toBe(true);
-    expect(waits[0].signal.aborted).toBe(true);
-    await flush();
-    expect(a.upload).toHaveBeenCalledTimes(2);
-    expect(snapshot().active).toMatchObject({ status: 'uploading' });
+    expect(snapshot().active).toBeNull();
+    expect(snapshot().held).toHaveLength(2);
+    expect(a.upload).toHaveBeenCalledTimes(1);
+    expect(b.upload).not.toHaveBeenCalled();
   });
 
-  it('Pause while waiting keeps it paused, and the signal coming back later starts nothing', async () => {
-    const waits = signalWaits();
+  it('holds queued uploads when Offline is selected while acceptance is being saved', async () => {
     const [a, b] = ['a', 'b'].map(job);
-    manager.enqueue(a.request);
-    manager.enqueue(b.request);
+    let finishAccepted!: () => void;
+    setSubmissionState.mockImplementation((_id, state) => state === 'accepted'
+      ? new Promise(resolve => { finishAccepted = resolve as () => void; })
+      : Promise.resolve(undefined as any));
+    manager.enqueue(a.request); manager.enqueue(b.request);
     await flush();
-    a.last().fail(networkError());
+    a.last().accept();
+    await flush();
+    expect(finishAccepted).toBeDefined();
+    setDraftCaptureMode('new-report', 'offline');
+    await flush();
+    expect(snapshot().active).toBeNull();
+    expect(snapshot().queued).toEqual([]);
+    expect(snapshot().held).toEqual([expect.objectContaining({ draftId: b.draftId, status: 'paused' })]);
+    expect(snapshot().notices).toEqual([expect.objectContaining({ draftId: a.draftId, heading: 'Upload accepted', autoDismiss: false })]);
+    expect(b.upload).not.toHaveBeenCalled();
+    finishAccepted();
+    await flush();
+    expect(b.upload).not.toHaveBeenCalled();
+    expect(a.upload).toHaveBeenCalledTimes(1);
+    expect(snapshot().held).toHaveLength(1);
+  });
+
+  it('bounds an unanswered acceptance write without offering to upload the accepted report again', async () => {
+    jest.useFakeTimers();
+    try {
+      const a = job('a');
+      setSubmissionState.mockImplementation((_id, state) => state === 'accepted' ? new Promise(() => {}) : Promise.resolve(undefined as any));
+      manager.enqueue(a.request);
+      await jest.advanceTimersByTimeAsync(1);
+      a.last().accept();
+      await jest.advanceTimersByTimeAsync(30_001);
+      expect(snapshot().active).toBeNull();
+      expect(snapshot().held).toEqual([]);
+      expect(snapshot().notices).toEqual([expect.objectContaining({ heading: 'Upload accepted', autoDismiss: false })]);
+      expect(a.upload).toHaveBeenCalledTimes(1);
+      expect(setSubmissionState.mock.calls.some(([, state]) => state === 'paused')).toBe(false);
+    } finally { jest.useRealTimers(); }
+  });
+
+  it('holds the rest of the line if global Offline follows a per-report Pause', async () => {
+    const [a, b] = ['a', 'b'].map(job);
+    manager.enqueue(a.request); manager.enqueue(b.request);
     await flush();
     expect(manager.pause(activeId())).toBe(true);
-    expect(waits[0].signal.aborted).toBe(true);
-    expect(snapshot().held).toEqual([expect.objectContaining({ draftId: a.draftId, status: 'paused' })]);
-    waits[0].ready(true);
+    setDraftCaptureMode('new-report', 'offline');
     await flush();
-    expect(a.upload).toHaveBeenCalledTimes(1);
-    expect(b.upload).toHaveBeenCalledTimes(1);
+    expect(snapshot().active).toBeNull();
+    expect(snapshot().queued).toEqual([]);
+    expect(snapshot().held).toHaveLength(2);
+    expect(b.upload).not.toHaveBeenCalled();
   });
 
-  it('hands back to the person after three automatic tries that send no new file', async () => {
-    const waits = signalWaits();
-    const [a, b] = ['a', 'b'].map(job);
-    manager.enqueue(a.request);
-    manager.enqueue(b.request);
+  it('requires explicit Resume for transient errors even after network recovery', async () => {
+    const a = job('a'); manager.enqueue(a.request);
     await flush();
-    for (let round = 0; round < 3; round += 1) {
-      a.last().fail(networkError());
-      await flush();
-      expect(waits).toHaveLength(round + 1);
-      waits[round].ready(true);
-      await flush();
-      expect(a.upload).toHaveBeenCalledTimes(round + 2);
-    }
     a.last().fail(networkError());
     await flush();
-    expect(waits).toHaveLength(3);
-    expect(snapshot().held).toEqual([expect.objectContaining({ draftId: a.draftId, status: 'paused', message: CONNECTION_KEPT_DROPPING_MESSAGE })]);
-    expect(snapshot().notices).toEqual([expect.objectContaining({ kind: 'attention', message: CONNECTION_KEPT_DROPPING_MESSAGE })]);
-    expect(b.upload).toHaveBeenCalledTimes(1);
-  });
-
-  it('keeps going while each try sends more files', async () => {
-    const waits = signalWaits();
-    const a = job('a');
-    manager.enqueue(a.request);
+    expect(snapshot().held).toEqual([expect.objectContaining({ status: 'paused' })]);
     await flush();
-    for (let round = 0; round < 5; round += 1) {
-      a.last().progress(20 * (round + 1));
-      a.last().fail(networkError());
-      await flush();
-      expect(waits).toHaveLength(round + 1);
-      waits[round].ready(true);
-      await flush();
-    }
-    expect(a.upload).toHaveBeenCalledTimes(6);
-    expect(snapshot().notices).toEqual([]);
-    expect(snapshot().active).toMatchObject({ draftId: a.draftId, status: 'uploading' });
-  });
-
-  it('tries again at once after a pause nobody asked of it, counted in the same streak', async () => {
-    const waits = signalWaits();
-    const [a, b] = ['a', 'b'].map(job);
-    manager.enqueue(a.request);
-    manager.enqueue(b.request);
+    expect(a.upload).toHaveBeenCalledTimes(1);
+    expect(manager.resume(snapshot().held[0].id)).toBe(true);
     await flush();
-    // Choosing Offline on a new report pauses every upload (offlineDraftPolicy.ts).
-    for (let round = 0; round < 3; round += 1) {
-      setDraftCaptureMode(`new-report-${round}`, 'offline');
-      await flush();
-      expect(a.upload).toHaveBeenCalledTimes(round + 2);
-    }
-    setDraftCaptureMode('new-report-3', 'offline');
-    await flush();
-    expect(waits).toHaveLength(0);
-    expect(a.upload).toHaveBeenCalledTimes(4);
-    // Each prompt retry left the draft recorded as ready; only the stop records a pause.
-    expect(setSubmissionState.mock.calls.filter(([id, state]) => id === a.draftId && state === 'paused'))
-      .toEqual([[a.draftId, 'paused', undefined, expect.stringContaining('Upload paused')]]);
-    expect(snapshot().held).toEqual([expect.objectContaining({ draftId: a.draftId, status: 'paused', message: KEPT_INTERRUPTED_MESSAGE })]);
-    expect(b.upload).toHaveBeenCalledTimes(1);
+    expect(a.upload).toHaveBeenCalledTimes(2);
   });
 });
 
 describe('a change of account', () => {
   afterEach(() => { mockOwner = 'owner'; setUploadOwner('owner'); });
+
+  it('fences a queued pause before its deferred local write after switching owner', async () => {
+    const [a, b] = ['a', 'b'].map(job);
+    manager.enqueue(a.request); manager.enqueue(b.request);
+    await flush();
+    setSubmissionState.mockClear();
+    manager.pause(snapshot().queued[0].id);
+    mockOwner = 'other-owner'; setUploadOwner('other-owner');
+    await flush();
+    expect(setSubmissionState).not.toHaveBeenCalled();
+    expect(b.upload).not.toHaveBeenCalled();
+    expect(snapshot()).toEqual({ active: null, queued: [], held: [], notices: [] });
+  });
 
   it('empties the line and writes nothing for the old account', async () => {
     const [a, b, c] = ['a', 'b', 'c'].map(job);

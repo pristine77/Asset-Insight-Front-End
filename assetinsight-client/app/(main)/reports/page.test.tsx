@@ -9,6 +9,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AssetReport } from "@/services/assets";
 import type { LotListing } from "@/services/lotListing";
 import { toast } from "@/components/ui/toast";
+import { advanceAuthSession } from "@/lib/auth-storage";
 import ReportsPage from "./page";
 
 const mocks = vi.hoisted(() => ({
@@ -206,6 +207,9 @@ class ImmediatelyIntersectingObserver {
 
 describe("My Reports thumbnails", () => {
   beforeEach(() => {
+    vi.mocked(toast.success).mockClear();
+    vi.mocked(toast.error).mockClear();
+    vi.mocked(toast.info).mockClear();
     mocks.getMyReports.mockReset().mockResolvedValue([]);
     mocks.getAssetReports
       .mockReset()
@@ -1017,7 +1021,7 @@ describe("My Reports thumbnails", () => {
       mocks.getAssetReports.mockResolvedValue({ data: [reportWithThumbnail] });
       mocks.getDeliveries.mockResolvedValue([sentAssigned]);
       mocks.closeContractPart.mockResolvedValue({
-        contractId: "contract-thumb", taskCompleted: true, alreadyCompleted: false, userStatus: "completed",
+        contractId: "contract-thumb", closedAt: "2026-10-03T12:00:00.000Z", taskCompleted: true, alreadyCompleted: false, userStatus: "completed",
       });
       const table = await completedTable();
       fireEvent.click(within(table).getByRole("button", { name: /Close my part of this contract/ }));
@@ -1031,6 +1035,79 @@ describe("My Reports thumbnails", () => {
       const table = await completedTable();
       fireEvent.click(within(table).getByRole("button", { name: /Close my part of this contract/ }));
       expect(mocks.closeContractPart).not.toHaveBeenCalled();
+      expect(within(table).getByRole("button", { name: /Close my part of this contract/ })).toBeEnabled();
+    });
+
+    it.each(["saved summary", "close receipt"])("distinguishes revoked assignment from a successful part close: %s", async (source) => {
+      vi.stubGlobal("confirm", vi.fn(() => true));
+      mocks.getAssetReports.mockResolvedValue({ data: [reportWithThumbnail] });
+      mocks.getDeliveries.mockResolvedValue([{ ...sentAssigned, ...(source === "saved summary" ? {
+        contractClosedAt: "2026-10-03T12:00:00.000Z", contractCloseUserStatus: "revoked", contractTaskCompleted: false,
+      } : {}) }]);
+      mocks.closeContractPart.mockResolvedValue({ contractId: "contract-thumb", closedAt: "2026-10-03T12:00:00.000Z", taskCompleted: false, userStatus: "revoked" });
+      const table = await completedTable();
+      if (source === "close receipt") fireEvent.click(within(table).getByRole("button", { name: /Close my part of this contract/ }));
+      await waitFor(() => expect(within(table).getByText("Sent · assignment removed")).toBeInTheDocument());
+      expect(within(table).queryByText("Sent · your part closed")).not.toBeInTheDocument();
+      expect(toast.success).not.toHaveBeenCalled();
+    });
+
+    it("locks repeated clicks and ignores a result after the account session changes", async () => {
+      vi.stubGlobal("confirm", vi.fn(() => true));
+      mocks.getAssetReports.mockResolvedValue({ data: [reportWithThumbnail] });
+      mocks.getDeliveries.mockResolvedValue([sentAssigned]);
+      let resolveClose!: (value: unknown) => void;
+      mocks.closeContractPart.mockReturnValue(new Promise((resolve) => { resolveClose = resolve; }));
+      const table = await completedTable();
+      const button = within(table).getByRole("button", { name: /Close my part of this contract/ });
+      fireEvent.click(button);
+      fireEvent.click(button);
+      expect(mocks.closeContractPart).toHaveBeenCalledTimes(1);
+      advanceAuthSession();
+      resolveClose({ contractId: "contract-thumb", closedAt: "2026-10-03T12:00:00.000Z", taskCompleted: true, userStatus: "completed" });
+      await waitFor(() => expect(button).toBeEnabled());
+      expect(toast.success).not.toHaveBeenCalled();
+      expect(within(table).queryByText("Sent · contract complete")).not.toBeInTheDocument();
+    });
+
+    it("does not close a stale row after the session changed before the click", async () => {
+      const confirm = vi.fn(() => true);
+      vi.stubGlobal("confirm", confirm);
+      mocks.getAssetReports.mockResolvedValue({ data: [reportWithThumbnail] });
+      mocks.getDeliveries.mockResolvedValue([sentAssigned]);
+      const table = await completedTable();
+      advanceAuthSession();
+      fireEvent.click(within(table).getByRole("button", { name: /Close my part of this contract/ }));
+      expect(mocks.closeContractPart).not.toHaveBeenCalled();
+      expect(confirm).not.toHaveBeenCalled();
+      expect(toast.error).toHaveBeenCalledWith("Your account session changed. Refresh Reports before closing your part of a contract.");
+    });
+
+    it("does not let a pre-close refresh undo the confirmed receipt", async () => {
+      vi.stubGlobal("confirm", vi.fn(() => true));
+      mocks.getAssetReports.mockResolvedValue({ data: [reportWithThumbnail] });
+      mocks.getDeliveries.mockResolvedValue([sentAssigned]);
+      const table = await completedTable();
+      let resolveRefresh!: (value: unknown) => void;
+      mocks.getDeliveries.mockReturnValueOnce(new Promise((resolve) => { resolveRefresh = resolve; }));
+      fireEvent(window, new Event("focus"));
+      await waitFor(() => expect(mocks.getDeliveries).toHaveBeenCalledTimes(2));
+      mocks.closeContractPart.mockResolvedValue({ contractId: "contract-thumb", closedAt: "2026-10-03T12:00:00.000Z", taskCompleted: false, userStatus: "completed" });
+      fireEvent.click(within(table).getByRole("button", { name: /Close my part of this contract/ }));
+      await waitFor(() => expect(within(table).getByText("Sent · your part closed")).toBeInTheDocument());
+      resolveRefresh([sentAssigned]);
+      await waitFor(() => expect(screen.getByRole("button", { name: /Refresh/i })).toBeEnabled());
+      expect(within(table).queryByRole("button", { name: /Close my part of this contract/ })).not.toBeInTheDocument();
+    });
+
+    it("keeps malformed server errors out of the rendered toast", async () => {
+      vi.stubGlobal("confirm", vi.fn(() => true));
+      mocks.getAssetReports.mockResolvedValue({ data: [reportWithThumbnail] });
+      mocks.getDeliveries.mockResolvedValue([sentAssigned]);
+      mocks.closeContractPart.mockRejectedValue({ response: { data: { message: { secret: "not displayable" } } } });
+      const table = await completedTable();
+      fireEvent.click(within(table).getByRole("button", { name: /Close my part of this contract/ }));
+      await waitFor(() => expect(toast.error).toHaveBeenCalledWith("Your contract completion could not be confirmed. Refresh Reports to check its status before trying again."));
       expect(within(table).getByRole("button", { name: /Close my part of this contract/ })).toBeEnabled();
     });
 

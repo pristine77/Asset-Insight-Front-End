@@ -31,11 +31,6 @@ jest.mock('../services/offlineQueueService', () => ({ __esModule: true, default:
   getSubmissionError: jest.fn((error: unknown) => jest.requireActual('../services/connectivityService').getSubmissionError(error)),
 } }));
 jest.mock('../services/autoSaveService', () => ({ __esModule: true, default: { cleanupOrphanedMedia: jest.fn(async () => 0) } }));
-// The signal never comes back during these tests; Resume now is the way on.
-jest.mock('../services/uploadAutoResume', () => ({
-  ...jest.requireActual('../services/uploadAutoResume'),
-  waitForStableConnection: jest.fn(() => new Promise(() => {})),
-}));
 
 type Transfer = {
   operation: UploadOperation;
@@ -104,7 +99,7 @@ it('shows the running upload with its count and progress; Pause stops it and off
   const a = report('157');
   await run(() => { backgroundUploadManager.enqueue(a.request); });
   await run(() => a.last().progress(45));
-  expect(screen.getByText('Uploading QA-157 · 45 of 160 photos')).toBeTruthy();
+  expect(screen.getByText('Uploading QA-157 · 45 of 160 files')).toBeTruthy();
   expect(screen.getByRole('progressbar', { name: 'Upload of QA-157' }).props.accessibilityValue).toEqual({ min: 0, max: 160, now: 45 });
   const transfer = a.last();
   await fireEvent.press(screen.getByRole('button', { name: 'Pause upload of QA-157' }));
@@ -126,15 +121,15 @@ it('counts the uploads waiting in line, lists them on tap, and pauses one of the
   const [a, b] = [report('157'), report('158', 40)];
   await run(() => { backgroundUploadManager.enqueue(a.request); backgroundUploadManager.enqueue(b.request); });
   expect(screen.getByText('+1 waiting')).toBeTruthy();
-  expect(screen.queryByText('In line: QA-158 · 40 photos')).toBeNull();
+  expect(screen.queryByText('In line: QA-158 · 40 files')).toBeNull();
   await fireEvent.press(screen.getByRole('button', { name: '1 more upload waiting in line' }));
-  expect(screen.getByText('In line: QA-158 · 40 photos')).toBeTruthy();
+  expect(screen.getByText('In line: QA-158 · 40 files')).toBeTruthy();
   await fireEvent.press(screen.getByRole('button', { name: 'Pause upload of QA-158' }));
   await settle();
   expect(screen.getByText('Paused: QA-158 · 0 of 40 sent')).toBeTruthy();
   expect(screen.queryByText('+1 waiting')).toBeNull();
   expect(b.upload).not.toHaveBeenCalled();
-  expect(screen.getByText('Uploading QA-157 · 0 of 160 photos')).toBeTruthy();
+  expect(screen.getByText('Uploading QA-157 · 0 of 160 files')).toBeTruthy();
 });
 
 // 2026-10-01: pausing during "Finalizing" threw away the server's acceptance.
@@ -147,15 +142,15 @@ it('hides Pause while the submission is being finalized', async () => {
   expect(screen.queryByRole('button', { name: 'Pause upload of QA-157' })).toBeNull();
 });
 
-it('waits for signal with Resume now and Pause', async () => {
+it('requires explicit Resume after a connection failure', async () => {
   await showBar();
   const a = report('157');
   await run(() => { backgroundUploadManager.enqueue(a.request); });
   await run(() => a.last().progress(45));
   await run(() => a.last().fail(Object.assign(new Error('Network Error'), { code: 'ERR_NETWORK' })));
-  expect(screen.getByText('Waiting for signal · 45 of 160 sent')).toBeTruthy();
-  expect(screen.getByRole('button', { name: 'Pause upload of QA-157' })).toBeTruthy();
-  await fireEvent.press(screen.getByRole('button', { name: 'Resume upload now' }));
+  expect(screen.getByText('Paused: QA-157 · 45 of 160 sent')).toBeTruthy();
+  expect(a.upload).toHaveBeenCalledTimes(1);
+  await fireEvent.press(screen.getByRole('button', { name: 'Resume upload of QA-157' }));
   await settle();
   expect(a.upload).toHaveBeenCalledTimes(2);
   expect(screen.queryByText(/^Waiting for signal/)).toBeNull();

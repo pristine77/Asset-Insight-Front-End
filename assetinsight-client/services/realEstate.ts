@@ -201,8 +201,8 @@ export const RealEstateService = {
   },
 
   /** Get all real estate reports for current user */
-  async getReports(): Promise<{ data: RealEstateReport[] }> {
-    const { data } = await API.get<{ data: RealEstateReport[] }>("/real-estate");
+  async getReports(view?: "previews"): Promise<{ data: RealEstateReport[] }> {
+    const { data } = await API.get<{ data: RealEstateReport[] }>("/real-estate", view ? { params: { view }, timeout: 30000 } : undefined);
     return data;
   },
 

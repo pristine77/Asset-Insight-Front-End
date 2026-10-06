@@ -1,6 +1,6 @@
 import React from 'react';
 import { Alert, StyleSheet } from 'react-native';
-import { act, fireEvent, render, screen, userEvent, waitFor } from '@testing-library/react-native';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react-native';
 import PreviewScreen from './PreviewScreen';
 import api from '../services/api';
 
@@ -87,9 +87,77 @@ beforeEach(() => {
     saved = structuredClone((body as { preview_data: ReturnType<typeof fixture> }).preview_data);
     return { data: { data: saved } };
   });
-  jest.mocked(api.post).mockResolvedValue({ data: { data: {} } });
+  jest.mocked(api.post).mockImplementation(async (_url, body) => {
+    saved = structuredClone((body as { preview_data: ReturnType<typeof fixture> }).preview_data);
+    return { data: { data: {} } };
+  });
 });
 afterEach(() => jest.restoreAllMocks());
+
+it.each(['Asset', 'LotListing'] as const)('saves and regenerates %s with one current snapshot and no separate save', async reportType => {
+  saved = fixture(2);
+  jest.mocked(api.get).mockImplementation(async url => String(url).includes('category-specs')
+    ? { data: { data: { specs: [] } } }
+    : { data: { data: { ...wrapPreview(saved).data.data, status: 'approved' } } });
+  let finish!: (value: any) => void;
+  jest.mocked(api.post).mockReturnValueOnce(new Promise(resolve => { finish = resolve; }));
+  const success = jest.fn();
+  await render(<PreviewScreen reportId="combined" reportType={reportType} mode="pending" onBack={onBack} onSuccess={success} />);
+  const contract = await screen.findByDisplayValue('93530');
+  await fireEvent.changeText(contract, 'UPDATED-93530');
+  expect(screen.queryByRole('button', { name: 'Save preview changes' })).toBeNull();
+  await fireEvent.press(screen.getByRole('button', { name: 'Save & Regenerate' }));
+  const confirm = confirmGeneration();
+  await act(() => { void confirm.onPress?.(); void confirm.onPress?.(); });
+  expect(api.post).toHaveBeenCalledTimes(1);
+  expect(api.post).toHaveBeenCalledWith(`/${reportType === 'Asset' ? 'asset' : 'lot-listing'}/combined/resubmit`, {
+    preview_data: expect.objectContaining({ contract_no: 'UPDATED-93530', lots: saved.lots }),
+  });
+  expect(api.put).not.toHaveBeenCalled();
+  expect(screen.getByRole('button', { name: 'Save & Regenerate' })).toBeDisabled();
+  await fireEvent.changeText(contract, 'DO NOT REPLACE IN-FLIGHT SNAPSHOT');
+  expect(contract.props.value).toBe('UPDATED-93530');
+  expect(screen.queryByRole('button', { name: 'Back from report preview' })).toBeNull();
+  expect(onBack).not.toHaveBeenCalled();
+  await act(async () => finish({ data: { data: {} } }));
+  expect(success).toHaveBeenCalledTimes(1);
+  expect(onBack).toHaveBeenCalledTimes(1);
+  expect(screen.getByRole('button', { name: 'Generating files...' })).toBeDisabled();
+});
+
+it('ignores a generation confirmation after refreshed data replaces its snapshot', async () => {
+  await open(2);
+  await fireEvent.press(screen.getByRole('button', { name: 'Save & Generate' }));
+  const confirm = confirmGeneration();
+  saved = { ...saved, contract_no: 'REFRESHED' };
+  await fireEvent(screen.getByTestId('preview-refresh'), 'refresh');
+  await screen.findByDisplayValue('REFRESHED');
+  await act(async () => { await confirm.onPress?.(); });
+  expect(api.post).not.toHaveBeenCalled();
+});
+
+it('submits Lot Listing without FMV or appraisal selection blocks while retaining saved data', async () => {
+  saved = fixture(2);
+  saved.lots[0].estimated_value = '';
+  saved.lots[0].condition_report_selections = { condition: '', completeness: '', legal: '' };
+  const original = structuredClone(saved);
+  await render(<PreviewScreen reportId="listing-report" reportType="LotListing" mode="pending" onBack={onBack} />);
+  await screen.findByDisplayValue('93530');
+  expect(screen.queryByText('Required selections')).toBeNull();
+  expect(screen.queryByText(/Running Condition for all lots/i)).toBeNull();
+  expect(screen.queryByRole('button', { name: /^Edit required selections/ })).toBeNull();
+  await fireEvent.press(screen.getByText('Save & Generate'));
+  const confirmation = jest.mocked(Alert.alert).mock.calls.find(([title]) => title === 'Save & Generate');
+  expect(confirmation).toBeDefined();
+  await act(async () => { await confirmation![2]!.find((button) => button.text === 'Save & Generate')!.onPress?.(); });
+  expect(api.post).toHaveBeenCalledWith('/lot-listing/listing-report/submit-approval', {
+    preview_data: expect.objectContaining({ lots: expect.arrayContaining([
+      expect.objectContaining({ ...original.lots[0] }),
+      expect.objectContaining({ ...original.lots[1] }),
+    ]) }),
+  });
+  expect(api.put).not.toHaveBeenCalled();
+});
 
 async function open(count = 100) {
   saved = fixture(count);
@@ -103,11 +171,12 @@ const select = (lot: number) =>
   fireEvent.press(screen.getByRole('checkbox', { name: `Select lot ${lot} for bulk update` }));
 const apply = (group: string, value: string) =>
   fireEvent.press(screen.getByRole('button', { name: `${group}: ${value} to selected lots` }));
+const confirmGeneration = () => jest.mocked(Alert.alert).mock.calls
+  .filter(([title]) => title === 'Save & Generate' || title === 'Save & Regenerate')
+  .at(-1)![2]!.find(button => button.text?.startsWith('Save &'))!;
 const save = async () => {
-  await fireEvent.press(screen.getByRole('button', { name: 'Save preview changes' }));
-  await waitFor(() =>
-    expect(Alert.alert).toHaveBeenCalledWith('Success', 'Changes saved successfully!', undefined)
-  );
+  await fireEvent.press(screen.getByRole('button', { name: 'Save & Generate' }));
+  await act(async () => { await confirmGeneration().onPress?.(); });
 };
 
 it('applies all three groups only to lots4/8/9 in a100-lot preview and saves/reopens the same values and media', async () => {
@@ -126,7 +195,7 @@ it('applies all three groups only to lots4/8/9 in a100-lot preview and saves/reo
   await apply('Legal', 'Salvage');
   await save();
   const payload = (
-    jest.mocked(api.put).mock.calls[0][1] as { preview_data: ReturnType<typeof fixture> }
+    jest.mocked(api.post).mock.calls[0][1] as { preview_data: ReturnType<typeof fixture> }
   ).preview_data;
   expect(payload.lots).toHaveLength(100);
   payload.lots.forEach((lot: any, index: number) => {
@@ -234,7 +303,7 @@ it('clears selection and individual editors on refresh/reordered preview data', 
 it('does not let a late save response overwrite another report or its new selection', async () => {
   const view = await open(10);
   let resolveSave!: (data: any) => void;
-  jest.mocked(api.put).mockImplementationOnce(
+  jest.mocked(api.post).mockImplementationOnce(
     () =>
       new Promise((resolve) => {
         resolveSave = resolve;
@@ -242,10 +311,11 @@ it('does not let a late save response overwrite another report or its new select
   );
   await select(4);
   await apply('Legal', 'Salvage');
-  await userEvent.setup().press(screen.getByRole('button', { name: 'Save preview changes' }));
-  expect(screen.getByText('0 of 10 lots selected')).toBeTruthy();
+  await fireEvent.press(screen.getByRole('button', { name: 'Save & Generate' }));
+  await act(() => { void confirmGeneration().onPress?.(); });
+  expect(screen.getByText('0 of 10 lots selected', { includeHiddenElements: true })).toBeTruthy();
   expect(
-    screen.getByRole('checkbox', { name: 'Select lot 8 for bulk update' }).props.accessibilityState
+    screen.getByRole('checkbox', { name: 'Select lot 8 for bulk update', includeHiddenElements: true }).props.accessibilityState
       .disabled
   ).toBe(true);
   await view.rerender(
@@ -260,17 +330,18 @@ it('does not let a late save response overwrite another report or its new select
   });
   expect(screen.getByLabelText('Client Name *').props.value).toBe('Other client');
   expect(screen.getByText('1 of 10 lots selected')).toBeTruthy();
-  expect(jest.mocked(api.post)).not.toHaveBeenCalled();
+  expect(api.post).toHaveBeenCalledTimes(1);
+  expect(onBack).not.toHaveBeenCalled();
 });
 
 it('keeps edited values after save failure but resets the selection for a deliberate retry', async () => {
   const log = jest.spyOn(console, 'error').mockImplementation(() => undefined);
   await open(10);
-  jest.mocked(api.put).mockRejectedValueOnce(new Error('offline'));
+  jest.mocked(api.post).mockRejectedValueOnce(new Error('offline'));
   await select(4);
   await apply('Legal', 'Salvage');
-  await fireEvent.press(screen.getByRole('button', { name: 'Save preview changes' }));
-  await waitFor(() => expect(Alert.alert).toHaveBeenCalledWith('Error', 'Failed to save changes'));
+  await save();
+  await waitFor(() => expect(Alert.alert).toHaveBeenCalledWith('Error', 'Failed to submit report'));
   expect(screen.getByText('0 of 10 lots selected')).toBeTruthy();
   await fireEvent.press(screen.getByRole('button', { name: 'Edit required selections for lot 4' }));
   expect(

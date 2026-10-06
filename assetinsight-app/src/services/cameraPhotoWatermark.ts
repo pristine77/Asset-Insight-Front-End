@@ -31,7 +31,7 @@ export async function stampCameraPhoto(uri: string): Promise<string> {
       await Skia.Data.fromURI(Image.resolveAssetSource(logoAsset).uri)
     );
     if (!image || !logo) throw new Error('Unable to prepare the camera watermark');
-    // At most 3000 px on the longest side, never enlarged (cameraPhotoSize.ts).
+    // Preserve the pre-reduction 3000 px longest side, without enlargement.
     const { width, height } = fitInsideBox(image.width(), image.height());
     surface = Skia.Surface.MakeOffscreen(width, height);
     if (!surface) throw new Error('Unable to prepare the camera photo');
@@ -60,7 +60,7 @@ export async function stampCameraPhoto(uri: string): Promise<string> {
     );
     surface.flush();
     snapshot = surface.makeImageSnapshot();
-    // Quality 95, as before 2026-10-02 (cameraPhotoSize.ts).
+    // Restore the JS camera's original fixed-quality encoding policy.
     const bytes = snapshot.encodeToBytes(ImageFormat.JPEG, CAMERA_PHOTO_JPEG_QUALITY);
     if (!bytes) throw new Error('Unable to encode the camera photo');
     const marked = await addPhotoWatermarkReceipt(bytes);

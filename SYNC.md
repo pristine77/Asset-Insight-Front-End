@@ -1,51 +1,42 @@
 # Sanitized application synchronization
 
-1 October 2026 follow-up content-only synchronization, retaining the existing
-Pristine77 history through `7092671`. Source Git history is not imported.
+6 October 2026 content-only synchronization, retaining Pristine77 history through
+`551205d`. Source Git history is not imported.
 
 | Application | Source revision |
 | --- | --- |
-| Admin | `a3bb1151739674e06b8b0fee4561962edca5ee53` |
-| Web | `7f51fc78a343ed9d2c40c2e212c58178aaa351ba` |
-| Native | `2f6a839` plus reviewed local authentication, camera handoff, upload-recovery and acceptance-receipt changes |
+| Admin | `3e73e2d` |
+| Web | `790f23e` |
+| Native | `0be47f1` |
 
-The latest follow-up preserves Pristine77's Incoming description and preview bulk
-selection updates. It adds actionable transfer errors, revision-aware draft saves,
-authoritative upload acceptance checks and explicit separate-report recovery.
-Replayed acceptance does not erase newer local edits. Admin is already current
-and its application files are unchanged by this follow-up.
+Includes combined Asset/Lot preview Save & Generate / Save & Regenerate,
+optional Lot Listing appraisal fields, resilient preview loading and app-version
+Report Activity, account-deletion links, and upload/contract-close safeguards.
+Interrupted uploads require explicit Resume. Existing Pristine camera,
+landscape, device approval and add-logo-where-missing changes are retained.
+Standard photo sizing remains 3000 px; high resolution remains 6000 px, with
+existing encoding targets. This source export does not produce a new APK/AAB.
 
-Includes Incoming consignor/salesperson names, authentication recovery, draft
-restoration safeguards, report queue and Schedule A updates, corrected
-submit-and-open-new-form continuation, YouTube callback handling, and native
-camera handoff/upload stall recovery. Existing report layouts are retained. Excel
-generation belongs to the matching backend and keeps its original columns,
-without a YouTube URL column.
+Incoming contact metadata, authentication recovery, media/order/serial integrity,
+same-contract continuation, Schedule A lineage, CRM Coverage and authenticated
+admin artifact downloads remain available. Existing report layouts are preserved;
+Excel generation belongs to the matching backend and retains its original columns.
 
-The CRM Coverage page and authenticated admin artifact-download proxy are also
-retained. Earlier broad `coverage/` and `artifacts/` ignore patterns omitted these
-runtime routes; output exclusions are now scoped to application build folders,
-with a regression check for both routes.
+OpenAI credits, provider usage logging, usage multipliers/calculations and Salvage
+provider-cost tracking remain excluded. Operational Report Activity is retained.
+The root export-boundaries tests protect these restrictions.
 
-OpenAI credits, provider usage logging, usage multipliers and Salvage provider-cost
-tracking remain excluded. The existing export-boundaries tests protect these
-restrictions. Operational Report Activity remains available.
+Environment secrets, signing credentials, generated binaries/build caches,
+private operational records and source Git history are not exported. Deploy the
+compatible backend before the applications. Repository synchronization does not
+deploy, repair customer reports, mutate databases or authorize provider actions.
 
-Source Git history, environment secrets, signing credentials, APK/AAB binaries,
-native build caches and private operational records are not exported. The native
-directory contains application source, not a newly built mobile release.
+Verification uses staging checkouts without production environment files and
+loopback fixtures. The current merged verification results are recorded below.
 
-Verification commands are in the root README. Deploy the compatible backend
-before these applications; this synchronization does not deploy or modify
-production reports, databases, videos or Google authorization.
-
-This follow-up release copy passed all five export-boundary checks, unchanged
-admin's 89 policy tests, web's 1,154 tests across 108 files plus lint, typecheck and
-production build, and native's 867 tests across 82 suites plus typecheck.
-Secret/configuration-path scans and whitespace checks passed. Dependency lockfiles
-are unchanged. Verification used fresh staging checkouts without production
-environment files or provider credentials.
-No new APK/AAB, physical-device test, live upload, customer draft recovery or
-deployment is implied by this synchronization. In particular, this source sync
-does not claim to resolve an unverified customer camera session or increase the
-existing 200-photo per-lot limit.
+Current merged checks passed: five export-boundary tests, 90 admin policy tests,
+1,240 web tests across 113 files, and 1,079 native tests across 99 suites.
+Web/admin lint, typechecks and production builds passed; native typecheck and
+Android/iOS Hermes exports passed. Build dependencies were staged outside source
+control. Path/credential scans and whitespace checks passed. Real provider calls,
+physical devices and production generation are not exercised by these checks.

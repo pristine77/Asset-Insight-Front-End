@@ -20,10 +20,6 @@ jest.mock('../services/offlineSubmissionService', () => ({ prepareOfflineSubmiss
 jest.mock('../services/offlineQueueService', () => ({ __esModule: true, default: {
   getConnectivityStatus: jest.fn(async () => ({ status: 'online' })), getSubmissionError: jest.fn(() => ({ title: 'Upload failed', message: 'Retry.' })),
 } }));
-jest.mock('../services/uploadAutoResume', () => ({
-  ...jest.requireActual('../services/uploadAutoResume'),
-  waitForStableConnection: jest.fn(() => new Promise(() => {})),
-}));
 
 afterEach(async () => { await cleanup(); jest.clearAllMocks(); });
 

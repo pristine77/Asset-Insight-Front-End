@@ -16,14 +16,12 @@ import { toast } from "@/components/ui/toast";
 import {
   deleteAssetReport,
   getAssetReports,
-  getSubmittedReports,
   resubmitReport,
   type AssetReport,
 } from "@/services/assets";
 import {
   deleteLotListing,
   getLotListings,
-  getSubmittedLotListings,
   resubmitLotListing,
   type LotListing,
 } from "@/services/lotListing";
@@ -42,6 +40,8 @@ import styles from "./page.module.css";
 import { hasSavedReportPreview } from "@/lib/reportPreviewAvailability";
 import { SalvageService, salvagePreviewPath, salvageStatusPath, salvageIsProcessing, type SalvageReport } from "@/services/salvage";
 import { salvageSystemText } from "@/lib/salvagePresentation";
+import { captureAuthSession, isAuthSessionCurrent } from "@/lib/auth-storage";
+import { previewLoadError } from "@/lib/previewLoadError";
 
 const AssetMergeDialog = dynamic(
   () => import("@/components/reports/AssetMergeDialog"),
@@ -103,6 +103,7 @@ function isWorkflowActive(report: any): boolean {
 
 function isSubmittedPreview(report: CombinedReport): boolean {
   return Boolean(
+    (report.reportType === "salvage" && ((report as any).generation_kind === "files" || report.workflow_stage === "generating_files")) ||
     (report as any).preview_submitted_at ||
       (report as any).approval_requested_at ||
       ["pending_approval", "approved"].includes(String(report.status)) ||
@@ -151,7 +152,7 @@ function summaryForReport(report: CombinedReport) {
   if (report.reportType === "salvage") {
     return {
       title: report.file_number || "Salvage report", typeLabel: "Salvage", accent: "var(--app-accent)",
-      fields: [["Claim", String(report.preview_data?.claim_number || "—")], ["Currency", report.currency || "CAD"], ["Images", String(report.imageUrls?.length || 0)]],
+      fields: [["Claim", String(report.preview_data?.claim_number || "—")], ["Currency", report.currency || "CAD"], ["Images", String((report as any).image_count ?? report.imageUrls?.length ?? 0)]],
     };
   }
   if (report.reportType === "realEstate") {
@@ -170,7 +171,7 @@ function summaryForReport(report: CombinedReport) {
             (report as any).valuation?.fair_market_value ||
             "—",
         ],
-        ["Images", String(report.imageUrls?.length || 0)],
+        ["Images", String((report as any).image_count ?? report.imageUrls?.length ?? 0)],
       ],
     };
   }
@@ -179,27 +180,29 @@ function summaryForReport(report: CombinedReport) {
       title:
         (report as any).details?.contract_no ||
         (report as any).preview_data?.contract_no ||
+        (report as any).contract_no ||
         "Lot Listing",
       typeLabel: "Lot Listing",
       accent: "#7c3aed",
       fields: [
-        ["Lots", String((report as any).lots?.length || 0)],
+        ["Lots", String((report as any).lot_count ?? (report as any).lots?.length ?? 0)],
         [
           "Currency",
           (report as any).preview_data?.currency ||
             (report as any).details?.currency ||
+            (report as any).currency ||
             "CAD",
         ],
-        ["Images", String(report.imageUrls?.length || 0)],
+        ["Images", String((report as any).image_count ?? report.imageUrls?.length ?? 0)],
       ],
     };
   }
   return {
-    title: (report as any).client_name || "Asset Report",
+    title: (report as any).preview_data?.client_name || (report as any).client_name || (report as any).contract_no || "Asset Report",
     typeLabel: "Asset",
     accent: "#2563eb",
     fields: [
-      ["Total Assets", String((report as any).lots?.length || 0)],
+      ["Total Assets", String((report as any).lot_count ?? (report as any).lots?.length ?? 0)],
       ["Grouping", (report as any).grouping_mode?.replace(/_/g, " ") || "—"],
       ["Industry", report.preview_data?.industry || "Not specified"],
     ],
@@ -207,6 +210,7 @@ function summaryForReport(report: CombinedReport) {
 }
 
 function previewThumbnailForReport(report: CombinedReport): string | null {
+  if (typeof (report as any).thumbnail_url === "string") return (report as any).thumbnail_url;
   const directImages = Array.isArray((report as any).imageUrls)
     ? (report as any).imageUrls
     : [];
@@ -274,138 +278,86 @@ export default function PreviewsPage() {
   const [deleteTarget, setDeleteTarget] = useState<CombinedReport | null>(null);
   const [mergeAnchorId, setMergeAnchorId] = useState<string | null>(null);
   const loadingReportsRef = useRef(false);
+  const mountedRef = useRef(true);
+  const queueRevisionRef = useRef(0);
+  const queuedReloadRef = useRef(false);
+  const [loadIssues, setLoadIssues] = useState<string[]>([]);
+  const [lastLoadedAt, setLastLoadedAt] = useState<Date | null>(null);
   const deepLinkHandledRef = useRef(false);
   const isPreviewEditorOpen =
     previewModalOpen || realEstateModalOpen || lotListingModalOpen;
 
   const loadReports = useCallback(async (
-    options: { showLoading?: boolean; silent?: boolean; successToast?: boolean } = {}
-  ) => {
-    if (loadingReportsRef.current) return false;
+    options: { showLoading?: boolean; silent?: boolean; successToast?: boolean; afterMutation?: boolean } = {}
+  ): Promise<boolean> => {
+    if (options.afterMutation) queueRevisionRef.current += 1;
+    if (loadingReportsRef.current) {
+      if (options.afterMutation) queuedReloadRef.current = true;
+      return false;
+    }
     loadingReportsRef.current = true;
-    const showFullLoading = options.showLoading === true;
+    const revision = queueRevisionRef.current;
+    const session = captureAuthSession();
+    if (options.showLoading) setLoading(true); else setRefreshing(true);
+    const valid = () => mountedRef.current && isAuthSessionCurrent(session) && revision === queueRevisionRef.current;
     try {
-      if (showFullLoading) {
-        setLoading(true);
-      } else {
-        setRefreshing(true);
-      }
-      const [
-        assetResponse,
-        realEstateResponse,
-        submittedAssetResponse,
-        lotListingResponse,
-        submittedLotListingResponse,
-        reportDraftResponse,
-        salvageResponse,
-      ] = await Promise.all([
-        getAssetReports().catch(() => ({ data: [] })),
-        RealEstateService.getReports().catch(() => ({ data: [] })),
-        getSubmittedReports().catch(() => ({ data: [] })),
-        getLotListings().catch(() => ({ data: [] })),
-        getSubmittedLotListings().catch(() => ({ data: [] })),
-        ReportDraftService.list().catch(() => []),
-        SalvageService.getReports().catch(() => ({ data: [] })),
+      const reportRead = async (request: Promise<{ data: any[] }>) => {
+        const response = await request;
+        if (!Array.isArray(response?.data) || response.data.some(report => !report || typeof report._id !== 'string' || typeof report.status !== 'string')) throw new Error('Incomplete preview response');
+        return response.data;
+      };
+      const results = await Promise.allSettled([
+        reportRead(getAssetReports('previews')),
+        reportRead(RealEstateService.getReports('previews')),
+        reportRead(getLotListings('previews')),
+        reportRead(SalvageService.getReports('previews')),
+        ReportDraftService.list(undefined, 30000).then(rows => { if (!Array.isArray(rows) || rows.some(row => !row || !(row.id || row._id))) throw new Error('Incomplete draft response'); return rows; }),
       ]);
-
-      const assetPreviews: CombinedReport[] = (assetResponse.data || [])
-        .filter((report) => {
-          const wasSubmitted = Boolean(
-            (report as any).preview_submitted_at ||
-            (report as any).approval_requested_at
-          );
-          return (
-            (report.status === "processing" ||
-              report.status === "error" ||
-              report.status === "preview" ||
-              report.status === "declined") &&
-            !wasSubmitted
-          );
-        })
-        .map((report) => ({ ...report, reportType: "asset" as const }));
-
-      const realEstatePreviews: CombinedReport[] = (realEstateResponse.data || [])
-        .filter(
-          (report: any) =>
-            (report.status === "preview" || report.status === "declined") &&
-            !report.preview_submitted_at &&
-            !report.approval_requested_at
-        )
-        .map((report) => ({ ...report, reportType: "realEstate" as const }));
-
-      const lotListingPreviews: CombinedReport[] = (lotListingResponse.data || [])
-        .filter((report) => {
-          const wasSubmitted = Boolean(
-            (report as any).preview_submitted_at ||
-            (report as any).approval_requested_at ||
-            (report as any).generation_target_status === "approved" ||
-            (report as any).generation_target_status === "pending_approval"
-          );
-          const generating =
-            Boolean((report as any).files_generating) ||
-            Boolean((report as any).files_regenerating);
-          return (
-            ((report.status === "processing" && !generating) ||
-              report.status === "error" ||
-              report.status === "preview" ||
-              report.status === "declined") &&
-            !wasSubmitted
-          );
-        })
-        .map((report) => ({ ...report, reportType: "lotListing" as const }));
-
-      const submittedAssets: CombinedReport[] = (submittedAssetResponse.data || [])
-        .map((report) => ({ ...report, reportType: "asset" as const }));
-      const realEstateSubmitted: CombinedReport[] = (realEstateResponse.data || [])
-        .filter(
-          (report: any) =>
-            report.status === "pending_approval" ||
-            report.status === "approved" ||
-            Boolean(report.preview_submitted_at) ||
-            Boolean(report.approval_requested_at)
-        )
-        .map((report) => ({ ...report, reportType: "realEstate" as const }));
-      const lotListingSubmitted: CombinedReport[] = (submittedLotListingResponse.data || [])
-        .map((report) => ({ ...report, reportType: "lotListing" as const }));
-      const salvageReports: CombinedReport[] = (salvageResponse?.data || []).map((report) => ({ ...report,
-        workflow_message: salvageSystemText(report.workflow_message), job_error: salvageSystemText(report.job_error), reportType: "salvage" as const }));
-
-      setNewReports(
-        [...assetPreviews, ...realEstatePreviews, ...lotListingPreviews, ...salvageReports.filter((report) => !isSubmittedPreview(report))].sort(
-          (a, b) =>
-            new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
-        )
-      );
-      setSubmittedReports(
-        [...submittedAssets, ...realEstateSubmitted, ...lotListingSubmitted, ...salvageReports.filter(isSubmittedPreview)].sort(
-          (a, b) =>
-            new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
-        )
-      );
-      setDraftReports(
-        [...reportDraftResponse].sort(
-          (a, b) =>
-            new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime()
-        )
-      );
-      if (options.successToast) {
-        toast.success("Previews refreshed.");
-      }
-      return true;
-    } catch (error: any) {
-      if (!options.silent) {
-        toast.error(error.response?.data?.message || "Failed to load previews");
-      }
+      if (!valid()) return false;
+      const kinds = ['asset', 'realEstate', 'lotListing', 'salvage'] as const;
+      const labels = ['Asset', 'Real Estate', 'Lot Listing', 'Salvage', 'Drafts'];
+      const succeeded = new Set<string>();
+      const next: CombinedReport[] = [];
+      results.slice(0, 4).forEach((result, index) => {
+        if (result.status !== 'fulfilled') return;
+        const reportType = kinds[index];
+        succeeded.add(reportType);
+        for (const report of result.value) {
+          if (!report?._id || !['processing', 'error', 'preview', 'declined', 'pending_approval', 'approved', 'cancelled'].includes(report.status)) continue;
+          next.push({ ...report, reportType, ...(reportType === 'salvage' ? {
+            workflow_message: salvageSystemText(report.workflow_message), job_error: salvageSystemText(report.job_error),
+          } : {}) } as CombinedReport);
+        }
+      });
+      const merge = (current: CombinedReport[], submitted: boolean) => [
+        ...current.filter(report => !succeeded.has(report.reportType)),
+        ...next.filter(report => isSubmittedPreview(report) === submitted),
+      ].sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+      setNewReports(current => merge(current, false));
+      setSubmittedReports(current => merge(current, true));
+      const drafts = results[4];
+      if (drafts.status === 'fulfilled') setDraftReports([...drafts.value].sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime()));
+      const issues = results.flatMap((result, index) => result.status === 'rejected' ? [labels[index] + ': ' + previewLoadError(result.reason)] : []);
+      setLoadIssues(issues);
+      if (!issues.length) setLastLoadedAt(new Date());
+      if (options.successToast && !issues.length) toast.success('Previews refreshed.');
+      return !issues.length;
+    } catch (error) {
+      if (valid()) setLoadIssues([previewLoadError(error)]);
       return false;
     } finally {
-      if (showFullLoading) setLoading(false);
-      setRefreshing(false);
       loadingReportsRef.current = false;
+      if (mountedRef.current && isAuthSessionCurrent(session)) { setLoading(false); setRefreshing(false); }
+      if (mountedRef.current && queuedReloadRef.current && isAuthSessionCurrent(session)) {
+        queuedReloadRef.current = false;
+        void loadReports({ silent: true });
+      }
     }
   }, []);
-
   useEffect(() => {
+    mountedRef.current = true;
     void loadReports({ showLoading: true });
+    return () => { mountedRef.current = false; queueRevisionRef.current += 1; queuedReloadRef.current = true; };
   }, [loadReports]);
 
   useEffect(() => {
@@ -467,7 +419,7 @@ export default function PreviewsPage() {
   };
 
   useEffect(() => {
-    if (loading || deepLinkHandledRef.current) return;
+    if (loading || loadIssues.length || deepLinkHandledRef.current) return;
 
     const params = new URLSearchParams(window.location.search);
     const reportId = params.get("reportId")?.trim();
@@ -494,7 +446,7 @@ export default function PreviewsPage() {
       report,
       Boolean(submittedReport) || isSubmittedPreview(report)
     );
-  }, [loading, newReports, submittedReports]);
+  }, [loading, loadIssues.length, newReports, submittedReports]);
 
   const handleModalClose = () => {
     setPreviewModalOpen(false);
@@ -526,7 +478,7 @@ export default function PreviewsPage() {
     try {
       await ReportDraftService.processPreview(draft.id || draft._id);
       toast.success("Draft preview processing restarted.");
-      await loadReports({ silent: true });
+      await loadReports({ silent: true, afterMutation: true });
     } catch (error: any) {
       toast.error(
         error?.response?.data?.message ||
@@ -554,7 +506,7 @@ export default function PreviewsPage() {
           ? "Draft moved to submitted previews."
           : "Draft moved to main previews."
       );
-      await loadReports({ silent: true });
+      await loadReports({ silent: true, afterMutation: true });
     } catch (error: any) {
       toast.error(
         error?.response?.data?.message ||
@@ -594,7 +546,7 @@ export default function PreviewsPage() {
     }
     setActiveTab("submitted");
     requestReportsRefetch();
-    void loadReports();
+    void loadReports({ afterMutation: true });
     toast.success("Report submitted successfully.");
   };
 
@@ -608,7 +560,7 @@ export default function PreviewsPage() {
       }
       requestReportsRefetch();
       toast.success("Report resubmitted. Files are being regenerated.");
-      await loadReports();
+      await loadReports({ afterMutation: true });
     } catch (error: any) {
       toast.error(error.response?.data?.message || "Failed to resubmit report");
     } finally {
@@ -629,7 +581,7 @@ export default function PreviewsPage() {
       }
       toast.success("Report deleted successfully");
       setDeleteTarget(null);
-      await loadReports();
+      await loadReports({ afterMutation: true });
     } catch (error: any) {
       toast.error(error.response?.data?.message || "Failed to delete report");
     } finally {
@@ -701,12 +653,21 @@ export default function PreviewsPage() {
         </button>
       </header>
 
+      {loadIssues.length > 0 ? <section role="alert" className={styles.loadIssue}>
+        <strong>Some preview lists could not be refreshed</strong>
+        <p>Available previews remain below. Counts marked * are last loaded and may be out of date; this does not mean your reports were deleted.</p>
+        <ul>{loadIssues.map(issue => <li key={issue}>{issue}</li>)}</ul>
+        <button type="button" className={styles.control} disabled={refreshing} onClick={() => void handleManualRefresh()}>Retry loading previews</button>
+      </section> : null}
+      {lastLoadedAt ? <p className={styles.subtitle}>Last complete refresh: {lastLoadedAt.toLocaleTimeString()}</p> : null}
+
       <section
         aria-label="Preview summary"
         className={styles.summary}
       >
         {[
           { label: "New", value: summary.newCount },
+          { label: "Submitted", value: submittedReports.length },
           { label: "Draft previews", value: summary.draftCount },
           {
             label: "Pending approval",
@@ -717,7 +678,7 @@ export default function PreviewsPage() {
         ].map((item) => (
           <div key={item.label} className={styles.summaryItem}>
             <p className={styles.summaryLabel}>{item.label}</p>
-            <p className={styles.summaryValue}>{item.value}</p>
+            <p className={styles.summaryValue}>{loadIssues.length ? (item.value ? `${item.value}*` : "—") : item.value}</p>
           </div>
         ))}
       </section>
@@ -761,7 +722,7 @@ export default function PreviewsPage() {
                 }`}
                 onClick={() => setActiveTab(tab.id)}
               >
-                {tab.label} ({tab.count})
+                {tab.label} ({loadIssues.length ? (tab.count ? `${tab.count}*` : "—") : tab.count})
               </button>
             ))}
           </div>
@@ -907,20 +868,21 @@ export default function PreviewsPage() {
                   <FileSearch className="size-4" />
                 </span>
                 <h3 className={styles.emptyTitle}>
-                  {activeTab === "new"
+                  {loadIssues.length ? "Preview list unavailable" : activeTab === "new"
                     ? "No new previews"
                     : activeTab === "submitted"
                       ? "No submitted previews"
                       : "No draft previews"}
                 </h3>
                 <p className={styles.emptyDescription}>
-                  {activeTab === "new"
-                    ? "Generate a new report to begin the review and submission flow."
+                  {loadIssues.length ? "Retry loading above. Saved reports and photos are unchanged." : activeTab === "new"
+                    ? submittedReports.length ? "Reports you already submitted are in the Submitted tab. New uploads appear here while processing." : "Generate a new report to begin the review and submission flow."
                     : activeTab === "submitted"
                       ? "Submitted previews and approvals will appear here."
                       : "Save an Asset or Lot Listing draft, then choose Prepare preview here when you are ready to review it."}
                 </p>
-                {activeTab === "new" ? (
+                {activeTab === "new" && submittedReports.length > 0 ? <button type="button" className={`${styles.action} ${styles.actionPrimary} ${styles.emptyAction}`} onClick={() => setActiveTab("submitted")}>View submitted previews ({submittedReports.length})</button> : null}
+                {activeTab === "new" && !loadIssues.length && submittedReports.length === 0 ? (
                   <a
                     href="/dashboard"
                     className={`${styles.action} ${styles.actionPrimary} ${styles.emptyAction}`}
@@ -1003,11 +965,11 @@ export default function PreviewsPage() {
                                 className={`${styles.badge} ${styles.badgeNeutral}`}
                               >
                                 Merged ·{" "}
-                                {Array.isArray(
+                                {(report as any).merged_source_count ?? (Array.isArray(
                                   (report as any).merged_from_report_ids
                                 )
                                   ? (report as any).merged_from_report_ids.length
-                                  : 2}{" "}
+                                  : 2)}{" "}
                                 sources
                               </span>
                             ) : null}

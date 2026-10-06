@@ -62,23 +62,16 @@ import java.util.concurrent.TimeUnit
 import kotlin.math.pow
 
 /*
- * Standard photo size (restored by the owner, 2026-10-03).
+ * Standard photo size restored to the pre-2026-10-02 policy.
  *
- * A standard photo (the 12 MP option off) is at most 3000 px on its longest
- * side, keeps its shape and is never enlarged. Its JPEG is stepped down from
- * quality 95, ten at a time, until it is at most 700 KB (WebP/AVIF: 300 KB).
- * These are the values the installed app used.
+ * Standard photos keep their aspect ratio, are never enlarged, and have at most
+ * 3000 pixels on the longest side. JPEG targets 700 KiB using the existing
+ * quality ladder; WebP/AVIF still target 300 KiB. These are encoding targets,
+ * not hard byte caps. The 12 MP option retains its separate 6000 px / 1 MiB policy.
  *
- * Why restored: on 2026-10-02 this was cut to fit inside 1200 x 900 at most
- * 300 KB, the office's resize setting, on the understanding that installed
- * builds already sent 1200 x 900 photos. They did not: the installed build used
- * the rule above. The 1200 x 900 figure came from photos already resized after
- * upload. The cut left about a sixth of the detail (a ninth for upright
- * photos), the owner saw the difference on a real phone, and asked for the old
- * setting back.
- *
- * src/utils/cameraPhotoSize.ts applies the same longest side to the JS camera;
- * keep the two in step.
+ * Pristine 9b1f739 reduced standard captures on 2026-10-02; 551205d restored
+ * them on 2026-10-04. Local restoration requested 2026-10-05. Keep the longest
+ * side in step with src/utils/cameraPhotoSize.ts; JS encodes at fixed quality 95.
  */
 internal const val STANDARD_PHOTO_MAX_SIDE = 3000
 internal const val STANDARD_PHOTO_MAX_JPEG_BYTES = 700 * 1024
@@ -652,13 +645,12 @@ class CameraViewEngine(private val context: Context, private val lifecycleOwner:
 
         // -- Target file-size budget ----------------------------------------------
         //   12 MP option on: 1 MB.
-        //   Standard JPEG: 700 KB. Standard WebP/AVIF: 300 KB (both compress
-        //   further for the same picture). The installed app's values, restored
-        //   2026-10-03; see "Standard photo size" at the top of this file.
+        //   Standard JPEG: 700 KiB. Standard WebP/AVIF: 300 KiB.
+        //   Restore the pre-reduction targets without changing the quality ladders.
         val TARGET_SIZE_BYTES = when {
             use12MPOutput -> 1 * 1024 * 1024             // 1 MB when 12MP is ON
             fmt == ImageFormatStore.Format.JPEG -> STANDARD_PHOTO_MAX_JPEG_BYTES
-            else -> STANDARD_PHOTO_MAX_OTHER_BYTES       // WebP / AVIF
+            else -> STANDARD_PHOTO_MAX_OTHER_BYTES
         }
 
         try {
@@ -757,9 +749,8 @@ class CameraViewEngine(private val context: Context, private val lifecycleOwner:
             }
 
             // -- 6. Resize -------------------------------------------------------------
-            // Standard photos: at most STANDARD_PHOTO_MAX_SIDE (3000 px) on the
-            // longest side, without enlarging or changing shape; see "Standard photo
-            // size" at the top of this file. The 12 MP option keeps its 6000 px.
+            // Preserve orientation and aspect ratio with a 3000 px longest side.
+            // The 12 MP option keeps its 6000 px longest side; neither is enlarged.
             val (targetW, targetH) = if (use12MPOutput) {
                 fitInsideBox(bitmap.width, bitmap.height, 6000, 6000)
             } else {

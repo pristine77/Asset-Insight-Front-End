@@ -22,16 +22,13 @@ import OfflineCaptureStore from '../../services/offlineCaptureStore';
 import { prepareOfflineSubmission } from '../../services/offlineSubmissionService';
 import { assertReportUploadAccepted, isExistingReportUploadReceipt } from '../../services/reportUploadReceipt';
 import { showUploadManifestRecovery, uploadConflictSource } from './uploadManifestRecovery';
-import { createUploadOperation, isUploadFinalizing, pauseUploadOperation, type UploadOperation } from '../../services/uploadCancellation';
+import { createUploadOperation, pauseUploadOperation, type UploadOperation } from '../../services/uploadCancellation';
 import backgroundUploadManager, {
   ALREADY_UPLOADING_MESSAGE,
   ALREADY_UPLOADING_TITLE,
   BACKGROUND_UPLOAD_BUSY_MESSAGE,
 } from '../../services/backgroundUploadManager';
 import { CAMERA_NOT_OPENED_TITLE, cameraOpenFailureButtons, describeCameraOpenFailure } from '../../utils/cameraOpenFailure';
-import { UPLOAD_WAITING_FOR_CONNECTION } from '../../services/uploadAutoResume';
-import { useUploadAutoResume } from './useUploadAutoResume';
-import UploadWaitingForSignal from './UploadWaitingForSignal';
 import { needsExplicitUploadResume, setDraftCaptureMode } from '../../services/offlineDraftPolicy';
 import CameraScreen from '../camera/NativeAuctionCameraScreen';
 import { MixedLot, createNewLot } from '../camera/types';
@@ -170,7 +167,7 @@ const LotListingFormSheet = ({
     // Finalizing is when the server accepts the listing; pausing then only loses
     // the answer. See beginUploadFinalization in uploadCancellation.ts.
     if (!submissionLockRef.current || pauseRequestedRef.current || uploadAcceptedRef.current || uploadStatus?.stage === 'complete'
-      || uploadStatus?.stage === 'finalizing' || isUploadFinalizing()) return;
+      || uploadStatus?.stage === 'finalizing') return;
     pauseRequestedRef.current = true;
     setPausingUpload(true);
     // This form's upload only: a background upload of another report keeps
@@ -178,12 +175,7 @@ const LotListingFormSheet = ({
     // this operation as well.
     pauseUploadOperation(activeOperationRef.current);
   };
-  // An upload the app stopped by itself (lost signal, stalled transfer)
-  // continues once the connection is steady, while this listing stays open
-  // (useUploadAutoResume, 2026-10-02). handleSubmitRef gives that later resume
-  // the handler from the latest render.
-  const autoResume = useUploadAutoResume(visible, async () => (await OfflineQueueService.getConnectivityStatus()).status === 'online');
-  const handleSubmitRef = useRef<(destination?: AuctionManagementDestination, options?: { nextLot?: boolean; automaticResume?: boolean }) => Promise<void>>(async () => undefined);
+  // Interrupted uploads always require an explicit Resume, including after reconnect.
   const autoSaveTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const loadedDraftIdRef = useRef<string | null>(null);
   const awaitingDraft = Boolean(draftIdToLoad && loadedDraftIdRef.current !== draftIdToLoad);
@@ -836,20 +828,22 @@ const LotListingFormSheet = ({
   const handleOpenCameraRef = useRef<(lotIdx: number) => Promise<void>>(async () => undefined);
   const handleOpenCamera = useCallback(async (lotIdx: number) => {
     if (!requireContractNumberForDraft()) return;
+    const owner = OfflineCaptureStore.getOwnerId();
+    const scope = recoveryScopeRef.current;
     try {
       if (!await saveCurrentDraftNow()) return;
     } catch (error) {
       // Say why instead of ignoring the tap, and offer Try again
       // (cameraOpenFailure.ts). The retry does nothing once the account or
       // this form changed, like the other delayed alert buttons here.
-      const owner = OfflineCaptureStore.getOwnerId();
-      const scope = recoveryScopeRef.current;
+      if (OfflineCaptureStore.getOwnerId() !== owner || recoveryScopeRef.current !== scope) return;
       Alert.alert(CAMERA_NOT_OPENED_TITLE, describeCameraOpenFailure(error), cameraOpenFailureButtons(() => {
         if (OfflineCaptureStore.getOwnerId() !== owner || recoveryScopeRef.current !== scope) return;
         void handleOpenCameraRef.current(lotIdx);
       }));
       return;
     }
+    if (OfflineCaptureStore.getOwnerId() !== owner || recoveryScopeRef.current !== scope) return;
     setActiveLotIdx(lotIdx >= 0 ? lotIdx : 0);
     setCameraOpen(true);
   }, [requireContractNumberForDraft, saveCurrentDraftNow]);
@@ -862,7 +856,7 @@ const LotListingFormSheet = ({
 
   const handleSubmit = async (
     destination: AuctionManagementDestination = 'LottingBoard',
-    options: { forceNew?: boolean; nextLot?: boolean; replaceSubmissionId?: string; replacementSourceId?: string; newSubmissionFromId?: string; automaticResume?: boolean } = {}
+    options: { forceNew?: boolean; nextLot?: boolean; replaceSubmissionId?: string; replacementSourceId?: string; newSubmissionFromId?: string } = {}
   ) => {
     if (submissionLockRef.current || saveLock.current || awaitingDraft || submitting || auctioneerControl?.accepted) return;
     if (options.nextLot && captureMode === 'offline') return;
@@ -883,7 +877,7 @@ const LotListingFormSheet = ({
     // an ordinary Submit or Resume from the Dashboard is saved, checked and
     // handed to the upload line, and the form closes. Incoming work and
     // Auction Management tasks keep waiting here for acceptance, and so do the
-    // explicit separate/replace choices and automatic resumes. A draft whose
+    // explicit separate/replace choices. A draft whose
     // last background attempt needs a decision runs here once, where the
     // prompts can appear; this attempt uses up that mark.
     const plannedDraftId = currentDraftId || draftIdentityRef.current;
@@ -893,13 +887,11 @@ const LotListingFormSheet = ({
       return;
     }
     let background = backgroundUploads && !auctioneer && !isAuctionManagementMode && !options.nextLot && !options.forceNew
-      && !options.replaceSubmissionId && !options.newSubmissionFromId && !options.automaticResume;
+      && !options.replaceSubmissionId && !options.newSubmissionFromId;
     if (backgroundUploads && backgroundUploadManager.prefersForeground(plannedDraftId)) {
       background = false;
       backgroundUploadManager.consumeForegroundMark(plannedDraftId);
     }
-    // A person's Submit or Resume starts a fresh count of automatic tries.
-    autoResume.beginAttempt(options.automaticResume === true);
     // Bind the user's explicit action across local preparation and transport.
     const operation = createUploadOperation();
     activeOperationRef.current = operation;
@@ -950,13 +942,7 @@ const LotListingFormSheet = ({
       draftSaved = true;
       attemptDraftId = localDraft.id;
       operation.assertActive();
-      try {
-        await prepareOfflineSubmission(localDraft);
-      } catch (error: any) {
-        // The background line waits for a connection by itself. Any other
-        // refusal stops here, as before.
-        if (!background || error?.code !== UPLOAD_WAITING_FOR_CONNECTION) throw error;
-      }
+      await prepareOfflineSubmission(localDraft);
       operation.assertActive();
       await OfflineCaptureStore.setSubmissionState(localDraft.id, 'ready');
       operation.assertActive();
@@ -1075,9 +1061,7 @@ const LotListingFormSheet = ({
         return;
       }
       if (connectivity.status === 'offline') {
-        // While this listing stays open it waits for the connection and starts
-        // by itself (useUploadAutoResume); this message shows only otherwise.
-        throw Object.assign(new Error('Saved on this device. Connect and tap Resume upload. Nothing will submit automatically.'), { code: UPLOAD_WAITING_FOR_CONNECTION });
+        throw new Error('Saved on this device. Connect and tap Resume upload. Nothing will submit automatically.');
       }
 
       const modernDraft = auctioneer ? await saveCurrentDraftNow() : null;
@@ -1086,7 +1070,6 @@ const LotListingFormSheet = ({
         if (!operation.isActive() || recoveryScopeRef.current !== attemptRecoveryScope || OfflineCaptureStore.getOwnerId() !== attemptOwner) return;
         setUploadProgress(progress);
         if (detail) setUploadStatus(detail);
-        autoResume.noteProgress(detail?.completedFiles);
       }, { operation });
       operation.assertActive();
       assertReportUploadAccepted(acceptedResponse);
@@ -1165,12 +1148,6 @@ const LotListingFormSheet = ({
           if (canAct()) void handleSubmit(destination, { newSubmissionFromId: conflictedSubmissionId });
         },
       } : undefined)) return;
-      // The app stopped this upload by itself: wait for a steady connection and
-      // continue while this listing stays open. A Pause the person tapped stays.
-      if (!pauseRequestedRef.current && autoResume.scheduleAfterFailure(e, {
-        resume: (automatic) => { void handleSubmitRef.current(destination, { nextLot: options.nextLot, automaticResume: automatic }); },
-        stillCurrent: () => OfflineCaptureStore.getOwnerId() === attemptOwner && recoveryScopeRef.current === attemptRecoveryScope,
-      })) return;
       const feedback = OfflineQueueService.getSubmissionError(e);
       Alert.alert(feedback.title, feedback.message);
     } finally {
@@ -1179,7 +1156,6 @@ const LotListingFormSheet = ({
       setPausingUpload(false);
     }
   };
-  handleSubmitRef.current = handleSubmit;
 
   const resetForm = async () => {
     setRecoveredAuctionTask(undefined);
@@ -1353,9 +1329,6 @@ const LotListingFormSheet = ({
             </View>
           </View>
         </Modal>
-        <UploadWaitingForSignal testID="lot-upload-waiting" visible={visible && autoResume.waiting}
-          completedFiles={uploadStatus?.completedFiles} totalFiles={uploadStatus?.totalFiles}
-          onResumeNow={autoResume.resumeNow} onPause={autoResume.stop} />
 
         {/* Restore Draft Modal */}
         <Modal

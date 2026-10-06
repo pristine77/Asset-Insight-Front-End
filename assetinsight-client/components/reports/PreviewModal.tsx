@@ -1,11 +1,10 @@
 "use client";
 
 import React, { useEffect, useLayoutEffect, useRef, useState } from "react";
-import { Save, Send, AlertCircle, Image, ChevronLeft, ChevronRight, X, RefreshCw, Download, Printer, Upload, Trash2, GitMerge as MergeIcon } from "lucide-react";
+import { Send, AlertCircle, Image, ChevronLeft, ChevronRight, X, RefreshCw, Download, Printer, Upload, Trash2, GitMerge as MergeIcon } from "lucide-react";
 import { toast } from "@/components/ui/toast";
 import {
   getPreviewData, 
-  updatePreviewData, 
   submitForApproval,
   getSubmittedPreviewData,
   resubmitReport,
@@ -367,7 +366,7 @@ function AppraiserSignaturePad({ value, disabled, onChange }: SignaturePadProps)
         aria-label="Draw appraiser signature"
       />
       <p className="mt-2 text-xs text-[var(--app-text-muted)]">
-        {value ? "Saved signature ready for DOCX generation." : "Draw inside the box, then save changes."}
+        {value ? "Saved signature ready for DOCX generation." : "Draw inside the box, then save and generate files."}
       </p>
     </div>
   );
@@ -380,7 +379,6 @@ export default function PreviewModal({
   onSuccess,
   isResubmitMode = false,
   loadPreviewDataOverride,
-  updatePreviewDataOverride,
   resubmitReportOverride,
   uploadPreviewLotImagesOverride,
   isAssignedApprovalMode = false,
@@ -388,7 +386,6 @@ export default function PreviewModal({
 }: PreviewModalProps) {
   // Single-page layout (tabs removed)
   const [loading, setLoading] = useState(true);
-  const [saving, setSaving] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [status, setStatus] = useState<string>("");
   const [declineReason, setDeclineReason] = useState<string>("");
@@ -444,9 +441,9 @@ export default function PreviewModal({
     setPreviewData,
     setHasChanges,
   });
-  const effectiveResubmitMode = status
+  const effectiveResubmitMode = isAssignedApprovalMode || (status
     ? status === "pending_approval" || status === "approved" || status === "error"
-    : isResubmitMode;
+    : isResubmitMode);
   const focusStateRef = useRef<{
     fieldId: string | null;
     selectionStart: number | null;
@@ -594,87 +591,6 @@ export default function PreviewModal({
     }
   };
 
-  const handleSaveChanges = async () => {
-    if (isMutationLocked()) return;
-    if (!isLocationReady) {
-      toast.error(
-        "Enter or resolve a readable inspection location before saving."
-      );
-      return;
-    }
-    if (locationBusy) {
-      toast.info("Wait for the inspection location to finish resolving.");
-      return;
-    }
-    if (filesGenerating || filesRegenerating) {
-      toast.info("This report has already been submitted and is still generating files.");
-      return;
-    }
-
-    const mutation = beginMutation("save");
-    if (!mutation) return;
-    const mutationContext = previewContextRef.current;
-
-    try {
-      setSaving(true);
-      const savePreview = updatePreviewDataOverride || updatePreviewData;
-      const previewForRequest = applyDamageAnalysisLotPolicy(previewData);
-      setPreviewData(previewForRequest);
-      const saved = await savePreview(reportId, previewForRequest);
-      if (previewContextRef.current !== mutationContext) return;
-      const hasNewerEdits = hasEditsSince(mutation);
-      const savedPreview = applyDamageAnalysisLotPolicy(
-        hasNewerEdits
-          ? mergeSubmittedPreviewData(
-              saved?.data,
-              previewDataRef.current || previewForRequest
-            )
-          : saved?.data || previewForRequest
-      );
-      setPreviewData(savedPreview);
-      // The server may normalize lot ordering. Clear transient index-based
-      // selection after a successful round trip so a later bulk action cannot
-      // target a different lot.
-      setSelectedLotIndexes(new Set());
-      if (Array.isArray(saved?.imageUrls)) {
-        setImageUrls(saved.imageUrls);
-        setImageCount(saved.imageUrls.length);
-      }
-      if (saved?.files_regeneration_queued) {
-        setFilesGenerating(true);
-        setFilesRegenerating(true);
-        if (!hasNewerEdits) setHasChanges(false);
-        const isFirstMergedPreviewBuild = previewData?.is_merged_report === true && !previewFiles?.excel;
-        toast.success(
-          isFirstMergedPreviewBuild
-            ? "Lot conflicts resolved. The merged preview is being generated."
-            : "Changes saved. Files are being regenerated with the updated report data."
-        );
-        if (onSuccess) onSuccess();
-        onClose();
-        return;
-      }
-      // Do not invoke a second, client-side file refresh after Save. Draft and
-      // preview saves remain metadata-only; finalized reports may return the
-      // single regeneration already claimed by the server.
-      if (!hasNewerEdits) setHasChanges(false);
-      toast.success(
-        isAssignedApprovalMode
-          ? "Changes saved. Submit to regenerate and approve the report."
-          : effectiveResubmitMode
-            ? "Changes saved. Resubmit when you are ready to regenerate final files."
-            : "Changes saved. Submit when you are ready to generate final files."
-      );
-    } catch (error: any) {
-      if (previewContextRef.current === mutationContext) {
-        toast.error(error.response?.data?.message || "Failed to save changes");
-      }
-    } finally {
-      setSaving(false);
-      finishMutation(mutation);
-    }
-  };
-
   const handleSubmitForApproval = async () => {
     if (isMutationLocked()) return;
     if (!previewData) {
@@ -705,6 +621,7 @@ export default function PreviewModal({
 
     try {
       setSubmitting(true);
+      setSelectedLotIndexes(new Set());
       let submittedReport: any;
       const previewForRequest = applyDamageAnalysisLotPolicy(previewData);
       setPreviewData(previewForRequest);
@@ -718,6 +635,7 @@ export default function PreviewModal({
           submit: true,
         });
         if (previewContextRef.current !== mutationContext) return;
+        setFilesGenerating(true);
         submittedReport = {
           ...promoted,
           _id: promoted.reportId,
@@ -729,16 +647,20 @@ export default function PreviewModal({
         const submitUpdatedReport = resubmitReportOverride || resubmitReport;
         await submitUpdatedReport(reportId, previewForRequest);
         if (previewContextRef.current !== mutationContext) return;
+        if (!hasEditsSince(mutation)) setHasChanges(false);
+        setFilesGenerating(true);
+        setFilesRegenerating(true);
         toast.success(
           isAssignedApprovalMode
             ? "Files are regenerating. The report will approve after generation succeeds."
-            : "Report resubmitted! Files are being regenerated."
+            : "Changes saved. Files are being regenerated from your updated data."
         );
       } else {
         // Submit the exact edited snapshot in one request. Saving first and then
         // submitting allowed the second request to queue an older preview copy.
         const submitted = await submitForApproval(reportId, previewForRequest);
         if (previewContextRef.current !== mutationContext) return;
+        setFilesGenerating(true);
         submittedReport = { ...submitted.data, _id: submitted.data?.reportId || reportId };
         if (!hasEditsSince(mutation)) setHasChanges(false);
         toast.success(submitted.message || "Report submitted. Files are being generated.");
@@ -1024,7 +946,7 @@ export default function PreviewModal({
   ) => {
     if (
       !window.confirm(
-        "Remove this photo from the lot? It will be permanently deleted from storage after you Save or Submit. Closing without saving leaves storage unchanged."
+        "Remove this photo from the lot? It will be permanently deleted from storage after you save and generate files. Closing without saving leaves storage unchanged."
       )
     ) {
       return;
@@ -1628,11 +1550,9 @@ export default function PreviewModal({
       ? "Uploading images and updating this preview…"
       : activeMutation === "submit"
         ? effectiveResubmitMode
-          ? "Resubmitting the report from this exact preview…"
-          : "Submitting the report and generating final files…"
-        : activeMutation === "save"
-          ? "Saving preview changes…"
-          : "";
+          ? "Saving changes and queuing regenerated report files…"
+          : "Saving changes and queuing report files…"
+        : "";
   const specPdfUrl = previewFiles?.spec_pdf;
   const crDocxUrl = previewFiles?.cr_docx;
 
@@ -1703,7 +1623,7 @@ export default function PreviewModal({
       open={isOpen}
       onClose={requestClose}
       title="Preview & Edit Report"
-      description="Review the complete report, save your progress, and return when you are ready to submit."
+      description="Review your edits, then save and generate all report files in one action. Existing approval and release steps still apply."
       fullscreen
       dismissOnBackdrop={false}
       closeDisabled={activeMutation !== null}
@@ -2196,7 +2116,7 @@ export default function PreviewModal({
               candidateUrls={coverImageCandidates}
               value={selectedCoverImageUrls}
               onChange={(urls) => updateField("cover_image_urls", urls)}
-              disabled={workflowLocked || saving || submitting}
+              disabled={workflowLocked || submitting}
             />
 
 
@@ -3004,8 +2924,7 @@ export default function PreviewModal({
               <ol className="list-decimal list-inside space-y-1 text-sm text-[var(--app-text-muted)]">
                 <li>Review the data</li>
                 <li>Make any necessary edits</li>
-                <li>Save your changes</li>
-                <li>Submit the report and generate final files</li>
+                <li>Save and generate files using the updated data</li>
               </ol>
             </div>
           </div>
@@ -3077,21 +2996,6 @@ export default function PreviewModal({
                 </div>
               )}
               <button
-                onClick={handleSaveChanges}
-                disabled={
-                  !hasChanges ||
-                  activeMutation !== null ||
-                  locationBusy ||
-                  workflowLocked
-                }
-                aria-label="Save changes"
-                className="app-button app-button--secondary"
-              >
-                <Save className="h-4 w-4" />
-                <span className="hidden sm:inline">{saving ? "Saving..." : "Save Changes"}</span>
-                <span className="sm:hidden">{saving ? "Save..." : "Save"}</span>
-              </button>
-              <button
                 onClick={handleSubmitForApproval}
                 disabled={
                   activeMutation !== null ||
@@ -3099,43 +3003,19 @@ export default function PreviewModal({
                   locationBusy ||
                   workflowLocked
                 }
-                aria-label={
-                  isAssignedApprovalMode
-                    ? "Submit and approve after regeneration"
-                    : draftPreviewId
-                      ? "Save draft preview and submit report"
-                    : effectiveResubmitMode
-                      ? "Resubmit report"
-                      : "Submit report"
-                }
                 className="app-button app-button--primary"
               >
                 {effectiveResubmitMode ? <RefreshCw className="h-4 w-4" /> : <Send className="h-4 w-4" />}
-                <span className="hidden sm:inline">
+                <span>
                   {submitting
-                    ? (isAssignedApprovalMode ? "Submitting..." : effectiveResubmitMode ? "Resubmitting..." : "Submitting...")
+                    ? "Saving & queuing files..."
                     : workflowLocked
-                    ? (filesRegenerating ? "Regenerating Files..." : "Already Submitted")
-                    : isAssignedApprovalMode
-                      ? "Submit & Approve"
-                    : draftPreviewId
-                      ? effectiveResubmitMode
-                        ? "Save & Resubmit"
-                        : "Save & Submit"
-                        : (effectiveResubmitMode ? "Save & Resubmit" : "Submit for Approval")}
-                </span>
-                <span className="sm:hidden">
-                  {submitting
-                    ? (isAssignedApprovalMode ? "Submit..." : effectiveResubmitMode ? "Resubmit..." : "Submit...")
-                    : workflowLocked
-                    ? (filesRegenerating ? "Generating..." : "Submitted")
-                    : isAssignedApprovalMode
-                      ? "Approve"
-                      : draftPreviewId
-                        ? effectiveResubmitMode
-                          ? "Save & Resubmit"
-                          : "Save & Submit"
-                        : (effectiveResubmitMode ? "Resubmit" : "Submit")}
+                      ? "Generating files..."
+                      : isAssignedApprovalMode
+                        ? "Save, Regenerate & Approve"
+                        : effectiveResubmitMode
+                          ? "Save & Regenerate"
+                          : "Save & Generate"}
                 </span>
               </button>
             </div>

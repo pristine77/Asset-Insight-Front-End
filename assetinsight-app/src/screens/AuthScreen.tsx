@@ -20,6 +20,7 @@ import { useAuth } from '../context/AuthContext';
 import authService, { SignupPayload, type AuthResponse } from '../services/authService';
 import { Feather } from '@expo/vector-icons';
 import { useAppTheme, type AppThemeColors } from '../context/ThemeContext';
+import AccountPrivacyLinks from '../components/AccountPrivacyLinks';
 
 const BrandIcon = require('../../assets/icon.png');
 const EquipmentArtwork = require('../../assets/auth-equipment-yard.png');
@@ -727,6 +728,7 @@ const AuthScreen: React.FC = () => {
           {view === 'verify' && renderVerifyView()}
           {view === 'forgotPassword' && renderForgotView()}
           {view === 'resetPassword' && renderResetView()}
+          <AccountPrivacyLinks />
         </ScrollView>
       </KeyboardAvoidingView>
     </SafeAreaView>

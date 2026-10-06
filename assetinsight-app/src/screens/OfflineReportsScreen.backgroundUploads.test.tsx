@@ -37,10 +37,6 @@ jest.mock('../services/offlineQueueService', () => ({ __esModule: true, default:
 jest.mock('../services/reportDraftService', () => ({ __esModule: true, default: { list: jest.fn(async () => []), delete: jest.fn(async () => undefined) } }));
 jest.mock('../services/draftSyncService', () => ({ __esModule: true, default: { syncDraft: jest.fn() } }));
 jest.mock('../services/offlineSubmissionService', () => ({ prepareOfflineSubmission: jest.fn(async (draft: unknown) => draft) }));
-jest.mock('../services/uploadAutoResume', () => ({
-  ...jest.requireActual('../services/uploadAutoResume'),
-  waitForStableConnection: jest.fn(() => new Promise(() => {})),
-}));
 
 const UPDATED_AT = '2026-10-02T10:00:00.000Z';
 /** An Online draft on this device; never saved to the cloud unless cloudSyncedAt is given. */

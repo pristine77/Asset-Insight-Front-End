@@ -85,8 +85,7 @@ function scheduleDisconnectPause(): void {
   if (disconnectPauseTimer) return;
   disconnectPauseTimer = setTimeout(() => {
     disconnectPauseTimer = null;
-    // 'connection' lets an open report resume this upload by itself once the
-    // signal is back (uploadAutoResume.ts).
+    // Preserve the reason for feedback; reconnection never resumes the upload.
     if (!isUploadFinalizing()) pauseActiveUploads('connection');
   }, DISCONNECT_PAUSE_DELAY_MS);
 }

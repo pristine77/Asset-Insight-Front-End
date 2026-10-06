@@ -52,6 +52,29 @@ it('signs in with normalized email and the exact password', async () => {
   expect(login).toHaveBeenCalledWith({ email: 'fixture@example.test', password: ' fixture password ' });
 });
 
+it('opens privacy and account-deletion instructions while signed out without sending auth requests', async () => {
+  jest.spyOn(Linking, 'openURL').mockResolvedValue(undefined);
+  await render(<AuthScreen />);
+  await fireEvent.press(screen.getByRole('link', { name: 'Privacy policy' }));
+  await fireEvent.press(screen.getByRole('link', { name: 'Account deletion' }));
+  expect(Linking.openURL).toHaveBeenNthCalledWith(1, 'https://assetinsightvaluator.com/privacy');
+  expect(Linking.openURL).toHaveBeenNthCalledWith(2, 'https://assetinsightvaluator.com/account-deletion');
+  expect(login).not.toHaveBeenCalled();
+  expect(authService.signup).not.toHaveBeenCalled();
+  expect(refreshUser).not.toHaveBeenCalled();
+});
+
+it('keeps privacy and account-deletion links reachable on signup and password recovery', async () => {
+  await render(<AuthScreen />);
+  await press('Create Account');
+  expect(screen.getByRole('link', { name: 'Privacy policy' })).toBeTruthy();
+  expect(screen.getByRole('link', { name: 'Account deletion' })).toBeTruthy();
+  await press('Sign In');
+  await press('Forgot password?');
+  expect(screen.getByRole('link', { name: 'Privacy policy' })).toBeTruthy();
+  expect(screen.getByRole('link', { name: 'Account deletion' })).toBeTruthy();
+});
+
 it('reopens verification after an unverified user signs in, and supports resend', async () => {
   login.mockRejectedValueOnce(Object.assign(new Error('Please verify your email before logging in.'), { code: 'EMAIL_NOT_VERIFIED' }));
   jest.mocked(authService.resendVerificationCode).mockResolvedValue({ message: 'Verification code resent.' });

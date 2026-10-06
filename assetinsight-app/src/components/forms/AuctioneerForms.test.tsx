@@ -13,7 +13,6 @@ import OfflineCaptureStore from '../../services/offlineCaptureStore';
 import reportDraftService from '../../services/reportDraftService';
 import { prepareOfflineSubmission } from '../../services/offlineSubmissionService';
 import { pauseActiveUploads, setUploadOwner } from '../../services/uploadCancellation';
-import { waitForStableConnection } from '../../services/uploadAutoResume';
 
 let mockOwner: string | null = 'owner';
 jest.mock('expo-crypto', () => ({ randomUUID: () => require('node:crypto').randomUUID() }));
@@ -70,11 +69,6 @@ jest.mock('../../utils/mobileLocation', () => ({
   normalizeHiddenLocation: (location?: string) => ({ location: location || 'Not provided' }),
   getHiddenCurrentLocation: jest.fn(async () => ({ location: 'Not provided' })),
 }));
-// The wait for a steady connection is driven by each test (see signalWaits).
-jest.mock('../../services/uploadAutoResume', () => ({
-  ...jest.requireActual('../../services/uploadAutoResume'),
-  waitForStableConnection: jest.fn(),
-}));
 
 function setup(type: AuctioneerReportType = 'asset'): AuctioneerWorkItemSetup {
   return {
@@ -114,7 +108,6 @@ beforeEach(() => {
   jest.mocked(assetService.createAssetReport).mockResolvedValue({ jobId: 'job-parent', reportId: 'report-parent', message: 'Queued', accepted: true } as any);
   jest.mocked(lotListingService.createLotListing).mockResolvedValue({ jobId: 'job-parent', reportId: 'report-parent', message: 'Queued', phase: 'processing' });
   // By default the signal never comes back during a test.
-  jest.mocked(waitForStableConnection).mockReset().mockImplementation(() => new Promise<boolean>(() => {}));
 });
 
 afterEach(async () => { await cleanup(); jest.restoreAllMocks(); });
@@ -316,167 +309,33 @@ describe.each(['asset', 'lotListing'] as const)('%s upload progress and explicit
     expect(screen.queryByTestId('camera-locked')).toBeNull();
   });
 
-  /*
-   * Automatic resume (2026-10-02): an upload the app stopped by itself waits
-   * for a steady connection and continues while the report stays open
-   * (services/uploadAutoResume.ts, useUploadAutoResume.ts).
-   */
-  // Each wait for a steady connection ends when the test says the signal is back.
-  function signalWaits() {
-    const waits: Array<{ signal: AbortSignal; ready: (value: boolean) => void }> = [];
-    jest.mocked(waitForStableConnection).mockImplementation(({ signal }) => new Promise<boolean>((resolve) => { waits.push({ signal, ready: resolve }); }));
-    return waits;
-  }
-  const lostConnection = () => Object.assign(new Error('Upload paused. Your draft is saved. Resume this same upload to check whether the server already accepted it.'),
-    { code: 'ERR_CANCELED', acceptanceUncertain: true, pauseReason: 'connection' });
-  const networkError = () => Object.assign(new Error('Network Error'), { code: 'ERR_NETWORK' });
-  const waitingText = 'Waiting for signal';
-
-  it('continues by itself once the signal is back, with the same submission and photos', async () => {
-    const waits = signalWaits();
-    const first = pendingUpload();
+  it('does not expose a retry or open the camera when ownership changes during save', async () => {
     await mount();
-    await fireEvent.press(screen.getByRole('button', { name: submitLabel }));
-    await waitFor(() => expect(upload).toHaveBeenCalledTimes(1));
-    await act(async () => { first.progress(40, { ...detail, percent: 40, completedFiles: 64 }); });
-    await act(async () => { first.reject(lostConnection()); });
-    await waitFor(() => expect(screen.getByText(waitingText)).toBeTruthy());
-    expect(screen.getByText('64 of 160 files sent so far')).toBeTruthy();
-    expect(Alert.alert).not.toHaveBeenCalledWith('Upload failed', expect.anything());
-    expect(OfflineCaptureStore.setSubmissionState).toHaveBeenCalledWith('local-parent', 'paused', undefined, expect.stringContaining('Upload paused'));
-    expect(waits).toHaveLength(1);
-    const second = pendingUpload();
-    await act(async () => { waits[0].ready(true); });
-    await waitFor(() => expect(upload).toHaveBeenCalledTimes(2));
-    expect(jest.mocked(upload).mock.calls[1][0].client_submission_id).toBe(jest.mocked(upload).mock.calls[0][0].client_submission_id);
-    expect(jest.mocked(upload).mock.calls[1][1]).toEqual(jest.mocked(upload).mock.calls[0][1]);
-    expect(screen.queryByText(waitingText)).toBeNull();
-    await act(async () => { second.reject(new Error('Stopped')); });
+    jest.mocked(AutoSaveService.saveDraft).mockImplementation(async () => {
+      mockOwner = 'other-owner';
+      throw new Error('Storage unavailable');
+    });
+    await fireEvent.press(screen.getByRole('button', { name: 'Open mock lot camera' }));
+    expect(cameraTryAgain()).toBeUndefined();
+    expect(screen.queryByTestId('camera-locked')).toBeNull();
   });
 
-  it('waits for a connection when Submit finds none, then starts by itself', async () => {
-    const waits = signalWaits();
-    await mount();
-    jest.mocked(OfflineQueueService.getConnectivityStatus).mockResolvedValueOnce({ status: 'offline' } as any);
-    const first = pendingUpload();
-    await fireEvent.press(screen.getByRole('button', { name: submitLabel }));
-    await waitFor(() => expect(screen.getByText(waitingText)).toBeTruthy());
-    expect(upload).not.toHaveBeenCalled();
-    await act(async () => { waits[0].ready(true); });
-    await waitFor(() => expect(upload).toHaveBeenCalledTimes(1));
-    await act(async () => { first.reject(new Error('Stopped')); });
-  });
-
-  it('keeps a Pause the person tapped', async () => {
-    const waits = signalWaits();
+  it('requires explicit Resume after a connection interruption and keeps the same identity', async () => {
     const first = pendingUpload();
     await mount();
     await fireEvent.press(screen.getByRole('button', { name: submitLabel }));
     await waitFor(() => expect(upload).toHaveBeenCalledTimes(1));
-    await fireEvent.press(screen.getByRole('button', { name: 'Pause upload' }));
-    // The Pause aborts the request in flight, which on its own looks like a
-    // network failure; the form knows the person asked for it.
-    await act(async () => { first.reject(Object.assign(new Error('canceled'), { code: 'ERR_CANCELED', request: {} })); });
+    await act(async () => { first.reject(Object.assign(new Error('Upload paused. Your draft is saved.'), { code: 'ERR_CANCELED', pauseReason: 'connection' })); });
     await waitFor(() => expect(screen.getByRole('button', { name: 'Resume upload' })).toBeTruthy());
-    expect(screen.queryByText(waitingText)).toBeNull();
-    expect(waits).toHaveLength(0);
+    await act(async () => { await new Promise(resolve => setTimeout(resolve, 20)); });
     expect(upload).toHaveBeenCalledTimes(1);
-  });
-
-  it('does not wait after a failure that needs the person', async () => {
-    const waits = signalWaits();
-    const first = pendingUpload();
-    await mount();
-    await fireEvent.press(screen.getByRole('button', { name: submitLabel }));
-    await waitFor(() => expect(upload).toHaveBeenCalledTimes(1));
-    await act(async () => { first.reject(Object.assign(new Error('Bad request'), { response: { status: 400, data: { message: 'Bad request' } } })); });
-    await waitFor(() => expect(Alert.alert).toHaveBeenCalledWith('Upload failed', expect.any(String)));
-    expect(screen.queryByText(waitingText)).toBeNull();
-    expect(waits).toHaveLength(0);
-  });
-
-  it('stops waiting for good on Pause upload, and Resume now starts at once', async () => {
-    const waits = signalWaits();
-    const first = pendingUpload();
-    await mount();
-    await fireEvent.press(screen.getByRole('button', { name: submitLabel }));
-    await waitFor(() => expect(upload).toHaveBeenCalledTimes(1));
-    await act(async () => { first.reject(networkError()); });
-    await waitFor(() => expect(screen.getByText(waitingText)).toBeTruthy());
-    await fireEvent.press(screen.getByRole('button', { name: 'Pause upload' }));
-    expect(screen.queryByText(waitingText)).toBeNull();
-    expect(waits[0].signal.aborted).toBe(true);
-    await act(async () => { waits[0].ready(true); });
-    expect(upload).toHaveBeenCalledTimes(1);
-    expect(screen.getByRole('button', { name: 'Resume upload' })).toBeTruthy();
-    // A second interruption waits again; Resume now does not wait for the signal.
+    expect(screen.queryByText('Waiting for signal')).toBeNull();
     const second = pendingUpload();
     await fireEvent.press(screen.getByRole('button', { name: 'Resume upload' }));
     await waitFor(() => expect(upload).toHaveBeenCalledTimes(2));
-    await act(async () => { second.reject(networkError()); });
-    await waitFor(() => expect(screen.getByText(waitingText)).toBeTruthy());
-    const third = pendingUpload();
-    await fireEvent.press(screen.getByRole('button', { name: 'Resume upload now' }));
-    await waitFor(() => expect(upload).toHaveBeenCalledTimes(3));
-    expect(waits[1].signal.aborted).toBe(true);
-    expect(jest.mocked(upload).mock.calls[2][0].client_submission_id).toBe(jest.mocked(upload).mock.calls[0][0].client_submission_id);
-    await act(async () => { third.reject(new Error('Stopped')); });
-  });
-
-  it('hands back to the person after three automatic tries that store nothing new', async () => {
-    const waits = signalWaits();
-    const attempts = [pendingUpload()];
-    await mount();
-    await fireEvent.press(screen.getByRole('button', { name: submitLabel }));
-    await waitFor(() => expect(upload).toHaveBeenCalledTimes(1));
-    for (let round = 0; round < 3; round += 1) {
-      await act(async () => { attempts[round].reject(networkError()); });
-      await waitFor(() => expect(waits).toHaveLength(round + 1));
-      attempts.push(pendingUpload());
-      await act(async () => { waits[round].ready(true); });
-      await waitFor(() => expect(upload).toHaveBeenCalledTimes(round + 2));
-    }
-    await act(async () => { attempts[3].reject(networkError()); });
-    await waitFor(() => expect(Alert.alert).toHaveBeenCalledWith('Upload failed', expect.any(String)));
-    expect(waits).toHaveLength(3);
-    expect(screen.queryByText(waitingText)).toBeNull();
-    expect(screen.getByRole('button', { name: 'Resume upload' })).toBeTruthy();
-  });
-
-  it('keeps going while each try stores more files', async () => {
-    const waits = signalWaits();
-    const attempts = [pendingUpload()];
-    await mount();
-    await fireEvent.press(screen.getByRole('button', { name: submitLabel }));
-    await waitFor(() => expect(upload).toHaveBeenCalledTimes(1));
-    for (let round = 0; round < 5; round += 1) {
-      await act(async () => { attempts[round].progress(20, { ...detail, completedFiles: 20 * (round + 1) }); });
-      await act(async () => { attempts[round].reject(networkError()); });
-      await waitFor(() => expect(waits).toHaveLength(round + 1));
-      attempts.push(pendingUpload());
-      await act(async () => { waits[round].ready(true); });
-      await waitFor(() => expect(upload).toHaveBeenCalledTimes(round + 2));
-    }
-    expect(Alert.alert).not.toHaveBeenCalledWith('Upload failed', expect.anything());
-    await act(async () => { attempts[5].reject(new Error('Stopped')); });
-  });
-
-  it.each(['account', 'closed form'] as const)('never resumes after a change of %s while waiting', async (change) => {
-    const waits = signalWaits();
-    const first = pendingUpload();
-    const { closed, view } = await mount();
-    await fireEvent.press(screen.getByRole('button', { name: submitLabel }));
-    await waitFor(() => expect(upload).toHaveBeenCalledTimes(1));
-    await act(async () => { first.reject(lostConnection()); });
-    await waitFor(() => expect(waits).toHaveLength(1));
-    if (change === 'account') mockOwner = 'other-owner';
-    else {
-      await view.rerender(<Form visible={false} draftIdToLoad="local-parent" onClose={closed} />);
-      expect(waits[0].signal.aborted).toBe(true);
-    }
-    await act(async () => { waits[0].ready(true); });
-    expect(upload).toHaveBeenCalledTimes(1);
-    expect(screen.queryByText(waitingText)).toBeNull();
+    expect(jest.mocked(upload).mock.calls[1][0].client_submission_id).toBe(jest.mocked(upload).mock.calls[0][0].client_submission_id);
+    expect(jest.mocked(upload).mock.calls[1][1]).toEqual(jest.mocked(upload).mock.calls[0][1]);
+    await act(async () => { second.reject(new Error('Stopped')); });
   });
 
   it('ignores late transfer progress after an account change', async () => {

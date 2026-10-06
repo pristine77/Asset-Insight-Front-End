@@ -124,9 +124,13 @@ export default function AuthLightShell({
           <div className="flex flex-1 items-start px-5 pb-12 pt-14 sm:px-10 lg:px-16 lg:pt-16 xl:px-[5.5rem]">
             <div className="mx-auto w-full max-w-[680px]">{children}</div>
           </div>
-          <footer className="flex items-center justify-center gap-5 px-5 pb-10 text-sm text-[var(--app-text-muted)]">
+          <footer className="flex flex-wrap items-center justify-center gap-x-5 gap-y-3 px-5 pb-10 text-sm text-[var(--app-text-muted)]">
             <Link className="transition-colors hover:text-[var(--app-text)]" href="/privacy">
               Privacy
+            </Link>
+            <span aria-hidden="true" className="h-5 w-px bg-[var(--app-border)]" />
+            <Link className="transition-colors hover:text-[var(--app-text)]" href="/account-deletion">
+              Account deletion
             </Link>
             <span aria-hidden="true" className="h-5 w-px bg-[var(--app-border)]" />
             <a className="transition-colors hover:text-[var(--app-text)]" href={`mailto:${supportEmail}`}>

@@ -347,23 +347,8 @@ async function completeUploadSessionWithRetry(
         {},
         { timeout: 120000, signal }
       ));
-      // A retry of this same completion that the server answers with
-      // reusedAcceptance is this attempt's own acceptance: the earlier request
-      // reached the server and only its answer was lost (the 120 s timeout, a
-      // dropped connection, a 5xx after the job was queued). The session and
-      // manifest are the ones this attempt uploaded, so the receipt is reported
-      // exactly as if the first answer had arrived. Without this the forms took
-      // it for an older report, never marked the draft accepted, and left it on
-      // "Resume upload" for good (reported 2026-10-01).
-      // An acceptance that existed before this attempt began is unaffected:
-      // createOrResumeUploadSession returns it as alreadyQueued, and this
-      // request is never made.
-      if (attempt > 1 && (response as any)?.data?.reusedAcceptance === true) {
-        return {
-          ...response,
-          data: { ...(response as any).data, reusedAcceptance: false, acceptedOnRetry: true },
-        };
-      }
+      // Never rewrite a historical-acceptance flag: matching photo manifests
+      // do not prove the current form values were accepted. Keep the draft.
       return response;
     } catch (error) {
       operation.assertActive();
@@ -376,10 +361,11 @@ async function completeUploadSessionWithRetry(
       // the 120 s client timeout. Ask before sending it again, so an accepted
       // report finishes now instead of after up to four blind re-sends and,
       // at the end, a failure for a report that was in fact accepted
-      // (2026-10-02). The receipt counts as this attempt's own acceptance.
+      // (2026-10-02). A status read does not bind current field edits, so retain
+      // the draft for explicit review using the historical-acceptance flag.
       const receipt = await acceptedReceiptFromStatus(operation, endpoint, sessionId);
       if (receipt) {
-        return { data: { ...receipt, reusedAcceptance: false, acceptedOnRetry: true } };
+        return { data: { ...receipt, reusedAcceptance: true } };
       }
       if (attempt >= COMPLETE_SESSION_RETRIES) {
         throw normalizeUploadError(error, 'The upload could not be finalized');

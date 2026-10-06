@@ -3,7 +3,7 @@ import AutoSaveService, { OfflineReportDraft } from './autoSaveService';
 import OfflineCaptureStore from './offlineCaptureStore';
 import auctioneerService from './auctioneerService';
 import { hasValidAuctioneerLotStructure } from '../components/forms/auctioneerFormPolicy';
-import { UPLOAD_WAITING_FOR_CONNECTION } from './uploadAutoResume';
+import { UPLOAD_WAITING_FOR_CONNECTION } from './uploadResumePolicy';
 
 /** Called only by a user's Submit/Resume action. Nothing here schedules future work. */
 export async function prepareOfflineSubmission(draft: OfflineReportDraft) {
@@ -12,8 +12,8 @@ export async function prepareOfflineSubmission(draft: OfflineReportDraft) {
   // Only a reported disconnect refuses here (2026-10-02). NetInfo's
   // isInternetReachable is its own probe of a public URL and reads false on weak
   // but working signal, which refused uploads that would have gone through; the
-  // forms check our own server right after this. An open report given this
-  // error waits for the connection and starts by itself (uploadAutoResume.ts).
+  // forms check our own server right after this. Connection changes never
+  // resubmit: the person must explicitly tap Submit or Resume again.
   const network = await NetInfo.fetch();
   if (network.isConnected === false) {
     throw Object.assign(new Error('Saved on this device. Connect to the internet, then tap Submit or Resume upload. Nothing will upload automatically.'), { code: UPLOAD_WAITING_FOR_CONNECTION });

@@ -747,3 +747,14 @@
     transition: none;
   }
 }
+.loadIssue {
+  border: 1px solid var(--app-border);
+  border-left: 4px solid #d97706;
+  border-radius: 12px;
+  padding: 16px;
+  background: var(--app-surface);
+  color: var(--app-text);
+  font-size: 14px;
+  overflow-wrap: anywhere;
+}
+.loadIssue ul { padding-left: 20px; margin: 8px 0 12px; }

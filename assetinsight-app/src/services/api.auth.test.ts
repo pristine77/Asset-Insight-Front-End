@@ -10,6 +10,7 @@ jest.mock('axios', () => {
 });
 jest.mock('@react-native-async-storage/async-storage', () => ({ removeItem: jest.fn(), setItem: jest.fn(), multiRemove: jest.fn() }));
 jest.mock('./deviceReinstallIdentity', () => ({ getAndroidReinstallId: jest.fn(async () => 'fixture-installation') }));
+jest.mock('./appVersion', () => ({ getAppVersionLabel: () => '1.0.1 (build 73)' }));
 jest.mock('./deviceAccessStorage', () => ({
   clearSecureSession: jest.fn(), emitRestrictedDeviceAccess: jest.fn(), emitSessionInvalidated: jest.fn(),
   getDeviceKey: jest.fn(async () => 'fixture-device'), getOrCreateDeviceKey: jest.fn(async () => 'fixture-device'),
@@ -17,9 +18,20 @@ jest.mock('./deviceAccessStorage', () => ({
 }));
 
 const rejectResponse = (api.interceptors.response.use as jest.Mock).mock.calls[0][1] as (error: any) => Promise<unknown>;
+const prepareRequest = (api.interceptors.request.use as jest.Mock).mock.calls[0][0] as (config: any) => Promise<any>;
 const unauthorized = () => ({ response: { status: 401, data: {} }, config: { headers: {} } });
 const deferred = <T,>() => { let resolve!: (value: T) => void; let reject!: (error: any) => void; const promise = new Promise<T>((yes, no) => { resolve = yes; reject = no; }); return { promise, resolve, reject }; };
 beforeEach(() => { jest.clearAllMocks(); invalidateAuthOperations(); jest.mocked(storage.getRefreshToken).mockResolvedValue('secure-refresh'); });
+
+it('sends the installed app version with the existing owner and device context', async () => {
+  const request = await prepareRequest({ url: '/asset', headers: {} });
+  expect(request.headers).toEqual(expect.objectContaining({
+    'X-App-Version': '1.0.1 (build 73)',
+    'X-Device-Key': 'fixture-device',
+    Authorization: 'Bearer old-access',
+    'X-Activity-Source': expect.stringMatching(/^(android|ios)$/),
+  }));
+});
 
 it.each([
   { message: 'Network Error' }, { code: 'ECONNABORTED', message: 'timeout' },

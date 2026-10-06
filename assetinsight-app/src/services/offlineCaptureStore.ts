@@ -1,6 +1,6 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { randomUUID } from 'expo-crypto';
-import Constants from 'expo-constants';
+import { getAppVersionLabel } from './appVersion';
 import { Platform } from 'react-native';
 import type { SQLiteDatabase } from 'expo-sqlite';
 import type { OfflineReportDraft } from './autoSaveService';
@@ -197,7 +197,7 @@ export function createOfflineCaptureStore(openDatabase: DatabaseFactory, legacyS
       const revision = (old?.revision || 0) + 1;
       saved = { ...draft, captureId: previous?.captureId || draft.captureId || randomUUID(), ownerId: expected, localRevision: revision,
         manualSubmissionRequired: Boolean(previous?.manualSubmissionRequired || previous?.captureMode === 'offline' || draft.captureMode === 'offline' || draft.manualSubmissionRequired || draft.formData.manualSubmissionRequired),
-        inventoryAppVersion: Constants.expoConfig?.version || 'unknown', inventoryPlatform: Platform.OS === 'ios' ? 'ios' : 'android',
+        inventoryAppVersion: getAppVersionLabel() || 'unknown', inventoryPlatform: Platform.OS === 'ios' ? 'ios' : 'android',
         captureMode: draft.captureMode || previous?.captureMode || 'online',
         submissionState: draft.submissionState || previous?.submissionState || 'local' };
       saved.formData = { ...saved.formData, manualSubmissionRequired: saved.manualSubmissionRequired };
@@ -343,7 +343,7 @@ export function createOfflineCaptureStore(openDatabase: DatabaseFactory, legacyS
           eventId, activityId: draft.captureId || draft.id, reportType: draft.type,
           contract: draft.contractNo || '', source: Platform.OS === 'ios' ? 'ios' : 'android',
           sequence: draft.localRevision || 0, sequenceScope: draft.captureId || draft.id,
-          observedAt: new Date().toISOString(), appVersion: Constants.expoConfig?.version,
+          observedAt: new Date().toISOString(), appVersion: getAppVersionLabel(),
           action: 'draft_opened', outcome: 'completed',
           data: { beforeCounts: counts, afterCounts: counts, uploadLogo: state.logo,
             cameraStamp: state.lots.some(lot => [...lot.main, ...lot.extra].some(photo => photo.camera)) ? 'camera_reported' : 'not_recorded', captureMode: state.mode },

@@ -133,7 +133,7 @@ export default function UploadBar({ onOpenDraft }: Props) {
   const renderQueued = (entry: BackgroundUploadEntry) => (
     <View key={entry.id} testID={`upload-queued-${entry.id}`} style={styles.row}>
       <Feather name="clock" size={16} color={colors.textSecondary} />
-      <Text style={styles.text} numberOfLines={1}>In line: {entry.title} · {entry.totalFiles} photos</Text>
+      <Text style={styles.text} numberOfLines={1}>In line: {entry.title} · {entry.totalFiles} files</Text>
       <TouchableOpacity accessibilityRole="button" accessibilityLabel={`Pause upload of ${entry.title}`} style={styles.button}
         onPress={() => backgroundUploadManager.pause(entry.id)}>
         <Text style={styles.buttonText}>Pause</Text>
@@ -151,7 +151,7 @@ export default function UploadBar({ onOpenDraft }: Props) {
         ? `Pausing ${entry.title}…`
         : finalizing
           ? `Finalizing ${entry.title}…`
-          : `Uploading ${entry.title} · ${counts} photos`;
+          : `Uploading ${entry.title} · ${counts} files`;
     const percent = Math.max(0, Math.min(100, entry.percent || 0));
     return (
       <View testID="upload-bar-active" style={[styles.card, { borderLeftColor: waiting ? colors.warning : colors.info }]}>
@@ -202,7 +202,7 @@ export default function UploadBar({ onOpenDraft }: Props) {
       <View style={styles.stack}>
         {olderNotices > 0 ? (
           <Text style={[styles.secondary, styles.more]}>
-            +{olderNotices} earlier {olderNotices === 1 ? 'notice' : 'notices'} · Drafts shows each report's status
+            +{olderNotices} earlier {olderNotices === 1 ? 'notice' : 'notices'} · Drafts shows each report&apos;s status
           </Text>
         ) : null}
         {shownNotices.map(renderNotice)}

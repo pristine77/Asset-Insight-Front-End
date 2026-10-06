@@ -1,4 +1,4 @@
-import API from "@/lib/api";
+import API, { type RetriableAxiosConfig } from "@/lib/api";
 
 export type AuctioneerReportType = "asset" | "lotListing";
 export type AuctioneerIncomingKind = "scheduleA" | "unknown";
@@ -117,6 +117,7 @@ export type AuctioneerDeliverySummary = {
   contractClosedAt?: string;
   /** Whether the whole contract was complete when that close was confirmed. */
   contractTaskCompleted?: boolean;
+  contractCloseUserStatus?: "completed" | "revoked";
   error?: string;
   sentAt?: string;
   updatedAt?: string;
@@ -126,7 +127,7 @@ export type AuctioneerDeliverySummary = {
 export type AuctioneerContractPartClose = {
   contractId: string;
   contractNo?: string;
-  closedAt?: string;
+  closedAt: string;
   /** Every assigned person has now closed theirs: the contract is complete. */
   taskCompleted: boolean;
   /** The contract had already completed before this close. */
@@ -523,6 +524,8 @@ function normalizeDelivery(value: unknown): AuctioneerDeliverySummary {
       typeof raw.contractTaskCompleted === "boolean"
         ? raw.contractTaskCompleted
         : undefined,
+    contractCloseUserStatus: raw.contractCloseUserStatus === "completed" || raw.contractCloseUserStatus === "revoked"
+      ? raw.contractCloseUserStatus : undefined,
     error: textValue(delivery.error, raw.error) || undefined,
     sentAt: textValue(delivery.sentAt, raw.sentAt) || undefined,
     updatedAt: textValue(delivery.updatedAt, raw.updatedAt) || undefined,
@@ -644,13 +647,24 @@ export const AuctioneerService = {
   ): Promise<AuctioneerContractPartClose> {
     const response = await API.post(
       `/auctioneer/contracts/${encodeURIComponent(contractId)}/close-my-part`,
-      {}
+      {},
+      { _retry: true, timeout: 30_000 } as RetriableAxiosConfig
     );
     const raw = asRecord(unwrap(response.data));
+    // An empty/mismatched success is not a receipt for closing this contract.
+    // Do not replay a lifecycle mutation automatically after authentication errors.
+    if (
+      asRecord(response.data).success !== true || raw.contractId !== contractId ||
+      typeof raw.closedAt !== "string" || !Number.isFinite(Date.parse(raw.closedAt)) ||
+      typeof raw.taskCompleted !== "boolean" || typeof raw.alreadyCompleted !== "boolean" ||
+      (raw.taskCompleted !== true && raw.userStatus !== "completed" && raw.userStatus !== "revoked")
+    ) {
+      throw new Error("Contract completion was not confirmed. Refresh Reports to check its status before trying again.");
+    }
     return {
-      contractId: textValue(raw.contractId) || contractId,
+      contractId,
       contractNo: textValue(raw.contractNo) || undefined,
-      closedAt: textValue(raw.closedAt) || undefined,
+      closedAt: raw.closedAt,
       taskCompleted: raw.taskCompleted === true,
       alreadyCompleted: raw.alreadyCompleted === true,
       userStatus:

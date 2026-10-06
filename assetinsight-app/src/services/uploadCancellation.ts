@@ -2,6 +2,12 @@ let epoch = 0;
 let uploadOwner: string | null = null;
 const cancels = new Set<() => void>();
 const ownerListeners = new Set<(ownerId: string | null) => void>();
+const pauseListeners = new Set<() => void>();
+/** Global Offline/connection/account pauses also revoke queued upload authority. */
+export function onUploadsPaused(listener: () => void): () => void {
+  pauseListeners.add(listener);
+  return () => { pauseListeners.delete(listener); };
+}
 /** Bind with local draft ownership, before starting any account's uploads. */
 export function setUploadOwner(ownerId: string | null) {
   if (uploadOwner === ownerId) return;
@@ -24,8 +30,8 @@ export function onUploadOwnerChange(listener: (ownerId: string | null) => void):
 /**
  * Why uploads were paused, when no person asked for it. Only the automatic
  * pause on a lost connection gives one; the Pause button, Offline mode and an
- * account change give none. An open report resumes an upload paused for a
- * reason by itself once the signal is back (uploadAutoResume.ts, 2026-10-02).
+ * account change give none. This reason is operational feedback, never
+ * permission to upload automatically after reconnection.
  */
 export type UploadPauseReason = 'connection';
 // The reason for each pause, by the generation that pause started. The pause
@@ -184,6 +190,10 @@ export function pauseActiveUploads(reason?: UploadPauseReason) {
   epoch++;
   if (reason) pauseReasons.set(epoch, reason);
   pauseReasons.delete(epoch - PAUSE_REASONS_KEPT);
+  // Hold queued jobs before a cancelled active operation can settle/start another.
+  for (const listener of Array.from(pauseListeners)) {
+    try { listener(); } catch { /* A faulty view must not prevent cancellation. */ }
+  }
   for (const cancel of cancels) { try { cancel(); } catch { /* Every task is fenced by generation too. */ } }
   cancels.clear();
 }

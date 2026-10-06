@@ -37,10 +37,7 @@ import assetService from "../services/assetService";
 import lotListingService from "../services/lotListingService";
 import assignedApprovalService from "../services/assignedApprovalService";
 import {
-  CONDITION_SELECTION_GROUPS,
   ConditionSelectionKey,
-  getMissingConditionSelectionMessage,
-  normalizeConditionSelection,
 } from "../utils/conditionSelections";
 import {
   applyDamageAnalysisLotPolicy,
@@ -73,10 +70,6 @@ const FileSystem = require("expo-file-system/legacy");
 const { width: SCREEN_WIDTH } = Dimensions.get("window");
 const SIGNATURE_OUTPUT_WIDTH = 900;
 const SIGNATURE_OUTPUT_HEIGHT = 260;
-const RUNNING_CONDITION_GROUP = CONDITION_SELECTION_GROUPS.find(
-  (group) => group.key === "condition"
-)!;
-
 type SignaturePoint = { x: number; y: number };
 type SignatureStroke = SignaturePoint[];
 type SpecFieldEditorState = {
@@ -415,6 +408,9 @@ const PreviewScreen = ({
   const [status, setStatus] = useState<string>("");
   const [declineReason, setDeclineReason] = useState<string>("");
   const [previewData, setPreviewData] = useState<any>(null);
+  const previewDataRef = useRef(previewData);
+  previewDataRef.current = previewData;
+  const [filesGenerating, setFilesGenerating] = useState(false);
   const [imageUrls, setImageUrls] = useState<string[]>([]);
   const [imageCount, setImageCount] = useState(0);
   const [categorySpecs, setCategorySpecs] = useState<AssetCategorySpec[]>([]);
@@ -454,11 +450,17 @@ const PreviewScreen = ({
   const lastSpecTapRef = useRef<{ key: string; time: number } | null>(null);
   const previewBusyRef = useRef(false);
   previewBusyRef.current =
-    loading || refreshing || saving || submitting || uploadingLotKey !== null;
+    loading || refreshing || saving || submitting || filesGenerating || uploadingLotKey !== null;
 
   const isAsset = reportType === "Asset";
   const isLotListing = reportType === "LotListing";
   const isAssignedApproval = source === "assignedApproval";
+  const resubmitMode = isAssignedApproval || (reportType === "RealEstate"
+    ? shouldResubmitRealEstate(status, mode)
+    : status ? ["pending_approval", "approved", "error"].includes(status) : mode === "submitted");
+  const generationLabel = isAssignedApproval
+    ? "Save, Regenerate & Approve"
+    : resubmitMode ? "Save & Regenerate" : "Save & Generate";
   const themeColor = isAsset ? "#F43F5E" : isLotListing ? "#8B5CF6" : "#10B981";
 
   const getLotDisplayNumber = (lot: any, index: number) => {
@@ -578,6 +580,7 @@ const PreviewScreen = ({
       setCategorySpecs(categorySpecResponse.data?.data?.specs || []);
 
       setStatus(data.status || "");
+      setFilesGenerating(Boolean(data.files_generating || data.files_regenerating));
       setDeclineReason(data.decline_reason || "");
       const nextPreviewData = data.preview_data || {};
       setPreviewData(applyDamageAnalysisLotPolicy(
@@ -638,11 +641,13 @@ const PreviewScreen = ({
   }, []);
 
   const onRefresh = useCallback(() => {
+    if (saving || submitting || uploadingLotKey !== null) return;
     setRefreshing(true);
     loadPreviewData();
-  }, [loadPreviewData]);
+  }, [loadPreviewData, saving, submitting, uploadingLotKey]);
 
   const updateField = (field: string, value: any) => {
+    if ((isAsset || isLotListing) && previewBusyRef.current) return;
     setPreviewData((prev: any) => ({ ...prev, [field]: value }));
     setHasChanges(true);
   };
@@ -663,6 +668,7 @@ const PreviewScreen = ({
   };
 
   const updateNestedField = (path: string, value: any) => {
+    if ((isAsset || isLotListing) && previewBusyRef.current) return;
     setPreviewData((prev: any) => {
       const parts = path.split(".");
       const newData = { ...prev };
@@ -689,6 +695,7 @@ const PreviewScreen = ({
   };
 
   const updateLot = (index: number, field: string, value: any) => {
+    if ((isAsset || isLotListing) && previewBusyRef.current) return;
     setPreviewData((prev: any) => {
       const newLots = [...(prev.lots || [])];
       const nextLot =
@@ -712,28 +719,6 @@ const PreviewScreen = ({
       .trim()
       .toLowerCase()
       .replace(/[^a-z0-9]+/g, "");
-
-  const getSharedRunningConditionSelection = (lots: any[] = []) => {
-    if (!lots.length) return "";
-    const first = normalizeConditionSelection(
-      lots[0]?.condition_report_selections?.condition
-    );
-    if (
-      !first ||
-      !RUNNING_CONDITION_GROUP.options.some(
-        (option) => normalizeConditionSelection(option) === first
-      )
-    ) {
-      return "";
-    }
-    return lots.every(
-      (lot) =>
-        normalizeConditionSelection(lot?.condition_report_selections?.condition) ===
-        first
-    )
-      ? first
-      : "";
-  };
 
   const normalizeVisiblePresenceValue = (value: unknown) => {
     const text = String(value ?? "").trim();
@@ -902,7 +887,7 @@ const PreviewScreen = ({
   };
 
   const addPhotosToLot = async (lot: any, lotIndex: number) => {
-    if (isAsset && previewBusyRef.current) return;
+    if ((isAsset || isLotListing) && previewBusyRef.current) return;
     const contextAtStart = reportContextKey;
     const requestRevision = previewRequestRevisionRef.current;
     const isCurrent = () =>
@@ -1011,18 +996,6 @@ const PreviewScreen = ({
       };
     });
     setHasChanges(true);
-  };
-
-  const applyRunningConditionToAllLots = (value: string) => {
-    setPreviewData((prev: any) => {
-      const lots = Array.isArray(prev?.lots) ? prev.lots : [];
-      const newLots = lots.map((lot: any) =>
-        applyRunningConditionSelectionToLot(lot, value)
-      );
-      return { ...prev, lots: newLots };
-    });
-    setHasChanges(true);
-    Alert.alert("Running Condition applied", `${value} was applied to all lots.`);
   };
 
   const deleteLot = (index: number) => {
@@ -1179,41 +1152,35 @@ const PreviewScreen = ({
   };
 
   const handleSubmit = async () => {
+    if (previewBusyRef.current) return;
     const submissionContext = reportContextKey;
-    const isSubmittedMode = isAssignedApproval || (reportType === "RealEstate" ? shouldResubmitRealEstate(status, mode) : mode === "submitted");
-    if (isLotListing) {
-      const validationMessage = getMissingConditionSelectionMessage(previewData?.lots || []);
-      if (validationMessage) {
-        Alert.alert("Required selections", validationMessage);
-        return;
-      }
-    }
-
+    const confirmationRevision = previewRequestRevisionRef.current;
+    let confirmed = false;
+    const isSubmittedMode = resubmitMode;
     Alert.alert(
-      isLotListing
-        ? (isSubmittedMode ? "Regenerate Approved Files" : "Generate Approved Files")
-        : isAssignedApproval
-          ? "Submit and Approve"
-          : (isSubmittedMode ? "Regenerate Files" : "Submit Report"),
+      isAsset || isLotListing
+        ? generationLabel
+        : isAssignedApproval ? "Submit and Approve" : (isSubmittedMode ? "Regenerate Files" : "Submit Report"),
       isAssignedApproval
-        ? "This will regenerate the report files and approve the report after generation succeeds."
+        ? "This will save your latest edits, regenerate the report files, and approve the report after generation succeeds."
         : isSubmittedMode
         ? isLotListing
-          ? "This will regenerate the approved Excel and image files."
-          : "This will regenerate the report files and continue the approval and release workflow."
+          ? "This will save your latest edits and regenerate all lot listing files. They will be released automatically after generation succeeds."
+          : "This will save your latest edits, regenerate all report files, and continue the approval and release workflow."
         : isLotListing
-          ? "This will generate and automatically release the approved lot listing files."
+          ? "This will save your latest edits, generate all lot listing files, and release them automatically after generation succeeds."
           : "This will save your latest edits, generate files, and continue through any assigned approval and release steps.",
       [
         { text: "Cancel", style: "cancel" },
         {
-          text: isLotListing
-            ? (isSubmittedMode ? "Regenerate" : "Generate")
-            : isAssignedApproval
-              ? "Submit"
-              : (isSubmittedMode ? "Resubmit" : "Submit"),
+          text: isAsset || isLotListing
+            ? generationLabel
+            : isAssignedApproval ? "Submit" : (isSubmittedMode ? "Resubmit" : "Submit"),
           onPress: async () => {
-            if (reportContextRef.current !== submissionContext || previewBusyRef.current) return;
+            if (confirmed || reportContextRef.current !== submissionContext || previewBusyRef.current ||
+                previewRequestRevisionRef.current !== confirmationRevision) return;
+            confirmed = true;
+            previewBusyRef.current = true;
             const requestRevision = ++previewRequestRevisionRef.current;
             const isCurrent = () =>
               reportContextRef.current === submissionContext &&
@@ -1221,7 +1188,7 @@ const PreviewScreen = ({
             resetAssetLotSelection();
             try {
               setSubmitting(true);
-              const previewForRequest = applyDamageAnalysisLotPolicy(previewData);
+              const previewForRequest = applyDamageAnalysisLotPolicy(previewDataRef.current);
               setPreviewData(previewForRequest);
 
               if (isSubmittedMode) {
@@ -1235,6 +1202,7 @@ const PreviewScreen = ({
                   await api.post(endpoint, { preview_data: previewForRequest });
                 }
                 if (!isCurrent()) return;
+                if (isAsset || isLotListing) setFilesGenerating(true);
                 setHasChanges(false);
                 Alert.alert(
                   "Success",
@@ -1259,6 +1227,7 @@ const PreviewScreen = ({
                     : undefined
                 );
                 if (!isCurrent()) return;
+                if (isAsset || isLotListing) setFilesGenerating(true);
                 setHasChanges(false);
                 Alert.alert(
                   "Success",
@@ -1274,7 +1243,10 @@ const PreviewScreen = ({
               console.error("Error submitting:", error);
               Alert.alert("Error", error.response?.data?.message || "Failed to submit report");
             } finally {
-              if (isCurrent()) setSubmitting(false);
+              if (isCurrent()) {
+                previewBusyRef.current = false;
+                setSubmitting(false);
+              }
             }
           },
         },
@@ -1342,117 +1314,6 @@ const PreviewScreen = ({
       />
     </View>
   );
-
-  const renderConditionSelections = (lot: AssetLot | LotListingLot, index: number) => {
-    const selections = lot.condition_report_selections || {};
-
-    return (
-      <View style={styles.selectionCard}>
-        <View style={styles.selectionHeader}>
-          <View style={styles.selectionHeaderText}>
-            <Text style={styles.selectionTitle}>Required selections</Text>
-            <Text style={styles.selectionSubtitle}>N/A is allowed when a group does not apply.</Text>
-          </View>
-          <View style={[styles.selectionBadge, { borderColor: themeColor }]}>
-            <Text style={[styles.selectionBadgeText, { color: themeColor }]}>N/A allowed</Text>
-          </View>
-        </View>
-
-        {CONDITION_SELECTION_GROUPS.map((group) => (
-          <View key={group.key} style={styles.selectionGroup}>
-            <Text style={styles.selectionGroupLabel}>{group.label}</Text>
-            <View style={styles.selectionOptions}>
-              {group.options.map((option) => {
-                const selected =
-                  normalizeConditionSelection(selections[group.key]) ===
-                  normalizeConditionSelection(option);
-                return (
-                  <TouchableOpacity
-                    key={option}
-                    activeOpacity={0.85}
-                    onPress={() => updateLotConditionSelection(index, group.key, option)}
-                    style={[
-                      styles.selectionChip,
-                      selected && {
-                        borderColor: themeColor,
-                        backgroundColor: `${themeColor}12`,
-                      },
-                    ]}
-                  >
-                    <Feather
-                      name={selected ? "check-circle" : "circle"}
-                      size={16}
-                      color={selected ? themeColor : "#94A3B8"}
-                    />
-                    <Text style={[styles.selectionChipText, selected && { color: themeColor }]}>
-                      {option}
-                    </Text>
-                  </TouchableOpacity>
-                );
-              })}
-            </View>
-          </View>
-        ))}
-      </View>
-    );
-  };
-
-  const renderBulkRunningConditionControl = (lots: Array<AssetLot | LotListingLot>) => {
-    if (!Array.isArray(lots) || lots.length < 2) return null;
-    const sharedSelection = getSharedRunningConditionSelection(lots);
-
-    return (
-      <View style={styles.bulkConditionCard}>
-        <View style={styles.bulkConditionHeader}>
-          <View style={styles.bulkConditionHeaderText}>
-            <Text style={styles.bulkConditionTitle}>Set Running Condition for all lots</Text>
-            <Text style={styles.bulkConditionSubtitle}>
-              Optional shortcut for large reports. You can still change individual lots after this.
-            </Text>
-          </View>
-          <View style={[styles.bulkConditionCountBadge, { borderColor: themeColor }]}>
-            <Text style={[styles.bulkConditionCountText, { color: themeColor }]}>
-              {lots.length} lots
-            </Text>
-          </View>
-        </View>
-        <View style={styles.bulkConditionOptions}>
-          {RUNNING_CONDITION_GROUP.options.map((option) => {
-            const selected =
-              sharedSelection === normalizeConditionSelection(option);
-            return (
-              <TouchableOpacity
-                key={option}
-                activeOpacity={0.85}
-                onPress={() => applyRunningConditionToAllLots(option)}
-                style={[
-                  styles.bulkConditionChip,
-                  selected && {
-                    borderColor: themeColor,
-                    backgroundColor: `${themeColor}12`,
-                  },
-                ]}
-              >
-                <Feather
-                  name={selected ? "check-circle" : "circle"}
-                  size={15}
-                  color={selected ? themeColor : "#B45309"}
-                />
-                <Text
-                  style={[
-                    styles.bulkConditionChipText,
-                    selected && { color: themeColor },
-                  ]}
-                >
-                  {option}
-                </Text>
-              </TouchableOpacity>
-            );
-          })}
-        </View>
-      </View>
-    );
-  };
 
   const getSpecRecord = (value: unknown): Record<string, string> => {
     const isUsefulSpecValue = (raw: unknown) => {
@@ -2425,7 +2286,6 @@ const PreviewScreen = ({
           </View>
         </View>
 
-        {renderBulkRunningConditionControl(lots)}
 
         {/* Lots */}
         <View style={styles.section}>
@@ -2558,7 +2418,6 @@ const PreviewScreen = ({
                     />
                   </View>
 
-                  {renderConditionSelections(lot, idx)}
 
                   {/* FMV & Quantity Row */}
                   <View style={[styles.fieldRow, compactFields && styles.fieldRowStack]}>
@@ -2947,6 +2806,9 @@ const PreviewScreen = ({
         behavior={Platform.OS === "ios" ? "padding" : "height"}
       >
         <ScrollView
+          pointerEvents={submitting && (isAsset || isLotListing) ? "none" : "auto"}
+          accessibilityElementsHidden={submitting && (isAsset || isLotListing)}
+          importantForAccessibility={submitting && (isAsset || isLotListing) ? "no-hide-descendants" : "auto"}
           style={styles.scrollView}
           contentContainerStyle={[
             styles.scrollContent,
@@ -3082,7 +2944,7 @@ const PreviewScreen = ({
         {/* Action Buttons */}
         {!keyboardVisible ? (
         <View style={styles.actionBar}>
-          {!isLotListing ? (
+          {!isLotListing && !isAsset ? (
             <TouchableOpacity
               style={[styles.saveBtn, !hasChanges && styles.saveBtnDisabled]}
               onPress={handleSave}
@@ -3103,27 +2965,25 @@ const PreviewScreen = ({
 
           {(() => {
             const submitDisabled =
-              submitting || saving || (!isAssignedApproval && !isLotListing &&
+              previewBusyRef.current || (!isAssignedApproval && !isLotListing && !isAsset &&
                 (reportType === "RealEstate" ? !shouldResubmitRealEstate(status, mode) : mode === "pending") && hasChanges);
-            const submitText = isLotListing
-              ? mode === "submitted"
-                ? "Regenerate Files"
-                : "Generate Files"
-              : isAssignedApproval
-                ? "Submit & Approve"
-                : (reportType === "RealEstate" ? shouldResubmitRealEstate(status, mode) : mode === "submitted")
-                ? "Resubmit"
-                : "Submit Report";
+            const submitText = filesGenerating
+              ? "Generating files..."
+              : isAsset || isLotListing
+                ? generationLabel
+                : isAssignedApproval ? "Submit & Approve" : resubmitMode ? "Resubmit" : "Submit Report";
             return (
           <TouchableOpacity
             style={[
               styles.submitBtn,
-              isLotListing && styles.submitBtnFull,
+              (isLotListing || isAsset) && styles.submitBtnFull,
               { backgroundColor: themeColor },
               submitDisabled && styles.submitBtnDisabled,
             ]}
             onPress={handleSubmit}
             disabled={submitDisabled}
+            accessibilityRole="button"
+            accessibilityLabel={submitText}
           >
             {submitting ? (
               <ActivityIndicator size="small" color="#fff" />

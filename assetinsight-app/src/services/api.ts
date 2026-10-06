@@ -14,6 +14,7 @@ import {
   setMemoryAccessToken,
 } from "./deviceAccessStorage";
 import { getAndroidReinstallId } from "./deviceReinstallIdentity";
+import { getAppVersionLabel } from './appVersion';
 import { captureAuthOperation, getAuthOperationEpoch, mutateAuthSession, staleAuthOperation } from './authSessionOperation';
 
 // Storage keys
@@ -57,6 +58,8 @@ api.interceptors.request.use(
       const screen = Dimensions.get("screen");
       config.headers["X-Device-Platform"] = Platform.OS === "ios" ? "ios" : "android";
       config.headers["X-Activity-Source"] = Platform.OS === "ios" ? "ios" : "android";
+      const appVersion = getAppVersionLabel();
+      if (appVersion) config.headers["X-App-Version"] = appVersion;
       const details = config.data?.details || config.data?.formData || config.data;
       const activityId = details?.capture_id || details?.client_submission_id || details?.clientSubmissionId || config.data?.clientDraftId;
       if (typeof activityId === "string" && /^[a-zA-Z0-9._:-]{1,160}$/.test(activityId)) config.headers["X-Activity-Id"] = activityId;

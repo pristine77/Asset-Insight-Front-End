@@ -134,9 +134,9 @@ const lotRow = (lot: number) => {
  * so the lookup cannot drift onto some other button that says the same thing.
  */
 const saveChangesButton = () => {
-  const button = screen.getByText("Save Changes").closest("button");
-  if (!button) throw new Error('"Save Changes" is not inside a button');
-  expect(button).toHaveAccessibleName("Save changes");
+  const button = screen.getByText("Save & Generate").closest("button");
+  if (!button) throw new Error('"Save & Generate" is not inside a button');
+  expect(button).toHaveAccessibleName("Save & Generate");
   return button;
 };
 
@@ -148,7 +148,7 @@ describe("PreviewModal valuation methods", () => {
     render(<PreviewModal isOpen reportId="failed-asset" onClose={vi.fn()}
       loadPreviewDataOverride={vi.fn().mockResolvedValue(response)} resubmitReportOverride={retry} />);
     expect(await screen.findByRole("alert")).toHaveTextContent("saved preview is available");
-    fireEvent.click(screen.getByRole("button", { name: "Resubmit report" }));
+    fireEvent.click(screen.getByRole("button", { name: "Save & Regenerate" }));
     await waitFor(() => expect(retry).toHaveBeenCalledTimes(1));
     expect(retry.mock.calls[0][0]).toBe("failed-asset");
     expect(mocks.submitForApproval).not.toHaveBeenCalled();
@@ -174,7 +174,7 @@ describe("PreviewModal valuation methods", () => {
       status: "pending_approval",
       files_generating: true,
     });
-    mocks.submitForApproval.mockReset();
+    mocks.submitForApproval.mockReset().mockResolvedValue({ data: { reportId: "generated" } });
   });
 
   afterEach(() => {
@@ -319,6 +319,7 @@ describe("PreviewModal valuation methods", () => {
       data: previewData,
     }));
 
+    mocks.submitForApproval.mockImplementation(updatePreview);
     const view = render(
       <PreviewModal
         isOpen
@@ -334,7 +335,7 @@ describe("PreviewModal valuation methods", () => {
     const applyControl = screen.getByRole("group", {
       name: "Apply Legal value to selected lots",
     });
-    expect(saveButton).toBeDisabled();
+    expect(saveButton).toBeEnabled();
     expect(
       within(applyControl).getByRole("button", {
         name: "Apply N/A to 0 selected lots",
@@ -354,7 +355,7 @@ describe("PreviewModal valuation methods", () => {
         "3 of 100 lots selected. Apply a value below or adjust any lot individually."
       )
     ).toBeInTheDocument();
-    expect(saveButton).toBeDisabled();
+    expect(saveButton).toBeEnabled();
 
     fireEvent.click(
       within(applyControl).getByRole("button", {
@@ -425,6 +426,7 @@ describe("PreviewModal valuation methods", () => {
       data: previewData,
     }));
 
+    mocks.submitForApproval.mockImplementation(updatePreview);
     render(
       <PreviewModal
         isOpen
@@ -489,6 +491,7 @@ describe("PreviewModal valuation methods", () => {
     const response = makePreviewResponse();
     response.data.preview_data.lots = Array.from({ length: 100 }, (_, index) => ({ ...response.data.preview_data.lots[0], lot_number: String(index + 1), title: `Asset ${index + 1}` }));
     const update = vi.fn().mockImplementation(async (_id, data) => ({ message: "Saved", data }));
+    mocks.submitForApproval.mockImplementation(update);
     render(<PreviewModal isOpen reportId="page-selections" onClose={vi.fn()} loadPreviewDataOverride={vi.fn().mockResolvedValue(response)} updatePreviewDataOverride={update} />);
     await screen.findByDisplayValue("Asset 1");
     for (const label of ["Running Condition", "Completeness", "Legal"]) {
@@ -571,6 +574,7 @@ describe("PreviewModal valuation methods", () => {
       imageUrls: coverImages,
     }));
 
+    mocks.submitForApproval.mockImplementation(updatePreview);
     render(
       <PreviewModal
         isOpen
@@ -587,7 +591,7 @@ describe("PreviewModal valuation methods", () => {
     fireEvent.click(screen.getByRole("button", { name: "Select cover image 2" }));
     fireEvent.click(screen.getByRole("button", { name: "Select cover image 1" }));
     fireEvent.click(screen.getByRole("button", { name: "Apply cover images" }));
-    fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+    fireEvent.click(screen.getByRole("button", { name: "Save & Generate" }));
 
     await waitFor(() => expect(updatePreview).toHaveBeenCalledTimes(1));
     expect(updatePreview.mock.calls[0][1].cover_image_urls).toEqual([
@@ -646,6 +650,7 @@ describe("PreviewModal valuation methods", () => {
       data: response.data.preview_data,
     });
 
+    mocks.submitForApproval.mockImplementation(updatePreview);
     render(
       <PreviewModal
         isOpen
@@ -664,7 +669,7 @@ describe("PreviewModal valuation methods", () => {
       name: "Inspection Location *",
     });
     fireEvent.change(location, { target: { value: "New Inspection Yard" } });
-    fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+    fireEvent.click(screen.getByRole("button", { name: "Save & Generate" }));
 
     await waitFor(() => expect(updatePreview).toHaveBeenCalled());
     const savedPreview = updatePreview.mock.calls[0][1];
@@ -699,7 +704,7 @@ describe("PreviewModal valuation methods", () => {
     fireEvent.change(clientName, { target: { value: "Edited Draft Client" } });
     fireEvent.click(
       screen.getByRole("button", {
-        name: "Save draft preview and submit report",
+        name: "Save & Generate",
       })
     );
 
@@ -723,173 +728,72 @@ describe("PreviewModal valuation methods", () => {
     expect(onClose).toHaveBeenCalledTimes(1);
   });
 
-  it("saves draft edits without generating partial hidden CR files", async () => {
-    const response = makePreviewResponse();
-    const updatePreview = vi.fn().mockResolvedValue({
-      message: "Saved",
-      data: response.data.preview_data,
-    });
-    const refreshSpecPdf = vi.fn();
 
-    render(
-      <PreviewModal
-        isOpen
-        reportId="hidden-report-save-only"
-        draftPreviewId="draft-save-only"
-        onClose={vi.fn()}
-        loadPreviewDataOverride={vi.fn().mockResolvedValue(response)}
-        updatePreviewDataOverride={updatePreview}
-        refreshAssetSpecPdfOverride={refreshSpecPdf}
-      />
-    );
-
-    const clientName = (await screen.findAllByDisplayValue("Test Client"))[0];
-    fireEvent.change(clientName, { target: { value: "Saved Draft Client" } });
-    fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
-
-    await waitFor(() => expect(updatePreview).toHaveBeenCalledTimes(1));
-    expect(refreshSpecPdf).not.toHaveBeenCalled();
-    expect(mocks.promoteDraftPreview).not.toHaveBeenCalled();
-  });
-
-  it("serializes Save and Resubmit without starting a second client regeneration", async () => {
+  it("saves and regenerates once, blocking duplicate clicks and concurrent uploads", async () => {
     const response = makePreviewResponse();
     response.data.status = "approved";
-    const pendingSave = deferred<{
-      message: string;
-      data: typeof response.data.preview_data;
-      files_regeneration_queued?: boolean;
-    }>();
-    const updatePreview = vi.fn().mockReturnValue(pendingSave.promise);
-    const resubmit = vi.fn();
-    const uploadImages = vi.fn();
-    const refreshSpecPdf = vi.fn();
-    const onClose = vi.fn();
-
-    render(
-      <PreviewModal
-        isOpen
-        reportId="approved-exclusive-save"
-        onClose={onClose}
-        loadPreviewDataOverride={vi.fn().mockResolvedValue(response)}
-        updatePreviewDataOverride={updatePreview}
-        resubmitReportOverride={resubmit}
-        uploadPreviewLotImagesOverride={uploadImages}
-        refreshAssetSpecPdfOverride={refreshSpecPdf}
-      />
-    );
-
-    const clientName = (await screen.findAllByDisplayValue("Test Client"))[0];
-    fireEvent.change(clientName, { target: { value: "Locked Client" } });
-    const saveButton = screen.getByRole("button", { name: "Save changes" });
-    const resubmitButton = screen.getByRole("button", { name: "Resubmit report" });
-
-    fireEvent.click(saveButton);
-    fireEvent.click(saveButton);
-    fireEvent.click(resubmitButton);
+    const pending = deferred<any>();
+    const resubmit = vi.fn().mockReturnValue(pending.promise);
+    const updatePreview = vi.fn(), refreshSpecPdf = vi.fn(), uploadImages = vi.fn(), onClose = vi.fn();
+    render(<PreviewModal isOpen reportId="combined-asset" onClose={onClose}
+      loadPreviewDataOverride={vi.fn().mockResolvedValue(response)}
+      updatePreviewDataOverride={updatePreview} resubmitReportOverride={resubmit}
+      uploadPreviewLotImagesOverride={uploadImages} refreshAssetSpecPdfOverride={refreshSpecPdf} />);
+    fireEvent.change((await screen.findAllByDisplayValue("Test Client"))[0], { target: { value: "Latest client" } });
+    expect(screen.queryByRole("button", { name: /^Save changes$/i })).toBeNull();
+    const action = screen.getByRole("button", { name: "Save & Regenerate" });
+    fireEvent.click(action); fireEvent.click(action);
     fireEvent.change(document.querySelector('input[type="file"]')!, {
-      target: {
-        files: [new File(["photo"], "locked.jpg", { type: "image/jpeg" })],
-      },
+      target: { files: [new File(["photo"], "locked.jpg", { type: "image/jpeg" })] },
     });
-
-    expect(updatePreview).toHaveBeenCalledTimes(1);
-    expect(resubmit).not.toHaveBeenCalled();
+    expect(resubmit).toHaveBeenCalledTimes(1);
+    expect(resubmit).toHaveBeenCalledWith("combined-asset", expect.objectContaining({ client_name: "Latest client" }));
+    expect(updatePreview).not.toHaveBeenCalled();
     expect(uploadImages).not.toHaveBeenCalled();
-    expect(saveButton).toBeDisabled();
-    expect(resubmitButton).toBeDisabled();
+    expect(action).toBeDisabled();
     expect(screen.getByRole("button", { name: "Close panel" })).toBeDisabled();
-    expect(screen.getByRole("status")).toHaveTextContent(
-      "Saving preview changes"
-    );
     expect(document.querySelector(".preview-editor [inert]")).not.toBeNull();
-
-    pendingSave.resolve({
-      message: "Saved",
-      data: response.data.preview_data,
-      files_regeneration_queued: true,
-    });
-
-    await waitFor(() => expect(screen.queryByRole("status")).toBeNull());
+    pending.resolve({ data: {}, message: "Queued" });
+    await waitFor(() => expect(onClose).toHaveBeenCalledOnce());
     expect(refreshSpecPdf).not.toHaveBeenCalled();
-    expect(onClose).toHaveBeenCalledOnce();
-    expect(resubmitButton).toBeDisabled();
+    expect(action).toBeDisabled();
   });
 
-  it("keeps the server-normalized preview after Save when no newer edit exists", async () => {
+
+  it("retains edits on rejection and sends the latest corrections on deliberate retry", async () => {
     const response = makePreviewResponse();
-    Object.assign(response.data.preview_data, {
-      latitude: 51.5007,
-      longitude: -0.1246,
-    });
-    Object.assign(response.data.preview_data.lots[0], {
-      location: "Test Yard, London",
-      latitude: 51.5007,
-      longitude: -0.1246,
-    });
-    const canonicalPreview = JSON.parse(JSON.stringify({
-      ...response.data.preview_data,
-      client_name: "Canonical Client",
-      location: "Canonical Asset Yard",
-      lots: [
-        {
-          ...response.data.preview_data.lots[0],
-          title: "Canonical server title",
-          location: "Canonical Asset Yard",
-          latitude: undefined,
-          longitude: undefined,
-        },
-      ],
-      latitude: undefined,
-      longitude: undefined,
+    response.data.status = "approved";
+    const resubmit = vi.fn()
+      .mockRejectedValueOnce({ response: { data: { message: "Please enter FMV for Lot 1" } } })
+      .mockResolvedValueOnce({ data: {}, message: "Queued" });
+    const onClose = vi.fn();
+    render(<PreviewModal isOpen reportId="retry-asset" onClose={onClose}
+      loadPreviewDataOverride={vi.fn().mockResolvedValue(response)} resubmitReportOverride={resubmit} />);
+    const title = await screen.findByDisplayValue("Ford Super Duty");
+    fireEvent.change(title, { target: { value: "Reviewed asset" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save & Regenerate" }));
+    await waitFor(() => expect(mocks.toastError).toHaveBeenCalledWith("Please enter FMV for Lot 1"));
+    expect(onClose).not.toHaveBeenCalled();
+    expect(title).toHaveValue("Reviewed asset");
+    fireEvent.change(title, { target: { value: "Corrected asset" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save & Regenerate" }));
+    await waitFor(() => expect(onClose).toHaveBeenCalledOnce());
+    expect(resubmit).toHaveBeenLastCalledWith("retry-asset", expect.objectContaining({
+      lots: [expect.objectContaining({ title: "Corrected asset" })],
     }));
-    const updatePreview = vi.fn().mockResolvedValue({
-      message: "Saved",
-      data: canonicalPreview,
-    });
-    mocks.submitForApproval.mockResolvedValue({
-      message: "Submitted",
-      data: { reportId: "asset-canonical-save" },
-    });
+  });
 
-    render(
-      <PreviewModal
-        isOpen
-        reportId="asset-canonical-save"
-        onClose={vi.fn()}
-        loadPreviewDataOverride={vi.fn().mockResolvedValue(response)}
-        updatePreviewDataOverride={updatePreview}
-      />
-    );
-
-    const clientName = (await screen.findAllByDisplayValue("Test Client"))[0];
-    fireEvent.change(clientName, { target: { value: "Edited locally" } });
-    fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
-
-    await waitFor(() => {
-      expect(screen.getByRole("textbox", { name: "Inspection Location *" })).toHaveValue(
-        "Canonical Asset Yard"
-      );
-      expect(screen.getByDisplayValue("Canonical Client")).toBeInTheDocument();
-    });
-
-    fireEvent.click(screen.getByRole("button", { name: "Submit report" }));
-    await waitFor(() => expect(mocks.submitForApproval).toHaveBeenCalledTimes(1));
-    const submittedPreview = mocks.submitForApproval.mock.calls[0]?.[1];
-    expect(submittedPreview).toMatchObject({
-      client_name: "Canonical Client",
-      location: "Canonical Asset Yard",
-      lots: [
-        expect.objectContaining({
-          title: "Canonical server title",
-          location: "Canonical Asset Yard",
-        }),
-      ],
-    });
-    expect(submittedPreview).not.toHaveProperty("latitude");
-    expect(submittedPreview).not.toHaveProperty("longitude");
-    expect(submittedPreview.lots[0]).not.toHaveProperty("latitude");
-    expect(submittedPreview.lots[0]).not.toHaveProperty("longitude");
+  it("keeps approval explicit and uses only the assigned-approver generation endpoint", async () => {
+    const resubmit = vi.fn().mockResolvedValue({ data: {}, message: "Queued" });
+    render(<PreviewModal isOpen isAssignedApprovalMode reportId="assigned-asset" onClose={vi.fn()}
+      loadPreviewDataOverride={vi.fn().mockResolvedValue(makePreviewResponse())} resubmitReportOverride={resubmit} />);
+    fireEvent.change(await screen.findByDisplayValue("Ford Super Duty"), { target: { value: "Approver edit" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save, Regenerate & Approve" }));
+    await waitFor(() => expect(resubmit).toHaveBeenCalledOnce());
+    expect(resubmit).toHaveBeenCalledWith("assigned-asset", expect.objectContaining({
+      lots: [expect.objectContaining({ title: "Approver edit" })],
+    }));
+    expect(mocks.submitForApproval).not.toHaveBeenCalled();
   });
 
   it("submits a dirty preview snapshot once without requiring a file-generating Save", async () => {
@@ -911,7 +815,7 @@ describe("PreviewModal valuation methods", () => {
 
     const clientName = (await screen.findAllByDisplayValue("Test Client"))[0];
     fireEvent.change(clientName, { target: { value: "Final Snapshot Client" } });
-    const submitButton = screen.getByRole("button", { name: "Submit report" });
+    const submitButton = screen.getByRole("button", { name: "Save & Generate" });
     expect(submitButton).toBeEnabled();
 
     fireEvent.click(submitButton);
@@ -922,7 +826,7 @@ describe("PreviewModal valuation methods", () => {
       "initial-submit-lock",
       expect.objectContaining({ client_name: "Final Snapshot Client" })
     );
-    expect(screen.getByRole("button", { name: "Save changes" })).toBeDisabled();
+    expect(submitButton).toBeDisabled();
     expect(screen.getByRole("button", { name: "Close panel" })).toBeDisabled();
 
     pendingSubmit.resolve({
@@ -951,7 +855,7 @@ describe("PreviewModal valuation methods", () => {
     await screen.findByRole("heading", { name: "Assets / Lots" });
     fireEvent.click(
       screen.getByRole("button", {
-        name: "Save draft preview and submit report",
+        name: "Save & Regenerate",
       })
     );
 
@@ -961,7 +865,7 @@ describe("PreviewModal valuation methods", () => {
         expect.objectContaining({ submit: true })
       )
     );
-    expect(screen.getAllByText("Save & Resubmit")).toHaveLength(2);
+    expect(screen.queryByRole("button", { name: /^Save changes$/i })).toBeNull();
     expect(onSuccess).toHaveBeenCalledWith(
       expect.objectContaining({ reportId: "promoted-report-1" })
     );

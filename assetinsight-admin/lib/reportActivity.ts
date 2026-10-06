@@ -3,7 +3,7 @@ export const ACTIVITY_LABELS: Record<string, string> = {
 };
 export type ActivityPerson = { id: string; name: string; email: string };
 export type ActivityCounts = { lots: number; photos: number; mainPhotos: number; extraPhotos: number };
-export type ActivityRow = { id: string; activityId: string; owner: ActivityPerson; reportType: "asset" | "lotListing"; contract: string; source: string; latestAction?: string; latestOutcome?: string; latestCounts: ActivityCounts | null; lastReceivedAt: string; lastConfirmedAt?: string; revision: number; deleted: boolean; reportId: string | null };
+export type ActivityRow = { lastReportedApp?: { appVersion: string; source: string; receivedAt: string } | null; id: string; activityId: string; owner: ActivityPerson; reportType: "asset" | "lotListing"; contract: string; source: string; latestAction?: string; latestOutcome?: string; latestCounts: ActivityCounts | null; lastReceivedAt: string; lastConfirmedAt?: string; revision: number; deleted: boolean; reportId: string | null };
 export type ActivityDetail = ActivityRow & { canViewValues: boolean; canOpenPreview: boolean; canRemove: boolean; reportExists: boolean; previewPath?: string | null };
 export type ActivityField = string | { field: string; before?: unknown; after?: unknown };
 export type ActivityLot = { id: string; lotNumber?: string; beforePosition?: number | null; afterPosition?: number | null; beforeCover?: number | null; afterCover?: number | null; before: { mainPhotos: number; extraPhotos: number; cover?: number | null } | null; after: { mainPhotos: number; extraPhotos: number; cover?: number | null } | null; photos?: { id: string; before: number | null; after: number | null; slot?: string }[] };
@@ -68,6 +68,7 @@ function validateActivityItem(item: unknown) {
   if (typeof row.source !== "string") fail();
   if ("latestCounts" in row) {
     counts(row.latestCounts);
+    if (row.lastReportedApp && (typeof row.lastReportedApp.appVersion !== "string" || row.lastReportedApp.appVersion.length > 80 || !["android", "ios"].includes(row.lastReportedApp.source) || !Number.isFinite(Date.parse(row.lastReportedApp.receivedAt)))) fail();
     if (!["asset", "lotListing"].includes(row.reportType) || typeof row.contract !== "string" || !row.owner || typeof row.owner.name !== "string" || typeof row.owner.email !== "string" || !count(row.revision)) fail();
   } else {
     if (!["device", "server"].includes(row.authority) || typeof row.action !== "string" || typeof row.outcome !== "string" || !row.data) fail();

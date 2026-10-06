@@ -504,10 +504,11 @@ async function downloadDraftFile(
 }
 
 export const ReportDraftService = {
-  async list(kind?: ReportDraftKind) {
+  async list(kind?: ReportDraftKind, timeout?: number) {
     return unwrap(
       await API.get<{ data: ReportDraftRecord[] }>("/report-drafts", {
         params: kind ? { type: apiTypeFor(kind) } : undefined,
+        ...(timeout ? { timeout } : {}),
       })
     );
   },

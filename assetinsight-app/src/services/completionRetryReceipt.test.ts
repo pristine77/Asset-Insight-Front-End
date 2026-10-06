@@ -1,14 +1,4 @@
-/**
- * Finalizing a submission: a retried completion is this attempt's own success,
- * and the "finalizing" flag that soft pauses respect spans exactly that step.
- *
- * Reported 2026-10-01: after a long upload reached "Finalizing Report", the app
- * showed "Earlier upload accepted" instead of completing, left the draft on
- * "Resume upload", and repeated that on every Resume. The first completion
- * request had reached the server and queued the report; its answer was lost,
- * the retry was answered with reusedAcceptance, and the forms read that as an
- * older report.
- */
+/** Finalization status recovery retains historical-acceptance evidence and current edits. */
 import { Platform } from 'react-native';
 import api from './api';
 import { uploadReportFilesDirectToR2, type DirectUploadFile } from './directR2UploadService';
@@ -68,14 +58,14 @@ afterAll(() => Object.defineProperty(Platform, 'OS', { value: originalPlatform }
 describe.each(['/asset', '/lot-listing'] as const)('%s completion', (endpoint) => {
   const upload = () => uploadReportFilesDirectToR2({ endpoint, details, files: [file] });
 
-  it("reports a retry answered with the existing acceptance as this attempt's own success", async () => {
+  it("preserves historical acceptance on retry rather than authorizing removal of newer edits", async () => {
     serve([
       async () => { throw lostAnswer(); },
       async () => ({ data: { ...receipt, reusedAcceptance: true } }),
     ]);
     const result: any = await upload();
-    expect(result).toMatchObject({ ...receipt, reusedAcceptance: false, acceptedOnRetry: true });
-    expect(isExistingReportUploadReceipt(result)).toBe(false);
+    expect(result).toMatchObject({ ...receipt, reusedAcceptance: true });
+    expect(isExistingReportUploadReceipt(result)).toBe(true);
     expect(jest.mocked(api.post).mock.calls.filter(([url]) => String(url).endsWith('/complete'))).toHaveLength(2);
   }, 15_000);
 
@@ -115,11 +105,11 @@ describe('finalizing asks the server before re-sending', () => {
     : { sessionId: 'finalize-session', status: 'ready', accepted: false, reportAvailable: null, phase: 'upload', message: 'Your saved upload can be continued.' } } });
   const upload = () => uploadReportFilesDirectToR2({ endpoint: '/asset', details, files: [file] });
 
-  it('finishes straight away when the server already accepted it', async () => {
+  it('recovers acceptance without claiming current field edits were accepted', async () => {
     serve([async () => { throw lostAnswer(); }], [], [statusReceipt(true)]);
     const result: any = await upload();
-    expect(result).toMatchObject({ accepted: true, reportId: receipt.reportId, jobId: receipt.jobId, reusedAcceptance: false, acceptedOnRetry: true });
-    expect(isExistingReportUploadReceipt(result)).toBe(false);
+    expect(result).toMatchObject({ accepted: true, reportId: receipt.reportId, jobId: receipt.jobId, reusedAcceptance: true });
+    expect(isExistingReportUploadReceipt(result)).toBe(true);
     expect(completeCalls()).toHaveLength(1);
     expect(api.get).toHaveBeenCalledTimes(1);
   });
@@ -147,7 +137,7 @@ describe('finalizing asks the server before re-sending', () => {
       );
       const result = upload();
       await jest.advanceTimersByTimeAsync(20_000);
-      await expect(result).resolves.toMatchObject({ accepted: true, acceptedOnRetry: true });
+      await expect(result).resolves.toMatchObject({ accepted: true, reusedAcceptance: true });
       expect(completeCalls()).toHaveLength(4);
       expect(api.get).toHaveBeenCalledTimes(4);
     } finally {

@@ -8,6 +8,13 @@ test('offline review opens have a distinct searchable label, never a submission 
 });
 const id='a'.repeat(64);
 const row={id,owner:{id:'a'.repeat(24),name:'Example',email:'test@example.test'},source:'web',reportType:'asset',contract:'93530',latestCounts:{lots:1,photos:2,mainPhotos:1,extraPhotos:1},revision:2};
+test('last received native version is optional, bounded and labelled without inventing old versions',()=>{
+ const page=lastReportedApp=>({data:{items:[{...row,lastReportedApp}],total:1,page:1,limit:25}});
+ const version={appVersion:'1.0.1 (build 73)',source:'android',receivedAt:'2026-10-02T12:00:00Z'};
+ assert.deepEqual(parseActivityPage(page(version)).items[0].lastReportedApp,version);
+ assert.equal(parseActivityPage(page(null)).items[0].lastReportedApp,null);
+ for(const change of [{appVersion:73},{appVersion:'x'.repeat(81)},{source:'guessed'},{receivedAt:'bad'}])assert.throws(()=>parseActivityPage(page({...version,...change})));
+});
 test('per-lot pages preserve numbers and unknown availability without inventing zeros', () => {
  const item={id,lotNumber:'X',position:4,photos:13,mainPhotos:10,extraPhotos:3,missingPhotos:null};
  const data={items:[item],total:43,page:1,limit:10,source:'report',asOf:null};

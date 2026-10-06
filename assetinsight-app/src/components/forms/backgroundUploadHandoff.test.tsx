@@ -18,7 +18,7 @@ import OfflineQueueService from '../../services/offlineQueueService';
 import OfflineCaptureStore from '../../services/offlineCaptureStore';
 import { prepareOfflineSubmission } from '../../services/offlineSubmissionService';
 import { setUploadOwner, type UploadOperation } from '../../services/uploadCancellation';
-import { UPLOAD_WAITING_FOR_CONNECTION, waitForStableConnection } from '../../services/uploadAutoResume';
+import { UPLOAD_WAITING_FOR_CONNECTION } from '../../services/uploadResumePolicy';
 import backgroundUploadManager, {
   ALREADY_UPLOADING_MESSAGE,
   ALREADY_UPLOADING_TITLE,
@@ -71,10 +71,6 @@ jest.mock('../../services/autoSaveService', () => ({ __esModule: true, default: 
 jest.mock('../../utils/mobileLocation', () => ({
   normalizeHiddenLocation: (location?: string) => ({ location: location || 'Not provided' }),
   getHiddenCurrentLocation: jest.fn(async () => ({ location: 'Not provided' })),
-}));
-jest.mock('../../services/uploadAutoResume', () => ({
-  ...jest.requireActual('../../services/uploadAutoResume'),
-  waitForStableConnection: jest.fn(),
 }));
 
 function ordinaryDraft(type: AuctioneerReportType) {
@@ -142,7 +138,6 @@ beforeEach(() => {
   jest.mocked(assetService.createAssetReport).mockReset().mockResolvedValue({ jobId: 'job-parent', reportId: 'report-parent', message: 'Queued', accepted: true } as any);
   jest.mocked(lotListingService.createLotListing).mockReset().mockResolvedValue({ jobId: 'job-parent', reportId: 'report-parent', message: 'Queued', phase: 'processing' });
   // By default the signal never comes back during a test.
-  jest.mocked(waitForStableConnection).mockReset().mockImplementation(() => new Promise<boolean>(() => {}));
 });
 
 afterEach(async () => {
@@ -199,16 +194,15 @@ describe.each(['asset', 'lotListing'] as const)('%s Submit on the Dashboard', (t
     expect(snapshot().active).toBeNull();
   });
 
-  it('still hands the upload over when Submit finds no signal; the line waits for it', async () => {
+  it('keeps an offline submission in the form and never schedules future transport', async () => {
     jest.mocked(prepareOfflineSubmission).mockRejectedValueOnce(Object.assign(new Error('Saved on this device. Connect to the internet, then tap Submit or Resume upload.'), { code: UPLOAD_WAITING_FOR_CONNECTION }));
     jest.mocked(OfflineQueueService.getConnectivityStatus).mockResolvedValue({ status: 'offline' } as any);
     const { closed } = await mount();
     await fireEvent.press(screen.getByRole('button', { name: submitLabel }));
-    await waitFor(() => expect(closed).toHaveBeenCalledTimes(1));
-    expect(Alert.alert).not.toHaveBeenCalled();
-    expect(OfflineCaptureStore.setSubmissionState).toHaveBeenCalledWith('local-parent', 'ready');
-    await waitFor(() => expect(snapshot().active).toMatchObject({ draftId: 'local-parent', status: 'waiting' }));
-    expect(waitForStableConnection).toHaveBeenCalledTimes(1);
+    await waitFor(() => expect(Alert.alert).toHaveBeenCalled());
+    expect(closed).not.toHaveBeenCalled();
+    expect(snapshot().active).toBeNull();
+    expect(snapshot().queued).toEqual([]);
     expect(upload).not.toHaveBeenCalled();
   });
 

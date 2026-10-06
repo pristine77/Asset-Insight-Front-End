@@ -149,10 +149,11 @@ function unwrapApiData<T>(value: ApiEnvelope<T>): T {
 }
 
 // Get all lot listings for current user
-export async function getLotListings(): Promise<{ data: LotListing[] }> {
-  const response = await API.get<{ data: LotListing[]; message?: string }>("/lot-listing");
+export async function getLotListings(view?: "previews"): Promise<{ data: LotListing[] }> {
+  const response = await API.get<{ data: LotListing[]; message?: string }>("/lot-listing", view ? { params: { view }, timeout: 30000 } : undefined);
   // Server returns { message, data }, so extract the data array
-  const listings = Array.isArray(response.data) ? response.data : (response.data?.data || []);
+  const listings = Array.isArray(response.data) ? response.data : response.data?.data;
+  if (!Array.isArray(listings)) throw new Error("Lot Listing returned an incomplete response. Refresh to try again.");
   return { data: listings };
 }
 

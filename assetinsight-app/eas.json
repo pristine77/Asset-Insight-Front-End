@@ -15,7 +15,17 @@
     },
     "production": {
       "resourceClass": "large",
-      "autoIncrement": true
+      "autoIncrement": true,
+      "environment": "production",
+      "developmentClient": false,
+      "env": {
+        "EXPO_NO_DOTENV": "1",
+        "EXPO_PUBLIC_API_BASE_URL": "https://api.assetinsightvaluator.com/api"
+      },
+      "android": {
+        "buildType": "app-bundle",
+        "credentialsSource": "remote"
+      }
     },
     "production-apk": {
       "extends": "production",

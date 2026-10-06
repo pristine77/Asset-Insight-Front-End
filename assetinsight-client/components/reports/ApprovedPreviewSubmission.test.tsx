@@ -162,10 +162,10 @@ describe("preview submission routing by loaded status", () => {
     );
 
     const resubmitButton = await screen.findByRole("button", {
-      name: "Resubmit report",
+      name: "Save & Regenerate",
     });
     expect(
-      screen.queryByRole("button", { name: "Submit report" })
+      screen.queryByRole("button", { name: "Save & Generate" })
     ).not.toBeInTheDocument();
     fireEvent.click(resubmitButton);
 
@@ -190,10 +190,10 @@ describe("preview submission routing by loaded status", () => {
     );
 
     const regenerateButton = await screen.findByRole("button", {
-      name: "Regenerate Approved Files",
+      name: "Save & Regenerate",
     });
     expect(
-      screen.queryByRole("button", { name: "Generate Approved Files" })
+      screen.queryByRole("button", { name: "Save & Generate" })
     ).not.toBeInTheDocument();
     fireEvent.click(regenerateButton);
 
@@ -222,10 +222,10 @@ describe("preview submission routing by loaded status", () => {
     );
 
     const submitButton = await screen.findByRole("button", {
-      name: "Submit report",
+      name: "Save & Generate",
     });
     expect(
-      screen.queryByRole("button", { name: "Resubmit report" })
+      screen.queryByRole("button", { name: "Save & Regenerate" })
     ).not.toBeInTheDocument();
     fireEvent.click(submitButton);
 
@@ -252,10 +252,10 @@ describe("preview submission routing by loaded status", () => {
     );
 
     const generateButton = await screen.findByRole("button", {
-      name: "Generate Approved Files",
+      name: "Save & Generate",
     });
     expect(
-      screen.queryByRole("button", { name: "Regenerate Approved Files" })
+      screen.queryByRole("button", { name: "Save & Regenerate" })
     ).not.toBeInTheDocument();
     fireEvent.click(generateButton);
 

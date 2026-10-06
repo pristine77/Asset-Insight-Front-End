@@ -1,4 +1,4 @@
-import API from "@/lib/api";
+import API, { type RetriableAxiosConfig } from "@/lib/api";
 import type { AuthUser } from "./auth";
 
 export type UpdateUserPayload = {
@@ -22,14 +22,15 @@ export const UserService = {
   },
 
   async deleteAccount(password?: string): Promise<{ message: string }> {
-    const body = password ? { password } : undefined;
-    if (body) {
-      const { data } = await API.delete<{ message: string }>("/user", {
-        data: body,
-      });
-      return data;
+    // A wrong password also returns 401. Never refresh and replay a deletion.
+    const { data } = await API.delete<{ message: string }>("/user", {
+      data: password === undefined ? undefined : { password },
+      _retry: true,
+      timeout: 30_000,
+    } as RetriableAxiosConfig);
+    if (data?.message !== "User account deleted successfully") {
+      throw new Error("Account deletion was not confirmed. Contact support before trying again.");
     }
-    const { data } = await API.delete<{ message: string }>("/user");
     return data;
   },
 

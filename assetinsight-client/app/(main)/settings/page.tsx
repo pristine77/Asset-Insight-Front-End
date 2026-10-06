@@ -1,6 +1,7 @@
 "use client";
 
 import dynamic from "next/dynamic";
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
@@ -14,7 +15,7 @@ import {
 } from "lucide-react";
 import { toast } from "@/components/ui/toast";
 import { UserAvatar } from "@/components/user/UserAvatar";
-import API from "@/lib/api";
+import { captureAuthSession, isAuthSessionCurrent, type AuthSessionSnapshot } from "@/lib/auth-storage";
 import { UserService } from "@/services/user";
 import { useAuthContext } from "@/context/AuthContext";
 import { useOutlookCalendar } from "@/hooks/useOutlookCalendar";
@@ -40,6 +41,12 @@ export default function SettingsPage() {
   const [cvFile, setCvFile] = useState<File | null>(null);
   const [isOutlookDialogOpen, setIsOutlookDialogOpen] = useState(false);
   const deleteDialogRef = useRef<HTMLDialogElement>(null);
+  const deleteInFlight = useRef(false);
+  const deleteSession = useRef<AuthSessionSnapshot | null>(null);
+  const deleteOwner = useRef<string | undefined>(undefined);
+  const ownerId = user?._id || user?.id;
+  const currentOwner = useRef(ownerId);
+  currentOwner.current = ownerId;
   const avatarInputRef = useRef<HTMLInputElement>(null);
   const {
     status: outlookStatus,
@@ -209,23 +216,47 @@ export default function SettingsPage() {
   };
 
   const confirmDelete = async () => {
-    if (confirmText !== "DELETE") return;
-    try {
-      setDeleting(true);
-      setError(null);
-      await API.delete("/user", {
-        data: needsPassword ? { password: deletePassword } : undefined,
-      });
-      await logout();
-      router.replace("/welcome");
-    } catch (deleteError: any) {
-      setError(
-        deleteError?.response?.data?.message ||
-          deleteError?.message ||
-          "Failed to delete account"
-      );
-      setDeleting(false);
+    if (deleteInFlight.current || confirmText !== "DELETE" || (needsPassword && !deletePassword)) return;
+    const session = deleteSession.current;
+    const owner = deleteOwner.current;
+    if (!owner || owner !== currentOwner.current || !session || !isAuthSessionCurrent(session)) {
+      setError("Your account session changed. Close this dialog and start again in the current account.");
+      return;
     }
+    deleteInFlight.current = true;
+    setDeleting(true);
+    setError(null);
+    try {
+      await UserService.deleteAccount(needsPassword ? deletePassword : undefined);
+    } catch (deleteError: any) {
+      const status = deleteError?.response?.status;
+      setError(!isAuthSessionCurrent(session) || owner !== currentOwner.current
+        ? "Your account session changed. Check the original account's status before trying again."
+        : status === 401
+          ? "Your password or sign-in session could not be verified. Check your password, or sign in again before retrying."
+          : status === 400
+            ? "Account deletion could not be confirmed. Check your password and try again, or contact support."
+            : status === 403
+              ? "This account or device is not permitted to delete the account. Contact support for help."
+              : "Account deletion was not confirmed. The request may have been interrupted. Contact support before trying again.");
+      setDeleting(false);
+      deleteInFlight.current = false;
+      return;
+    }
+    if (!isAuthSessionCurrent(session) || owner !== currentOwner.current) {
+      setError("The original account was deleted. Your current account has not been signed out.");
+      setDeleting(false);
+      deleteInFlight.current = false;
+      return;
+    }
+    setIsDeleteOpen(false);
+    setDeletePassword("");
+    toast.success("Account deleted. Associated report and media removal is a separate request.");
+    // Logout clears this session immediately; a provider failure is not a failed deletion.
+    const signOut = logout();
+    const signedOutSession = captureAuthSession();
+    await signOut.catch(() => {});
+    if (isAuthSessionCurrent(signedOutSession)) router.replace("/welcome");
   };
 
   const onChange = (event: React.ChangeEvent<HTMLInputElement>) => {
@@ -566,13 +597,20 @@ export default function SettingsPage() {
       <section className="rounded-xl border border-[var(--app-danger-border)] bg-[var(--app-panel)] p-4 sm:p-5">
         <h2 className="font-semibold text-[var(--app-text)]">Danger zone</h2>
         <p className="mt-1 text-sm text-[var(--app-text-muted)]">
-          Deleting your account permanently removes your profile, reports, and
-          stored data.
+          Deleting your account removes your account and security/device records.
+          Reports, uploaded media and activity history are not automatically deleted.
+          Download any work you are authorized to keep before continuing.
+        </p>
+        <p className="mt-2 text-sm text-[var(--app-text-muted)]">
+          <Link href="/account-deletion" prefetch={false} className="underline underline-offset-4">Account and data-deletion instructions</Link>
+          {" · "}<Link href="/privacy" className="underline underline-offset-4">Privacy notice</Link>
         </p>
         <button
           type="button"
           className="mt-4 inline-flex min-h-10 items-center gap-2 rounded-lg bg-[var(--app-danger)] px-4 text-sm font-semibold text-white hover:opacity-90"
           onClick={() => {
+            deleteOwner.current = ownerId;
+            deleteSession.current = captureAuthSession();
             setIsDeleteOpen(true);
             setConfirmText("");
             setDeletePassword("");
@@ -587,6 +625,7 @@ export default function SettingsPage() {
       <dialog
         ref={deleteDialogRef}
         aria-labelledby="delete-account-title"
+        aria-describedby="delete-account-description"
         className="m-auto w-[min(92vw,520px)] rounded-xl border border-[var(--app-border)] bg-[var(--app-panel)] p-0 text-[var(--app-text)] shadow-[var(--app-shadow-modal)] backdrop:bg-[var(--app-overlay)]"
         onCancel={(event) => {
           if (deleting) event.preventDefault();
@@ -600,8 +639,10 @@ export default function SettingsPage() {
           <h2 id="delete-account-title" className="text-lg font-bold">
             Delete account
           </h2>
-          <div className="mt-3 rounded-lg border border-[var(--app-danger-border)] bg-[var(--app-danger-soft)] px-3 py-2.5 text-sm text-[var(--app-danger)]">
+          <div id="delete-account-description" className="mt-3 rounded-lg border border-[var(--app-danger-border)] bg-[var(--app-danger-soft)] px-3 py-2.5 text-sm text-[var(--app-danger)]">
             Type <strong>DELETE</strong> to confirm permanent account removal.
+            {" "}You will lose sign-in access. Reports, media and activity history
+            require a separate <Link href="/account-deletion" prefetch={false} className="underline underline-offset-4">data-removal request</Link>.
           </div>
           <label className="mt-4 block">
             <span className="mb-1.5 block text-sm font-semibold">
@@ -609,6 +650,7 @@ export default function SettingsPage() {
             </span>
             <input
               value={confirmText}
+              disabled={deleting}
               onChange={(event) => setConfirmText(event.target.value)}
               autoComplete="off"
               className="min-h-10 w-full rounded-lg border border-[var(--app-border)] bg-[var(--app-bg)] px-3 text-sm outline-none focus:border-[var(--app-danger)] focus:ring-2 focus:ring-[var(--app-danger-ring)]"
@@ -622,6 +664,7 @@ export default function SettingsPage() {
               <input
                 type="password"
                 value={deletePassword}
+                disabled={deleting}
                 onChange={(event) => setDeletePassword(event.target.value)}
                 autoComplete="current-password"
                 className="min-h-10 w-full rounded-lg border border-[var(--app-border)] bg-[var(--app-bg)] px-3 text-sm outline-none focus:border-[var(--app-danger)] focus:ring-2 focus:ring-[var(--app-danger-ring)]"
