@@ -116,6 +116,34 @@ stamping, upload-logo selections, receipt verification, source/destination,
 errors and permitted field comparisons remain separate facts. Missing historical
 evidence is labelled Not recorded; older records show a current-state baseline.
 
+Backup activity (2026-10-06, local; release pending) has separate Started, Paused,
+Resumed, Interrupted and Completed action filters. The timeline says **Backup
+paused by user** only for `backup_paused` with `backupReason: user_pause`.
+Network, system, sign-in and unknown interruption reasons stay distinct; an
+interruption or a delayed event never identifies a user as its cause. The list
+uses the neutral Backup paused label because its summary has no reason evidence.
+An explicit local draft deletion is labelled Backup paused after draft deletion;
+it does not mean the user selected Pause or that cloud originals were deleted.
+
+Each backup event shows server-verified files/photos against its frozen backup
+snapshot, separately from captured counts. The counts require
+`backupCountAuthority: server_verified`; a device lifecycle observation is not
+itself verification. Completed backups require server authority and confirmation
+of every file/photo. Missing evidence stays Not recorded, and impossible counts
+fail validation. A complete older snapshot does not prove all current photos are
+backed up and never implies report submission. Device time and server receipt
+time remain separate; delayed receipts explain offline/stopped-app synchronization
+and possible device-clock differences without guessing why work stopped.
+
+Backup UI verification: 103 policy tests, lint/typecheck and an isolated production
+build pass. Read-only loopback Chromium fixtures verify action filtering, keyboard
+drawer navigation, every backup reason, 50-of-224 versus 300 captured photos,
+complete server receipts, forbidden-read/manual-retry behavior, and unauthenticated
+redirects at 320/390/768/844/1440px in light/dark layouts. Lifecycle observations
+use Recorded badges, reserving Completed for confirmed backup completion. No
+console errors or horizontal overflow in tested layouts. This is synthetic admin
+UI coverage, not a production backup or physical-device certification.
+
 The detail drawer also shows **Photos by lot** (10 rows per page), for example
 `Lot 5 · 8 images`. Saved lot numbers and order are preserved. Report-only and
 known missing counts are separate, and cover/thumbnail images are not counted

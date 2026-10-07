@@ -1,13 +1,34 @@
 export const ACTIVITY_LABELS: Record<string, string> = {
+  backup_started: "Backup started", backup_paused: "Backup paused", backup_resumed: "Backup resumed", backup_interrupted: "Backup interrupted", backup_completed: "Backup completed",
   history_started: "History recording started", photo_captured: "Photo taken", photos_imported: "Photos imported", lot_added: "Lot added", next_lot: "Next lot", photos_removed: "Photos removed", lot_removed: "Lot removed", photos_reordered: "Photo order changed", lots_reordered: "Lot order changed", cover_changed: "Cover changed", logo_changed: "Upload logo changed", draft_opened: "Draft opened for review", draft_saved: "Draft saved", preview_saved: "Preview saved", upload_started: "Upload started", upload_progress: "Upload progress", upload_accepted: "Upload accepted", submission_requested: "Submit requested", preview_submitted: "Preview submitted", retry_requested: "Retry requested", cancelled: "Stopped", preview_ready: "Preview ready", generation_started: "Processing accepted", generation_completed: "Files generated", generation_failed: "Processing failed", reassigned: "Reassigned", approved: "Approved", declined: "Declined", released: "Released", auction_delivery: "Auction delivery", report_deleted: "Report deleted", draft_deleted: "Draft deleted", preview_deleted: "Preview deleted", fields_changed: "Details changed", capture_mode_changed: "Capture mode changed",
 };
 export type ActivityPerson = { id: string; name: string; email: string };
 export type ActivityCounts = { lots: number; photos: number; mainPhotos: number; extraPhotos: number };
+export type ActivityBackupCounts = { totalFiles: number; verifiedFiles: number; totalPhotos: number; verifiedPhotos: number };
+export type ActivityBackupReason = "user_pause" | "draft_deleted" | "network_unavailable" | "system_interruption" | "authentication_required" | "unknown";
+export type ActivityBackupData = { backupPlanId?: string; backupRevision?: number; backupReason?: ActivityBackupReason | null; backupCounts?: ActivityBackupCounts | null; backupCountAuthority?: "server_verified" };
 export type ActivityRow = { lastReportedApp?: { appVersion: string; source: string; receivedAt: string } | null; id: string; activityId: string; owner: ActivityPerson; reportType: "asset" | "lotListing"; contract: string; source: string; latestAction?: string; latestOutcome?: string; latestCounts: ActivityCounts | null; lastReceivedAt: string; lastConfirmedAt?: string; revision: number; deleted: boolean; reportId: string | null };
 export type ActivityDetail = ActivityRow & { canViewValues: boolean; canOpenPreview: boolean; canRemove: boolean; reportExists: boolean; previewPath?: string | null };
 export type ActivityField = string | { field: string; before?: unknown; after?: unknown };
 export type ActivityLot = { id: string; lotNumber?: string; beforePosition?: number | null; afterPosition?: number | null; beforeCover?: number | null; afterCover?: number | null; before: { mainPhotos: number; extraPhotos: number; cover?: number | null } | null; after: { mainPhotos: number; extraPhotos: number; cover?: number | null } | null; photos?: { id: string; before: number | null; after: number | null; slot?: string }[] };
-export type ActivityEvent = { id: string; action: string; outcome: string; source: string; authority: "device" | "server"; actor: ActivityPerson | null; actorRole: string; observedAt: string | null; receivedAt: string; sequence: number | null; appVersion: string | null; data: { baseline?: boolean; error?: string | null; verifiedLogoReceipts?: number | null; deliveryStatus?: string | null; beforeCounts: ActivityCounts | null; afterCounts: ActivityCounts | null; fields?: ActivityField[]; lots?: ActivityLot[]; uploadLogo?: boolean | null; previousUploadLogo?: boolean | null; cameraStamp?: string; captureMode?: string; destination?: string | null; status?: string; part?: number; parts?: number } };
+export type ActivityEvent = { id: string; action: string; outcome: string; source: string; authority: "device" | "server"; actor: ActivityPerson | null; actorRole: string; observedAt: string | null; receivedAt: string; sequence: number | null; appVersion: string | null; data: ActivityBackupData & { baseline?: boolean; error?: string | null; verifiedLogoReceipts?: number | null; deliveryStatus?: string | null; beforeCounts: ActivityCounts | null; afterCounts: ActivityCounts | null; fields?: ActivityField[]; lots?: ActivityLot[]; uploadLogo?: boolean | null; previousUploadLogo?: boolean | null; cameraStamp?: string; captureMode?: string; destination?: string | null; status?: string; part?: number; parts?: number } };
+export const isBackupActivity = (action: string) => ["backup_started", "backup_paused", "backup_resumed", "backup_interrupted", "backup_completed"].includes(action);
+export const activityOutcomeLabel = (action?: string, outcome?: string) => action && isBackupActivity(action) && action !== "backup_completed" && outcome === "completed" ? "Recorded" : outcome;
+const BACKUP_REASON_LABELS: Record<ActivityBackupReason, string> = {
+  user_pause: "User selected Pause", draft_deleted: "Local draft deleted", network_unavailable: "Network unavailable", system_interruption: "System interruption", authentication_required: "Sign-in required", unknown: "Cause not recorded",
+};
+export const backupReasonLabel = (reason?: ActivityBackupReason | null) => reason ? BACKUP_REASON_LABELS[reason] || "Cause not recorded" : "Cause not recorded";
+export function activityEventLabel(event: Pick<ActivityEvent, "action" | "data">) {
+  if (event.action === "backup_paused" && event.data.backupReason === "user_pause") return "Backup paused by user";
+  if (event.action === "backup_paused" && event.data.backupReason === "draft_deleted") return "Backup paused after draft deletion";
+  return ACTIVITY_LABELS[event.action] || "Activity recorded";
+}
+export function activityReceiptNote(event: Pick<ActivityEvent, "authority" | "observedAt" | "receivedAt">): string | null {
+  if (event.authority !== "device" || !event.observedAt) return null;
+  const observed = Date.parse(event.observedAt), received = Date.parse(event.receivedAt);
+  if (!Number.isFinite(observed) || !Number.isFinite(received) || received - observed < 60_000) return null;
+  return "Received later than the device time. Offline activity or activity from a stopped app may arrive after it reconnects or reopens. This delay does not identify why a backup stopped; the device clock may also differ.";
+}
 export type ActivityPage<T> = { items: T[]; total: number; page: number; limit: number };
 export type ActivityLotCount = { id: string; lotNumber: string; position: number; mainPhotos: number; extraPhotos: number; photos: number; missingPhotos: number | null };
 export type ActivityLotPage = ActivityPage<ActivityLotCount> & { source: "report" | "draft" | "capture" | "unavailable"; asOf: string | null };
@@ -73,6 +94,22 @@ function validateActivityItem(item: unknown) {
   } else {
     if (!["device", "server"].includes(row.authority) || typeof row.action !== "string" || typeof row.outcome !== "string" || !row.data) fail();
     counts(row.data.beforeCounts); counts(row.data.afterCounts);
+    if (row.data.backupReason != null && !Object.hasOwn(BACKUP_REASON_LABELS, row.data.backupReason)) fail();
+    if (row.data.backupPlanId != null && (typeof row.data.backupPlanId !== "string" || !row.data.backupPlanId || row.data.backupPlanId.length > 160)) fail();
+    if (row.data.backupRevision != null && !count(row.data.backupRevision)) fail();
+    if (row.data.backupCountAuthority != null && row.data.backupCountAuthority !== "server_verified") fail();
+    if (row.data.backupCounts != null) {
+      const backup = row.data.backupCounts;
+      if (![backup.totalFiles, backup.verifiedFiles, backup.totalPhotos, backup.verifiedPhotos].every(count) ||
+          backup.verifiedFiles > backup.totalFiles || backup.totalPhotos > backup.totalFiles ||
+          backup.verifiedPhotos > backup.totalPhotos || backup.verifiedPhotos > backup.verifiedFiles ||
+          backup.verifiedFiles - backup.verifiedPhotos > backup.totalFiles - backup.totalPhotos) fail();
+    }
+    // A device's lifecycle observation alone cannot certify a completed cloud copy.
+    if (row.action === "backup_completed" && (row.authority !== "server" || row.data.backupCountAuthority !== "server_verified" ||
+        !row.data.backupCounts || row.data.backupCounts.verifiedFiles !== row.data.backupCounts.totalFiles ||
+        row.data.backupCounts.verifiedPhotos !== row.data.backupCounts.totalPhotos)) fail();
+    if (row.action === "backup_interrupted" && row.data.backupReason === "user_pause") fail();
     if (row.data.fields && (!Array.isArray(row.data.fields) || row.data.fields.some(field => typeof field !== "string" && (!field || typeof field.field !== "string")))) fail();
     if (row.data.lots && (!Array.isArray(row.data.lots) || row.data.lots.length > 100 || row.data.lots.some(lot => !lot || typeof lot.id !== "string" || [lot.before, lot.after].some(value => value != null && (!count(value.mainPhotos) || !count(value.extraPhotos))) || (lot.photos && (!Array.isArray(lot.photos) || lot.photos.some(photo => typeof photo.id !== "string")))))) fail();
   }

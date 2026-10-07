@@ -1,5 +1,38 @@
 # Sanitized application synchronization
 
+## 7 October 2026 follow-up
+
+Content-only update on Pristine77 `ed75dbb`:
+
+| Application | Source revision |
+| --- | --- |
+| Admin | `0da9a8d8cf770a5b7286b1cf77d02804a79de2db` |
+| Web | `790f23ebbfabe95385419b2324f644adba045297` (already current) |
+| Native | `c43c079c17594f71bed8ff03ab69411f1ec9bdef` |
+
+Adds native same-contract Continue, non-destructive draft restore/sync, original
+Android CameraX routing and fixed-lot locks, September landscape controls with a
+visible scrollbar, Play permission/first-login corrections, and backup activity
+support. Background capture backup stays disabled in production build profiles.
+Video remains 720p/30fps and the existing 3000px photo policy is unchanged.
+
+Pristine's logo defaults, Bank policy, bounded photo decoder and ordered
+off-main journal writes are retained. Queued journal snapshots also capture
+fixed-lot metadata so a later form cannot change an earlier session's authority.
+The paired standalone mobile repository receives the same application content.
+
+The provider-accounting exclusions below remain enforced. No credentials, source
+Git history, production deployment, signing or Play submission is included.
+
+Verification: 96 admin policy tests, lint/typecheck/build, five root export
+boundary tests, and 1,338 native tests across 111 suites in each mobile copy pass.
+Native typechecks, Android/iOS Hermes exports, Android camera compilation/resource
+processing and app instrumentation Kotlin compilation pass. The asynchronous
+snapshot regression is compiled for Android; no new device run is claimed.
+Web source is unchanged in this follow-up. Final source parity, secret/accounting
+and whitespace audits pass. Build artifacts use isolated endpoints and are not
+release artifacts.
+
 6 October 2026 content-only synchronization, retaining Pristine77 history through
 `551205d`. Source Git history is not imported.
 

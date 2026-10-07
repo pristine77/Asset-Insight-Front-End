@@ -1,13 +1,81 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { readFileSync } from 'node:fs';
-import { ACTIVITY_LABELS, activityQuery, activityRemoval, activityIdValid, logoLabel, parseActivityPage, parseActivityDetail, parseActivityLotPage } from '../lib/reportActivity.ts';
+import { ACTIVITY_LABELS, activityEventLabel, activityOutcomeLabel, activityQuery, activityReceiptNote, activityRemoval, activityIdValid, backupReasonLabel, isBackupActivity, logoLabel, parseActivityPage, parseActivityDetail, parseActivityLotPage } from '../lib/reportActivity.ts';
 test('offline review opens have a distinct searchable label, never a submission label', () => {
  assert.equal(ACTIVITY_LABELS.draft_opened, 'Draft opened for review');
  assert.equal(new URLSearchParams(activityQuery(new URLSearchParams('action=draft_opened'))).get('action'), 'draft_opened');
 });
 const id='a'.repeat(64);
 const row={id,owner:{id:'a'.repeat(24),name:'Example',email:'test@example.test'},source:'web',reportType:'asset',contract:'93530',latestCounts:{lots:1,photos:2,mainPhotos:1,extraPhotos:1},revision:2};
+const backupEvent = (changes = {}) => ({
+ id, action:'backup_interrupted', outcome:'completed', source:'android', authority:'device', actor:null, actorRole:'user',
+ observedAt:'2026-10-06T09:00:00Z', receivedAt:'2026-10-06T11:00:00Z', sequence:3, appVersion:'1.0.2 (build 24)',
+ data:{beforeCounts:null,afterCounts:null,backupPlanId:'backup-plan-1',backupRevision:4,backupReason:'unknown',backupCountAuthority:'server_verified',backupCounts:{totalFiles:225,verifiedFiles:51,totalPhotos:224,verifiedPhotos:50}},
+ ...changes,
+});
+const eventPage = event => ({data:{items:[event],total:1,page:1,limit:25}});
+test('backup actions are searchable independently of report submission', () => {
+ for(const action of ['backup_started','backup_paused','backup_resumed','backup_interrupted','backup_completed']) {
+  assert.equal(isBackupActivity(action),true);
+  assert.equal(new URLSearchParams(activityQuery(new URLSearchParams({action}))).get('action'),action);
+  assert.doesNotMatch(ACTIVITY_LABELS[action],/submit|upload accepted/i);
+ }
+ assert.equal(isBackupActivity('submission_requested'),false);
+});
+test('only an explicit pause attributes backup interruption to the user', () => {
+ const event=backupEvent();
+ assert.equal(activityEventLabel(event),'Backup interrupted');
+ assert.equal(activityEventLabel({...event,action:'backup_paused'}),'Backup paused');
+ assert.equal(activityEventLabel({...event,action:'backup_paused',data:{...event.data,backupReason:'user_pause'}}),'Backup paused by user');
+ assert.equal(activityEventLabel({...event,action:'backup_paused',data:{...event.data,backupReason:'draft_deleted'}}),'Backup paused after draft deletion');
+ assert.equal(backupReasonLabel('draft_deleted'),'Local draft deleted');
+ assert.equal(parseActivityPage(eventPage({...event,action:'backup_paused',data:{...event.data,backupReason:'draft_deleted'}})).items[0].data.backupReason,'draft_deleted');
+ assert.equal(backupReasonLabel('unknown'),'Cause not recorded');
+ assert.equal(backupReasonLabel(),'Cause not recorded');
+ assert.equal(backupReasonLabel('network_unavailable'),'Network unavailable');
+ assert.equal(backupReasonLabel('system_interruption'),'System interruption');
+ assert.equal(backupReasonLabel('authentication_required'),'Sign-in required');
+ assert.throws(()=>parseActivityPage(eventPage({...event,data:{...event.data,backupReason:'user_pause'}})));
+});
+test('a recorded backup pause or interruption never displays as a completed backup', () => {
+ for(const action of ['backup_started','backup_paused','backup_resumed','backup_interrupted'])assert.equal(activityOutcomeLabel(action,'completed'),'Recorded');
+ assert.equal(activityOutcomeLabel('backup_completed','completed'),'completed');
+ assert.equal(activityOutcomeLabel('backup_interrupted','failed'),'failed');
+ assert.equal(activityOutcomeLabel('generation_completed','completed'),'completed');
+});
+test('backup receipt counts remain separate from captured counts and reject impossible evidence', () => {
+ const event=backupEvent();
+ const parsed=parseActivityPage(eventPage(event)).items[0];
+ assert.equal(parsed.data.afterCounts,null);
+ assert.equal(parsed.data.backupCounts.verifiedPhotos,50);
+ assert.equal(parsed.authority,'device');
+ assert.equal(parsed.data.backupCountAuthority,'server_verified');
+ for(const counts of [{verifiedFiles:226},{verifiedPhotos:225},{verifiedFiles:49},{totalPhotos:226},{verifiedFiles:55},{verifiedPhotos:-1},{verifiedPhotos:'50'},{totalFiles:undefined}]) {
+  assert.throws(()=>parseActivityPage(eventPage({...event,data:{...event.data,backupCounts:{...event.data.backupCounts,...counts}}})));
+ }
+ for(const data of [{backupReason:'force_stopped_by_user'},{backupCountAuthority:'device_reported'},{backupRevision:-1},{backupPlanId:'x'.repeat(161)}]) {
+  assert.throws(()=>parseActivityPage(eventPage({...event,data:{...event.data,...data}})));
+ }
+});
+test('completed backup requires server verification of every file and photo', () => {
+ const event=backupEvent({action:'backup_completed',authority:'server'});
+ assert.throws(()=>parseActivityPage(eventPage(event)));
+ const completed={...event,data:{...event.data,backupReason:null,backupCounts:{totalFiles:225,verifiedFiles:225,totalPhotos:224,verifiedPhotos:224}}};
+ assert.equal(parseActivityPage(eventPage(completed)).items[0].action,'backup_completed');
+ assert.throws(()=>parseActivityPage(eventPage({...completed,authority:'device'})));
+ assert.throws(()=>parseActivityPage(eventPage({...completed,data:{...completed.data,backupCountAuthority:undefined}})));
+});
+test('delayed device receipt explains timing without identifying a cause or treating clocks as authoritative', () => {
+ const event=backupEvent();
+ assert.match(activityReceiptNote(event),/does not identify why a backup stopped/);
+ assert.match(activityReceiptNote(event),/device clock may also differ/);
+ assert.equal(activityReceiptNote({...event,authority:'server'}),null);
+ assert.equal(activityReceiptNote({...event,observedAt:null}),null);
+ assert.equal(activityReceiptNote({...event,observedAt:'invalid'}),null);
+ assert.equal(activityReceiptNote({...event,observedAt:event.receivedAt}),null);
+ assert.equal(activityReceiptNote({...event,observedAt:'2026-10-07T11:00:00Z'}),null);
+});
 test('last received native version is optional, bounded and labelled without inventing old versions',()=>{
  const page=lastReportedApp=>({data:{items:[{...row,lastReportedApp}],total:1,page:1,limit:25}});
  const version={appVersion:'1.0.1 (build 73)',source:'android',receivedAt:'2026-10-02T12:00:00Z'};

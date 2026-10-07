@@ -4,7 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import dynamic from "next/dynamic";
 import { Alert, Autocomplete, Box, Button, Chip, Dialog, DialogActions, DialogContent, DialogTitle, Drawer, IconButton, LinearProgress, MenuItem, Pagination, Stack, Tab, Tabs, TextField, Typography } from "@mui/material";
 import { ArrowRight, Camera, ChevronRight, Clock3, History, RefreshCw, Trash2, X } from "lucide-react";
-import { ACTIVITY_LABELS, activityQuery, activityTime, logoLabel, parseActivityDetail, parseActivityPage, type ActivityCounts, type ActivityDetail, type ActivityEvent, type ActivityField, type ActivityPage, type ActivityRow } from "@/lib/reportActivity";
+import { ACTIVITY_LABELS, activityEventLabel, activityOutcomeLabel, activityQuery, activityReceiptNote, activityTime, backupReasonLabel, isBackupActivity, logoLabel, parseActivityDetail, parseActivityPage, type ActivityCounts, type ActivityDetail, type ActivityEvent, type ActivityField, type ActivityPage, type ActivityRow } from "@/lib/reportActivity";
 import { parseCaptureUsers, type CaptureUser } from "@/lib/captureInventory";
 import ActivityLotCounts from "./ActivityLotCounts";
 
@@ -40,9 +40,12 @@ function FieldChange({ field }: { field: ActivityField }) {
 }
 function EventItem({ event }: { event: ActivityEvent }) {
   const data = event.data || {};
+  const backup = isBackupActivity(event.action);
+  const receiptNote = activityReceiptNote(event);
+  const verifiedBackup = data.backupCountAuthority === "server_verified" ? data.backupCounts : null;
   return <Box component="article" sx={{ borderLeft: "2px solid", borderColor: event.outcome === "failed" ? "error.main" : "divider", pl: 2, pb: 2, position: "relative" }}>
     <Box sx={{ position: "absolute", left: -5, top: 5, width: 8, height: 8, borderRadius: "50%", bgcolor: event.outcome === "failed" ? "error.main" : "primary.main" }} />
-    <Stack direction="row" gap={1} alignItems="center" flexWrap="wrap"><Typography sx={{ fontWeight: 700, fontSize: 14 }}>{label(event.action)}</Typography><Outcome outcome={event.outcome} />{(data.parts || 1) > 1 ? <Typography sx={{ fontSize: 11, color: "text.secondary" }}>Part {data.part} of {data.parts}</Typography> : null}</Stack>
+    <Stack direction="row" gap={1} alignItems="center" flexWrap="wrap"><Typography sx={{ fontWeight: 700, fontSize: 14 }}>{activityEventLabel(event)}</Typography><Outcome outcome={activityOutcomeLabel(event.action, event.outcome)} />{(data.parts || 1) > 1 ? <Typography sx={{ fontSize: 11, color: "text.secondary" }}>Part {data.part} of {data.parts}</Typography> : null}</Stack>
     <Typography sx={{ fontSize: 12, color: "text.secondary", mt: 0.5, overflowWrap: "anywhere" }}>{person(event.actor)} · Source: {event.source === "unknown" ? "Not recorded" : event.source} · {event.authority === "server" ? "Server confirmed" : "Device reported"}{event.appVersion ? ` · App ${event.appVersion}` : ""}</Typography>
     <Typography sx={{ fontSize: 11, color: "text.secondary" }}>Received {activityTime(event.receivedAt)}{["android", "ios"].includes(event.source) && !event.appVersion ? " · App version: Not recorded" : ""}</Typography>
     {data.baseline ? <Alert severity="info" sx={{ my: 1 }}>Current-state baseline only. Earlier actions were not recorded.</Alert> : null}
@@ -50,8 +53,18 @@ function EventItem({ event }: { event: ActivityEvent }) {
     {data.verifiedLogoReceipts ? <Typography sx={{ fontSize: 12 }}>Verified existing-logo receipts: {data.verifiedLogoReceipts}. Receipt verification does not identify the camera.</Typography> : null}
     {data.deliveryStatus ? <Typography sx={{ fontSize: 12 }}>Auction delivery: {data.deliveryStatus.replaceAll("_", " ")}</Typography> : null}
     {event.authority === "device" ? <Typography sx={{ fontSize: 11, color: "text.secondary" }}>Device time {activityTime(event.observedAt)}{event.sequence ? ` · sequence ${event.sequence}` : ""}</Typography> : null}
-    <Stack direction="row" gap={1} flexWrap="wrap" alignItems="center" sx={{ my: 1, bgcolor: "action.hover", p: 1 }}><Count value={data.beforeCounts} /><ArrowRight size={14} aria-label="changed to" /><Count value={data.afterCounts} /></Stack>
-    <Stack direction="row" gap={1.5} flexWrap="wrap"><Typography sx={{ fontSize: 12 }}>Upload logo: <b>{logoLabel(data.uploadLogo)}</b></Typography><Typography sx={{ fontSize: 12 }}>Camera stamp: <b>{data.cameraStamp === "camera_reported" ? "Reported by camera" : data.cameraStamp === "receipt_verified" ? "Receipt verified" : "Not recorded"}</b></Typography>{data.destination ? <Typography sx={{ fontSize: 12 }}>Destination: <b>{data.destination}</b></Typography> : null}{data.captureMode ? <Typography sx={{ fontSize: 12 }}>Capture: {data.captureMode}</Typography> : null}</Stack>
+    {receiptNote ? <Typography sx={{ fontSize: 11, color: "text.secondary", mt: 0.5 }}>{receiptNote}</Typography> : null}
+    {backup ? <Box sx={{ my: 1, bgcolor: "action.hover", p: 1 }}>
+      <Typography sx={{ fontSize: 12, fontWeight: 700 }}>Cloud backup snapshot{data.backupRevision != null ? ` · revision ${data.backupRevision}` : ""}</Typography>
+      {verifiedBackup ? <>
+        <Typography sx={{ fontSize: 13, fontVariantNumeric: "tabular-nums" }}>Server-verified files: {verifiedBackup.verifiedFiles.toLocaleString()} of {verifiedBackup.totalFiles.toLocaleString()}</Typography>
+        <Typography sx={{ fontSize: 13, fontVariantNumeric: "tabular-nums" }}>Server-verified photos: {verifiedBackup.verifiedPhotos.toLocaleString()} of {verifiedBackup.totalPhotos.toLocaleString()}</Typography>
+      </> : <Typography sx={{ fontSize: 13 }}>Cloud verification counts not recorded</Typography>}
+      {["backup_paused", "backup_interrupted"].includes(event.action) || data.backupReason ? <Typography sx={{ fontSize: 12, mt: 0.5 }}>Reason: {backupReasonLabel(data.backupReason)}</Typography> : null}
+      <Typography sx={{ fontSize: 11, color: "text.secondary", mt: 0.5 }}>These counts cover this saved backup snapshot, separately from captured photo totals. Backup does not submit the report.</Typography>
+    </Box> : null}
+    {!backup || data.beforeCounts || data.afterCounts ? <Stack direction="row" gap={1} flexWrap="wrap" alignItems="center" sx={{ my: 1, bgcolor: "action.hover", p: 1 }}><Count value={data.beforeCounts} /><ArrowRight size={14} aria-label="changed to" /><Count value={data.afterCounts} /></Stack> : null}
+    {!backup ? <Stack direction="row" gap={1.5} flexWrap="wrap"><Typography sx={{ fontSize: 12 }}>Upload logo: <b>{logoLabel(data.uploadLogo)}</b></Typography><Typography sx={{ fontSize: 12 }}>Camera stamp: <b>{data.cameraStamp === "camera_reported" ? "Reported by camera" : data.cameraStamp === "receipt_verified" ? "Receipt verified" : "Not recorded"}</b></Typography>{data.destination ? <Typography sx={{ fontSize: 12 }}>Destination: <b>{data.destination}</b></Typography> : null}{data.captureMode ? <Typography sx={{ fontSize: 12 }}>Capture: {data.captureMode}</Typography> : null}</Stack> : null}
     {(data.fields?.length || data.lots?.length) ? <Box component="details" sx={{ mt: 1, "& summary": { cursor: "pointer", minHeight: 40, display: "list-item", fontSize: 13, fontWeight: 600, pt: 1 } }}><summary>View changes{data.fields?.length ? ` · ${data.fields.length} fields` : ""}{data.lots?.length ? ` · ${data.lots.length} lot updates` : ""}</summary>
       <Stack gap={1} sx={{ pt: 1 }}>{data.fields?.map((field, index) => <FieldChange key={index} field={field} />)}
         {data.lots?.map((lot, index) => <Box key={`${lot.id}-${index}`} sx={{ border: "1px solid", borderColor: "divider", p: 1 }}><Typography sx={{ fontSize: 13, fontWeight: 700 }}>Lot {lot.lotNumber || lot.id}</Typography><Typography sx={{ fontSize: 12 }}>{lot.before ? `${lot.before.mainPhotos} main + ${lot.before.extraPhotos} report-only` : "Not present"} → {lot.after ? `${lot.after.mainPhotos} main + ${lot.after.extraPhotos} report-only` : "Removed"}</Typography>
@@ -124,7 +137,7 @@ export default function ReportActivityPage({ initialTab = "activity" }: { initia
   }, [userSearch, tab]);
   const field = (name: keyof typeof draft, value: string) => setDraft(current => ({ ...current, [name]: value }));
   return <Box sx={{ p: { xs: 1.5, md: 3 }, minWidth: 0 }}>
-    <Stack direction="row" alignItems="center" justifyContent="space-between" gap={1} sx={{ mb: 1.5 }}><Box><Typography component="h1" sx={{ fontSize: { xs: 22, md: 26 }, fontWeight: 750 }}>Report Activity</Typography><Typography sx={{ color: "text.secondary", fontSize: 13 }}>Follow Asset and Lot Listing work from capture to delivery.</Typography></Box><History size={25} aria-hidden /></Stack>
+    <Stack direction="row" alignItems="center" justifyContent="space-between" gap={1} sx={{ mb: 1.5 }}><Box><Typography component="h1" sx={{ fontSize: { xs: 22, md: 26 }, fontWeight: 750 }}>Report Activity</Typography><Typography sx={{ color: "text.secondary", fontSize: 13 }}>Follow Asset and Lot Listing work from capture to delivery. Device activity may arrive after the phone reconnects or the app reopens.</Typography></Box><History size={25} aria-hidden /></Stack>
     <Tabs value={tab} onChange={(_, value) => setTab(value)} aria-label="Report activity views" sx={{ borderBottom: "1px solid", borderColor: "divider", mb: 2 }}><Tab value="activity" label="Activity" icon={<Clock3 size={16} />} iconPosition="start" /><Tab value="captures" label="Captures" icon={<Camera size={16} />} iconPosition="start" /></Tabs>
     {tab === "captures" ? <Captures /> : <>
       <Box component="form" onSubmit={event => { event.preventDefault(); try { activityQuery(new URLSearchParams(draft)); setFilters({ ...draft }); setPage(1); setIssue(""); } catch (error) { setIssue((error as Error).message); } }} sx={{ p: 1.5, border: "1px solid", borderColor: "divider", borderRadius: 1, mb: 2 }}>
@@ -143,7 +156,7 @@ export default function ReportActivityPage({ initialTab = "activity" }: { initia
         {data?.items.map(row => <Box key={row.id} component="button" onClick={() => setSelected(row.id)} aria-label={`View history for contract ${row.contract || "not assigned"}`} sx={{ display: "grid", gridTemplateColumns: { xs: "1fr auto", lg: "1.1fr 1.5fr 1fr 1.4fr 1.2fr 44px" }, width: "100%", gap: 1.5, alignItems: "center", p: 1.5, border: 0, borderTop: "1px solid", borderColor: "divider", bgcolor: "background.paper", color: "text.primary", textAlign: "left", cursor: "pointer", "&:hover": { bgcolor: "action.hover" }, "&:focus-visible": { outline: "2px solid", outlineColor: "primary.main", outlineOffset: -2 } }}>
           <Box sx={{ minWidth: 0 }}><Typography sx={{ fontWeight: 700, fontSize: 14, overflowWrap: "anywhere" }}>{row.contract || "No contract yet"}</Typography><Typography sx={{ fontSize: 11, color: "text.secondary" }}>{row.reportType === "asset" ? "Asset" : "Lot Listing"}{row.deleted ? " · Deleted" : ""}</Typography></Box>
           <Box sx={{ minWidth: 0 }}><Typography sx={{ fontSize: 13, overflowWrap: "anywhere" }}>{person(row.owner)}</Typography><Typography sx={{ fontSize: 11, color: "text.secondary" }}>{row.source === "unknown" ? "Source not recorded" : row.source}</Typography><ReportedApp row={row} /></Box>
-          <Count value={row.latestCounts} /><Box><Typography sx={{ fontSize: 12, mb: 0.5 }}>{label(row.latestAction)}</Typography><Outcome outcome={row.latestOutcome} /></Box><Typography sx={{ fontSize: 11, color: "text.secondary" }}>{activityTime(row.lastReceivedAt)}</Typography><ChevronRight size={18} aria-hidden />
+          <Count value={row.latestCounts} /><Box><Typography sx={{ fontSize: 12, mb: 0.5 }}>{label(row.latestAction)}</Typography><Outcome outcome={activityOutcomeLabel(row.latestAction, row.latestOutcome)} /></Box><Typography sx={{ fontSize: 11, color: "text.secondary" }}>{activityTime(row.lastReceivedAt)}</Typography><ChevronRight size={18} aria-hidden />
         </Box>)}
         {data?.items.length === 0 ? <Box sx={{ p: 3 }}><Typography sx={{ fontWeight: 600 }}>No activity received yet</Typography><Typography sx={{ fontSize: 13, color: "text.secondary", mt: 0.5 }}>Try different filters. Offline activity appears after the device reconnects and synchronizes.</Typography></Box> : null}
       </Box>
