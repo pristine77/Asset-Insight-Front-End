@@ -109,9 +109,11 @@ const PREVIOUS_RECEIPT_CODE = "PREVIOUS_REPORT_RECEIPT";
 
 /**
  * Whether a failed background upload needs a decision only this form can offer.
- * The active-report conflict and the changed-manifest supersede choice both
- * have prompts here, so the draft is sent back for an inline Submit rather than
- * retried from the upload bar, where the answer cannot be given.
+ * Each of these has a prompt here — the active-report conflict dialog, the
+ * changed-manifest supersede choice, separate-draft recovery, and the earlier
+ * receipt warning — so the draft is sent back for an inline Submit rather than
+ * retried from the upload bar, where the answer cannot be given. The same test
+ * as AssetForm's, so the two report types recover alike.
  */
 function lotListingSubmissionNeedsForm(error: unknown): boolean {
   const failure = error as {
@@ -120,10 +122,13 @@ function lotListingSubmissionNeedsForm(error: unknown): boolean {
   };
   if (failure?.code === PREVIOUS_RECEIPT_CODE) return true;
   const code = failure?.response?.data?.code;
-  return (
+  if (
     failure?.response?.status === 409 &&
     (code === "ACTIVE_REPORT_EXISTS" || code === "SUBMISSION_MANIFEST_CHANGED")
-  );
+  ) {
+    return true;
+  }
+  return canSaveSeparateReportDraft(error);
 }
 
 type Props = {
@@ -1609,6 +1614,30 @@ export default function LotListingForm({
         resetFormState();
         forceNewSubmissionRef.current = false;
         supersededSubmissionIdRef.current = null;
+        /*
+           Release this form's submit locks. The busy state set at the top of
+           onSubmit belongs to an inline upload; the upload is the line's now,
+           and left set it kept the cleared form inert and refused every later
+           Submit and Save Draft until the form was reopened. The new scope
+           starts with nothing to save. Draft saving stays blocked until the
+           reset has rendered, so clearing the form never reads as an edit.
+        */
+        setSubmitting(false);
+        submitLockRef.current = false;
+        if (activeFormOperationRef.current === "submit") {
+          activeFormOperationRef.current = null;
+        }
+        if (submitAbortRef.current === controller) submitAbortRef.current = null;
+        setCancellingOperation(false);
+        setSubmissionFinalizing(false);
+        requestedRevisionRef.current = 0;
+        committedRevisionRef.current = 0;
+        setHasDraft(false);
+        setShowDraftBanner(false);
+        setDraftIssue(null);
+        window.setTimeout(() => {
+          autosaveBlockedRef.current = false;
+        }, 0);
         reportDraftStatus("saved", "Upload continues in the background");
         const handedOff =
           "Upload started. It continues in the background — the bar at the bottom shows its progress.";
