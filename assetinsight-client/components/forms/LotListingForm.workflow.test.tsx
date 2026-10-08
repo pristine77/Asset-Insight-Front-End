@@ -10,6 +10,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { AuctioneerWorkItemSetup } from "@/services/auctioneer";
 import type { ReportDraftRecord } from "@/services/reportDrafts";
 import LotListingForm from "./LotListingForm";
+import { backgroundUploads } from "@/services/backgroundUploadManager";
 import { StrictMode } from "react";
 import type { MixedLot } from "./mixed/types";
 

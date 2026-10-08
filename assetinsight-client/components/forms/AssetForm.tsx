@@ -51,6 +51,8 @@ import { saveManualDraftOnly } from "./manualDraftSave";
 import AuctioneerContinueAction from "./AuctioneerContinueAction";
 import { acceptedAuctioneerReportId } from "./auctioneerContinuation";
 import { assertReportUploadAccepted, canSaveSeparateReportDraft, isPreviousReportReceipt, reportTransferErrorData, reportTransferErrorMessage, safeReportOperationError } from "@/services/reportTransferErrors";
+import { backgroundUploads } from "@/services/backgroundUploadManager";
+import { describeOrderedFiles } from "@/services/uploadJobFiles";
 import SeparateReportDraftRecovery from "./SeparateReportDraftRecovery";
 import {
   auctioneerDateOnly,
@@ -217,6 +219,32 @@ type DraftSnapshot = {
 
 const MAX_ASSET_LOT_PHOTOS = 200;
 const DEVICE_ID_KEY = "cv_device_id";
+
+/** Marks an acceptance that belongs to an earlier submission, not this one. */
+const PREVIOUS_RECEIPT_CODE = "PREVIOUS_REPORT_RECEIPT";
+
+/**
+ * Whether a failed background upload needs a decision only this form can offer.
+ * Each of these has a prompt here — the active-report conflict dialog, the
+ * changed-manifest supersede choice, separate-draft recovery, and the earlier
+ * receipt warning — so the draft is sent back for an inline Submit rather than
+ * being retried from the upload bar, where the answer cannot be given.
+ */
+function assetSubmissionNeedsForm(error: unknown): boolean {
+  const failure = error as {
+    code?: string;
+    response?: { status?: number; data?: { code?: string } };
+  };
+  if (failure?.code === PREVIOUS_RECEIPT_CODE) return true;
+  const code = failure?.response?.data?.code;
+  if (
+    failure?.response?.status === 409 &&
+    (code === "ACTIVE_REPORT_EXISTS" || code === "SUBMISSION_MANIFEST_CHANGED")
+  ) {
+    return true;
+  }
+  return canSaveSeparateReportDraft(error);
+}
 
 const isoDate = (date: Date) => {
   const local = new Date(date.getTime() - date.getTimezoneOffset() * 60000);
@@ -1962,6 +1990,84 @@ const AssetForm = forwardRef<AssetFormHandle, Props>(function AssetForm(
         force_new: boolean;
         auctioneer_work_item_id?: string;
       };
+
+      /*
+         Hand the upload to the background line and close the form, unless this
+         submission needs to stay here. Auctioneer work does: its continuation
+         can only be requested against an accepted reportId, and the decision
+         prompts (active report, changed manifest, separate draft) live in this
+         component. A draft whose last background attempt hit one of those is
+         marked foreground, so its next Submit runs inline where it can be
+         answered.
+      */
+      const mustStayInForm =
+        Boolean(auctioneer) ||
+        backgroundUploads.isForegroundRequired("asset", draftScopeId);
+      if (!mustStayInForm) {
+        const orderedFiles = [...filesToSend, ...videosToSend];
+        const handedOffScopeId = draftScopeId;
+        backgroundUploads.enqueue({
+          ownerId: userId,
+          kind: "asset",
+          scopeId: handedOffScopeId,
+          endpoint: "/asset",
+          title: contractNo.trim() || clientName.trim() || "Asset report",
+          totalFiles: orderedFiles.length,
+          clientSubmissionId: jobId,
+          details: payload,
+          files: describeOrderedFiles(orderedFiles),
+          needsFormDecision: assetSubmissionNeedsForm,
+          upload: async (onProgress, signal) => {
+            const response = await AssetService.create(
+              payload,
+              filesToSend,
+              videosToSend,
+              { onUploadProgress: onProgress, signal }
+            );
+            assertReportUploadAccepted(response);
+            if (isPreviousReportReceipt(response)) {
+              // Accepted, but for an earlier submission. These edits were not
+              // sent, so this must not read as a completed upload.
+              throw Object.assign(
+                new Error(
+                  "An earlier submission was already accepted. Your current edits have not been submitted again."
+                ),
+                { code: PREVIOUS_RECEIPT_CODE }
+              );
+            }
+            return response;
+          },
+          // The saved draft is what a resumed upload is rebuilt from, so it is
+          // cleared only once the server has accepted this submission.
+          onAccepted: () => clearDraftStorage().catch(() => undefined),
+        });
+        /*
+           The next report needs its own draft scope: the handed-off upload
+           still owns the saved media behind the old one, and autosaving a new
+           report over it would leave that upload unable to resume.
+        */
+        draftClientIdRef.current = createReportDraftClientId("asset");
+        dispatchReportCreated();
+        setDraftHydrated(false);
+        resetForm();
+        forceNewSubmissionRef.current = false;
+        supersededSubmissionIdRef.current = null;
+        publishDraftStatus("saved", "Upload continues in the background");
+        keepDraftSavingBlocked = true;
+        window.setTimeout(() => {
+          lastFingerprintRef.current = null;
+          createdEventDispatchedRef.current = false;
+          autoSaveBlockedRef.current = false;
+          setDraftHydrated(true);
+        }, 0);
+        const handedOff =
+          "Upload started. It continues in the background — the bar at the bottom shows its progress.";
+        toast.success(handedOff);
+        onSuccess?.(handedOff);
+        return;
+      }
+      // This attempt is answering the conflict that sent it back here.
+      backgroundUploads.clearForegroundRequirement("asset", draftScopeId);
 
       setSubmitting(true);
       setError(null);

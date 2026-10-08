@@ -27,6 +27,8 @@ import { useAuthContext } from "@/context/AuthContext";
 import { AuctioneerService } from "@/services/auctioneer";
 import { useWorkspaceMode } from "./useWorkspaceMode";
 import { ListingActivitySync } from "./ListingActivitySync";
+import { UploadBar } from "@/components/uploads/UploadBar";
+import { backgroundUploads } from "@/services/backgroundUploadManager";
 import { pathMatches } from "@/lib/workspace";
 import {
   notificationCacheKey,
@@ -113,6 +115,15 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
   const { user, loading, loggingOut, deviceAccess } = useAuthContext();
   const ownerId = user?._id || user?.id;
+  /*
+     Bind the upload line to the signed-in account. This lives here, above the
+     shell's early returns, so it also runs for sign-out and for /workspaces:
+     an account change empties the line without writing, while an ordinary
+     navigation that unmounts the shell leaves a running upload alone.
+  */
+  useEffect(() => {
+    backgroundUploads.setOwner(ownerId || null);
+  }, [ownerId]);
   if (loading || loggingOut || deviceAccess || !ownerId) return <div className="app-page" role="status">Opening workspace…</div>;
   if (pathname === "/workspaces") return <>{children}</>;
   if (pathMatches(pathname, "/crm") && user?.isCrmAgent !== true) return (
@@ -504,7 +515,12 @@ function AuthorizedShell({ children, ownerId }: { children: React.ReactNode; own
             </button>
           </div>
         </header>
-        <div className={styles.content}>{mode === "listings" ? <ListingActivitySync ownerId={ownerId} /> : null}{children}</div>
+        <div className={styles.content}>
+          {mode === "listings" ? <ListingActivitySync ownerId={ownerId} /> : null}
+          {children}
+          {/* Report uploads belong to Listings; the CRM workspace never queues one. */}
+          {mode === "listings" ? <UploadBar ownerId={ownerId} /> : null}
+        </div>
       </main>
 
       {showDrafts && !isCrm ? (

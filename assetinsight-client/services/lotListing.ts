@@ -1,5 +1,14 @@
 import API from "@/lib/api";
 import type { ReportWorkflowStage } from "./assets";
+import {
+  isUploadSessionUnsupportedError,
+  uploadReportFilesDirectToR2,
+} from "./directUpload";
+import {
+  lotListingDirectUploadFiles,
+  submissionFilesFromLots,
+  type SubmissionLotMedia,
+} from "./uploadJobFiles";
 
 export interface LotListingLot {
   lot_id: string;
@@ -317,7 +326,57 @@ export async function getSubmittedLotListings(): Promise<{ data: LotListing[] }>
   return { data: submitted };
 }
 
+/**
+ * Submits a Lot Listing's details and media.
+ *
+ * This is the one place the upload array is assembled, so the background line
+ * and a resumed upload present exactly the manifest the original submission
+ * did. Callers pass the lots themselves rather than a flattened file list,
+ * because the per-lot ordering is part of the manifest identity.
+ *
+ * The multipart fallback is kept for backends without upload sessions; it uses
+ * the flat images/videos fields that path has always expected.
+ */
+export async function createLotListing(
+  details: Record<string, unknown>,
+  lots: readonly SubmissionLotMedia[],
+  options?: {
+    onUploadProgress?: (fraction: number) => void;
+    signal?: AbortSignal;
+  }
+): Promise<Record<string, unknown>> {
+  try {
+    return (await uploadReportFilesDirectToR2({
+      endpoint: "/lot-listing",
+      details,
+      files: lotListingDirectUploadFiles(lots),
+      onUploadProgress: options?.onUploadProgress,
+      signal: options?.signal,
+    })) as Record<string, unknown>;
+  } catch (error) {
+    if (options?.signal?.aborted) throw options.signal.reason || error;
+    if (!isUploadSessionUnsupportedError(error)) throw error;
+  }
+
+  const { images, videos } = submissionFilesFromLots(lots);
+  const formData = new FormData();
+  images.forEach((file) => formData.append("images", file));
+  videos.forEach((file) => formData.append("videos", file));
+  formData.append("details", JSON.stringify(details));
+  const response = await API.post("/lot-listing", formData, {
+    headers: { "Content-Type": "multipart/form-data" },
+    signal: options?.signal,
+    onUploadProgress: (progressEvent: { loaded: number; total?: number }) => {
+      options?.onUploadProgress?.(
+        progressEvent.total ? progressEvent.loaded / progressEvent.total : 0
+      );
+    },
+  });
+  return response.data as Record<string, unknown>;
+}
+
 export const LotListingService = {
+  createLotListing,
   getLotListings,
   getLotListingById,
   getLotListingProgress,

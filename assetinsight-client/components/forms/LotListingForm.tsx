@@ -36,11 +36,9 @@ import {
 } from "@/lib/browserLocation";
 import { BrowserLocationService } from "@/services/browserLocation";
 import { useAuthContext } from "@/context/AuthContext";
-import {
-  isUploadSessionUnsupportedError,
-  uploadReportFilesDirectToR2,
-  type DirectUploadFile,
-} from "@/services/directUpload";
+import { createLotListing } from "@/services/lotListing";
+import { backgroundUploads } from "@/services/backgroundUploadManager";
+import { describeOrderedFiles, orderedSubmissionFiles } from "@/services/uploadJobFiles";
 import {
   ReportDraftService,
   createReportDraftClientId,
@@ -105,6 +103,28 @@ const SmartUploadWorkspace = dynamic(
 
 type ValuationMethod = "FML" | "TKV" | "OLV" | "FLV";
 const LOT_LISTING_VALUATION_METHODS: ValuationMethod[] = ["FML"];
+
+/** Marks an acceptance that belongs to an earlier submission, not this one. */
+const PREVIOUS_RECEIPT_CODE = "PREVIOUS_REPORT_RECEIPT";
+
+/**
+ * Whether a failed background upload needs a decision only this form can offer.
+ * The active-report conflict and the changed-manifest supersede choice both
+ * have prompts here, so the draft is sent back for an inline Submit rather than
+ * retried from the upload bar, where the answer cannot be given.
+ */
+function lotListingSubmissionNeedsForm(error: unknown): boolean {
+  const failure = error as {
+    code?: string;
+    response?: { status?: number; data?: { code?: string } };
+  };
+  if (failure?.code === PREVIOUS_RECEIPT_CODE) return true;
+  const code = failure?.response?.data?.code;
+  return (
+    failure?.response?.status === 409 &&
+    (code === "ACTIVE_REPORT_EXISTS" || code === "SUBMISSION_MANIFEST_CHANGED")
+  );
+}
 
 type Props = {
   onSuccess?: (message?: string) => void;
@@ -1533,6 +1553,72 @@ export default function LotListingForm({
         ...(focusBoxes.length > 0 ? { focus_boxes: focusBoxes } : {}),
       };
 
+      /*
+         Hand the upload to the background line and close the form, unless this
+         submission needs to stay here. Auctioneer work does: its continuation
+         can only be requested against an accepted reportId, and the decision
+         prompts (active report, changed manifest) live in this component. A
+         draft whose last background attempt hit one of those is marked
+         foreground, so its next Submit runs inline where it can be answered.
+      */
+      const mustStayInForm =
+        Boolean(auctioneer) ||
+        backgroundUploads.isForegroundRequired("lot-listing", draftScopeId);
+      if (!mustStayInForm && userId) {
+        const orderedFiles = orderedSubmissionFiles("lot-listing", lotsForSubmission);
+        backgroundUploads.enqueue({
+          ownerId: userId,
+          kind: "lot-listing",
+          scopeId: draftScopeId,
+          endpoint: "/lot-listing",
+          title: contractNo.trim() || "Lot listing",
+          totalFiles: orderedFiles.length,
+          clientSubmissionId: jobId,
+          details,
+          files: describeOrderedFiles(orderedFiles),
+          needsFormDecision: lotListingSubmissionNeedsForm,
+          upload: async (onProgress, signal) => {
+            const response = await createLotListing(details, lotsForSubmission, {
+              onUploadProgress: onProgress,
+              signal,
+            });
+            assertReportUploadAccepted(response);
+            if (isPreviousReportReceipt(response)) {
+              // Accepted, but for an earlier submission. These edits were not
+              // sent, so this must not read as a completed upload.
+              throw Object.assign(
+                new Error(
+                  "An earlier submission was already accepted. Your current edits have not been submitted again."
+                ),
+                { code: PREVIOUS_RECEIPT_CODE }
+              );
+            }
+            return response;
+          },
+          // The saved draft is what a resumed upload is rebuilt from, so it is
+          // cleared only once the server has accepted this submission.
+          onAccepted: () => clearAcceptedDraft().then(() => undefined),
+        });
+        /*
+           The next listing needs its own draft scope: the handed-off upload
+           still owns the saved media behind the old one.
+        */
+        draftClientIdRef.current = createReportDraftClientId("lot-listing");
+        jobIdRef.current = null;
+        dispatchReportCreated();
+        resetFormState();
+        forceNewSubmissionRef.current = false;
+        supersededSubmissionIdRef.current = null;
+        reportDraftStatus("saved", "Upload continues in the background");
+        const handedOff =
+          "Upload started. It continues in the background — the bar at the bottom shows its progress.";
+        toast.success(handedOff);
+        onSuccess?.(handedOff);
+        return;
+      }
+      // This attempt is answering the conflict that sent it back here.
+      backgroundUploads.clearForegroundRequirement("lot-listing", draftScopeId);
+
       const updateUploadProgress = (fraction: number) => {
         const clamped = Math.max(0, Math.min(1, fraction));
         setUploadPercent((current) =>
@@ -1549,69 +1635,15 @@ export default function LotListingForm({
       };
 
       try {
-        let responseData: Record<string, unknown>;
-        try {
-          const directFiles: DirectUploadFile[] = [];
-          lotsForSubmission.forEach((lot, lotIndex) => {
-            lot.files.forEach((file, imageIndex) => {
-              directFiles.push({
-                file,
-                fieldname: "images",
-                lotIndex,
-                imageIndex,
-                role: "main",
-              });
-            });
-            lot.extraFiles.forEach((file, imageIndex) => {
-              directFiles.push({
-                file,
-                fieldname: "images",
-                lotIndex,
-                imageIndex,
-                role: "extra",
-              });
-            });
-            (lot.videoFiles || []).forEach((file, videoIndex) => {
-              directFiles.push({
-                file,
-                fieldname: "videos",
-                lotIndex,
-                imageIndex: videoIndex,
-                role: "video",
-              });
-            });
-          });
-
-          responseData = await uploadReportFilesDirectToR2({
-            endpoint: "/lot-listing",
-            details,
-            files: directFiles,
-            onUploadProgress: updateUploadProgress,
-            signal: controller.signal,
-          });
-        } catch (directError: any) {
-          if (!isUploadSessionUnsupportedError(directError)) throw directError;
-
-          const formData = new FormData();
-          filesToSend.forEach((file) => formData.append("images", file));
-          videoFilesToSend.forEach((file) => formData.append("videos", file));
-          formData.append("details", JSON.stringify(details));
-          const response = await API.post("/lot-listing", formData, {
-            headers: { "Content-Type": "multipart/form-data" },
-            signal: controller.signal,
-            onUploadProgress: (progressEvent: {
-              loaded: number;
-              total?: number;
-            }) => {
-              updateUploadProgress(
-                progressEvent.total
-                  ? progressEvent.loaded / progressEvent.total
-                  : 0
-              );
-            },
-          });
-          responseData = response.data;
-        }
+        /*
+           One transport, shared with the background line and with a resumed
+           upload: the per-lot ordering is part of the manifest identity, so it
+           must not be rebuilt differently anywhere else.
+        */
+        const responseData = await createLotListing(details, lotsForSubmission, {
+          onUploadProgress: updateUploadProgress,
+          signal: controller.signal,
+        });
         assertReportUploadAccepted(responseData);
         if (isPreviousReportReceipt(responseData)) {
           throw new Error("An earlier submission was already accepted. Your current edits have not been submitted again. Open My Reports in another tab to check the existing report before continuing.");
