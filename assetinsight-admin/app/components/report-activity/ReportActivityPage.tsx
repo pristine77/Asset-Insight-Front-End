@@ -4,7 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import dynamic from "next/dynamic";
 import { Alert, Autocomplete, Box, Button, Chip, Dialog, DialogActions, DialogContent, DialogTitle, Drawer, IconButton, LinearProgress, MenuItem, Pagination, Stack, Tab, Tabs, TextField, Typography } from "@mui/material";
 import { ArrowRight, Camera, ChevronRight, Clock3, History, RefreshCw, Trash2, X } from "lucide-react";
-import { ACTIVITY_LABELS, activityEventLabel, activityOutcomeLabel, activityQuery, activityReceiptNote, activityTime, backupReasonLabel, isBackupActivity, logoLabel, parseActivityDetail, parseActivityPage, type ActivityCounts, type ActivityDetail, type ActivityEvent, type ActivityField, type ActivityPage, type ActivityRow } from "@/lib/reportActivity";
+import { ACTIVITY_LABELS, activityEventLabel, activityOutcomeLabel, activityQuery, activityReceiptNote, activityTime, backupReasonLabel, isBackupActivity, isUploadTransferActivity, uploadReasonLabel, logoLabel, parseActivityDetail, parseActivityPage, type ActivityCounts, type ActivityDetail, type ActivityEvent, type ActivityField, type ActivityPage, type ActivityRow } from "@/lib/reportActivity";
 import { parseCaptureUsers, type CaptureUser } from "@/lib/captureInventory";
 import ActivityLotCounts from "./ActivityLotCounts";
 
@@ -41,8 +41,10 @@ function FieldChange({ field }: { field: ActivityField }) {
 function EventItem({ event }: { event: ActivityEvent }) {
   const data = event.data || {};
   const backup = isBackupActivity(event.action);
+  const transfer = isUploadTransferActivity(event.action);
   const receiptNote = activityReceiptNote(event);
   const verifiedBackup = data.backupCountAuthority === "server_verified" ? data.backupCounts : null;
+  const verifiedUpload = data.uploadCountAuthority === "server_verified" ? data.uploadCounts : null;
   return <Box component="article" sx={{ borderLeft: "2px solid", borderColor: event.outcome === "failed" ? "error.main" : "divider", pl: 2, pb: 2, position: "relative" }}>
     <Box sx={{ position: "absolute", left: -5, top: 5, width: 8, height: 8, borderRadius: "50%", bgcolor: event.outcome === "failed" ? "error.main" : "primary.main" }} />
     <Stack direction="row" gap={1} alignItems="center" flexWrap="wrap"><Typography sx={{ fontWeight: 700, fontSize: 14 }}>{activityEventLabel(event)}</Typography><Outcome outcome={activityOutcomeLabel(event.action, event.outcome)} />{(data.parts || 1) > 1 ? <Typography sx={{ fontSize: 11, color: "text.secondary" }}>Part {data.part} of {data.parts}</Typography> : null}</Stack>
@@ -54,6 +56,12 @@ function EventItem({ event }: { event: ActivityEvent }) {
     {data.deliveryStatus ? <Typography sx={{ fontSize: 12 }}>Auction delivery: {data.deliveryStatus.replaceAll("_", " ")}</Typography> : null}
     {event.authority === "device" ? <Typography sx={{ fontSize: 11, color: "text.secondary" }}>Device time {activityTime(event.observedAt)}{event.sequence ? ` · sequence ${event.sequence}` : ""}</Typography> : null}
     {receiptNote ? <Typography sx={{ fontSize: 11, color: "text.secondary", mt: 0.5 }}>{receiptNote}</Typography> : null}
+    {transfer ? <Box sx={{ my: 1, bgcolor: "action.hover", p: 1 }}>
+      <Typography sx={{ fontSize: 12, fontWeight: 700 }}>Background report upload</Typography>
+      {verifiedUpload ? <Typography sx={{ fontSize: 13, fontVariantNumeric: "tabular-nums" }}>Server-verified files: {verifiedUpload.verifiedFiles.toLocaleString()} of {verifiedUpload.totalFiles.toLocaleString()}</Typography> : <Typography sx={{ fontSize: 13 }}>Upload verification counts not recorded</Typography>}
+      <Typography sx={{ fontSize: 12, mt: 0.5 }}>Reason: {uploadReasonLabel(data.uploadReason)}</Typography>
+      <Typography sx={{ fontSize: 11, color: "text.secondary", mt: 0.5 }}>This is a device transfer observation, not proof of report acceptance or deletion. Closing the form does not cancel a queued upload. A force-stopped app cannot report its state until Android allows it to run or the user reopens it.</Typography>
+    </Box> : null}
     {backup ? <Box sx={{ my: 1, bgcolor: "action.hover", p: 1 }}>
       <Typography sx={{ fontSize: 12, fontWeight: 700 }}>Cloud backup snapshot{data.backupRevision != null ? ` · revision ${data.backupRevision}` : ""}</Typography>
       {verifiedBackup ? <>
@@ -63,8 +71,8 @@ function EventItem({ event }: { event: ActivityEvent }) {
       {["backup_paused", "backup_interrupted"].includes(event.action) || data.backupReason ? <Typography sx={{ fontSize: 12, mt: 0.5 }}>Reason: {backupReasonLabel(data.backupReason)}</Typography> : null}
       <Typography sx={{ fontSize: 11, color: "text.secondary", mt: 0.5 }}>These counts cover this saved backup snapshot, separately from captured photo totals. Backup does not submit the report.</Typography>
     </Box> : null}
-    {!backup || data.beforeCounts || data.afterCounts ? <Stack direction="row" gap={1} flexWrap="wrap" alignItems="center" sx={{ my: 1, bgcolor: "action.hover", p: 1 }}><Count value={data.beforeCounts} /><ArrowRight size={14} aria-label="changed to" /><Count value={data.afterCounts} /></Stack> : null}
-    {!backup ? <Stack direction="row" gap={1.5} flexWrap="wrap"><Typography sx={{ fontSize: 12 }}>Upload logo: <b>{logoLabel(data.uploadLogo)}</b></Typography><Typography sx={{ fontSize: 12 }}>Camera stamp: <b>{data.cameraStamp === "camera_reported" ? "Reported by camera" : data.cameraStamp === "receipt_verified" ? "Receipt verified" : "Not recorded"}</b></Typography>{data.destination ? <Typography sx={{ fontSize: 12 }}>Destination: <b>{data.destination}</b></Typography> : null}{data.captureMode ? <Typography sx={{ fontSize: 12 }}>Capture: {data.captureMode}</Typography> : null}</Stack> : null}
+    {(!backup && !transfer) || data.beforeCounts || data.afterCounts ? <Stack direction="row" gap={1} flexWrap="wrap" alignItems="center" sx={{ my: 1, bgcolor: "action.hover", p: 1 }}><Count value={data.beforeCounts} /><ArrowRight size={14} aria-label="changed to" /><Count value={data.afterCounts} /></Stack> : null}
+    {!backup && !transfer ? <Stack direction="row" gap={1.5} flexWrap="wrap"><Typography sx={{ fontSize: 12 }}>Upload logo: <b>{logoLabel(data.uploadLogo)}</b></Typography><Typography sx={{ fontSize: 12 }}>Camera stamp: <b>{data.cameraStamp === "camera_reported" ? "Reported by camera" : data.cameraStamp === "receipt_verified" ? "Receipt verified" : "Not recorded"}</b></Typography>{data.destination ? <Typography sx={{ fontSize: 12 }}>Destination: <b>{data.destination}</b></Typography> : null}{data.captureMode ? <Typography sx={{ fontSize: 12 }}>Capture: {data.captureMode}</Typography> : null}</Stack> : null}
     {(data.fields?.length || data.lots?.length) ? <Box component="details" sx={{ mt: 1, "& summary": { cursor: "pointer", minHeight: 40, display: "list-item", fontSize: 13, fontWeight: 600, pt: 1 } }}><summary>View changes{data.fields?.length ? ` · ${data.fields.length} fields` : ""}{data.lots?.length ? ` · ${data.lots.length} lot updates` : ""}</summary>
       <Stack gap={1} sx={{ pt: 1 }}>{data.fields?.map((field, index) => <FieldChange key={index} field={field} />)}
         {data.lots?.map((lot, index) => <Box key={`${lot.id}-${index}`} sx={{ border: "1px solid", borderColor: "divider", p: 1 }}><Typography sx={{ fontSize: 13, fontWeight: 700 }}>Lot {lot.lotNumber || lot.id}</Typography><Typography sx={{ fontSize: 12 }}>{lot.before ? `${lot.before.mainPhotos} main + ${lot.before.extraPhotos} report-only` : "Not present"} → {lot.after ? `${lot.after.mainPhotos} main + ${lot.after.extraPhotos} report-only` : "Removed"}</Typography>

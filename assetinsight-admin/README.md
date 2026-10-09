@@ -10,6 +10,28 @@ The production administration console for Asset Insight. It is a Next.js App Rou
 
 ## Runtime architecture
 
+### Proposal Valuation report owner (2026-10-09, local)
+
+The backend supplies an intrinsic owner evaluator column and its read-only
+`ownerColumnId`. Both desktop and mobile schedule layouts label that participant
+**Report owner**, with no remove action. The owner does not consume any of the
+four additional evaluator slots and cannot be selected twice. Other evaluator
+add/remove behavior, existing amounts and legacy text-only columns are unchanged.
+Owner identity is never inferred from display names or supplied by the browser.
+
+The supporting backend must be deployed first: it projects the owner on reads
+without a migration and preserves the owner column/values if an older admin
+client omits it on save. Explicit saves retain existing revision checks. This
+does not grant report access or generate files automatically. Focused policy
+tests: `node --test tests/proposal-valuation-owner.test.mjs`.
+
+Local verification: all 109 policy tests, lint, typecheck and the production
+build pass. Isolated production Chromium checks at 1366px/light and 320px/dark
+cover owner locking, the fourth additional evaluator, add/remove saves, and
+reopening with owner/legacy amounts intact. Page identity, visible content,
+console health and viewport overflow checks pass. These use synthetic accounts
+and API fixtures, not customer data or production access. No deployment performed.
+
 ### YouTube videos
 
 `/youtube` lets admin and superadmin connect one YouTube channel through Google.
@@ -108,6 +130,25 @@ states. Browser plugin was unavailable; existing Playwright dependencies were re
 Real Google consent, YouTube uploads/publication, Safari and Firefox were not tested.
 
 ### Report Activity
+
+Background report upload activity (2026-10-08, local; release pending) has Queued,
+Paused, Resumed, Interrupted and Needs attention filters. An explicit
+`upload_paused` / `user_pause` observation says **Upload paused by user**; Android,
+network, sign-in and unknown causes stay separate. These observations are not
+server acceptance, report deletion, or capture backup completion. The drawer
+shows verified files only with server count authority and a valid session ID.
+Closing a form does not cancel its durable transfer. Android force-stop can
+prevent reporting until the app is allowed to run or is reopened, so device time
+and server receipt time remain distinct. Unknown causes are never guessed.
+
+Transfer UI verification: 106 policy tests, lint/typecheck and an isolated
+production build pass. Seven read-only Chromium fixture flows cover filtering,
+keyboard drawers, all interruption reasons, server-count authority, forbidden
+retry and anonymous redirects at 320/390/768/844/1440px, light and dark. Screenshots
+were inspected; no console errors or horizontal overflow were observed. Existing
+Playwright was used because the browser plugin was unavailable. These are local
+synthetic checks, not production or physical-device verification. Deploy the
+matching backend before these labels and the new Android binary.
 
 `/report-activity` provides a searchable Asset/Lot Listing activity table and a
 paginated timeline for admin and superadmin. Search by user name/email and

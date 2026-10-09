@@ -15,6 +15,7 @@ function evaluatorLabel(candidate: ProposalValuationCandidate) {
 export default function EvaluatorPicker({
   reportId,
   evaluators,
+  ownerUserId,
   disabled,
   saving,
   onAdd,
@@ -22,6 +23,7 @@ export default function EvaluatorPicker({
 }: {
   reportId: string;
   evaluators: ProposalValuationEvaluator[];
+  ownerUserId?: string;
   disabled?: boolean;
   saving?: boolean;
   onAdd: (user: ProposalValuationCandidate) => void;
@@ -44,11 +46,11 @@ export default function EvaluatorPicker({
     [evaluators]
   );
   const selected = useMemo(
-    () => new Set(linked.map((evaluator) => evaluator.user_id)),
-    [linked]
+    () => new Set([...linked.map((evaluator) => evaluator.user_id), ownerUserId]),
+    [linked, ownerUserId]
   );
   const available = options.filter((candidate) => !selected.has(candidate.id));
-  const limitReached = linked.length >= 4;
+  const limitReached = linked.filter((evaluator) => evaluator.user_id !== ownerUserId).length >= 4;
 
   useEffect(() => {
     if (disabled || saving) setOpen(false);
@@ -122,8 +124,11 @@ export default function EvaluatorPicker({
                   {evaluator.email}
                 </span>
               ) : null}
+              {evaluator.user_id === ownerUserId ? (
+                <span className="block text-[10px] font-semibold text-[var(--app-accent)]">Report owner</span>
+              ) : null}
             </span>
-            <button
+            {evaluator.user_id !== ownerUserId ? <button
               type="button"
               onClick={() => onRemove(evaluator.user_id!)}
               disabled={disabled || saving}
@@ -131,7 +136,7 @@ export default function EvaluatorPicker({
               aria-label={`Remove ${evaluator.name}`}
             >
               <Trash2 className="size-3.5" />
-            </button>
+            </button> : null}
           </span>
         ))}
         <div className="relative">
@@ -144,7 +149,7 @@ export default function EvaluatorPicker({
             className="inline-flex h-8 items-center gap-1.5 rounded-md border border-[var(--app-control-border)] bg-[var(--app-panel)] px-2.5 text-xs font-bold text-[var(--app-text)] hover:bg-[var(--app-panel-alt)]"
           >
             {saving ? <RefreshCw className="size-3.5 animate-spin" /> : <Plus className="size-3.5" />}
-            {limitReached ? "4 evaluators added" : "Add evaluator"}
+            {limitReached ? (ownerUserId ? "4 additional evaluators added" : "4 evaluators added") : "Add evaluator"}
           </button>
           {open ? (
             <div className="absolute left-0 top-full z-30 mt-1 w-[min(22rem,calc(100vw-2rem))] rounded-lg border border-[var(--app-border)] bg-[var(--app-panel)] p-2 shadow-[var(--app-shadow-modal)]">
@@ -221,7 +226,7 @@ export default function EvaluatorPicker({
         </div>
       </div>
       <p className="mt-1 text-[10px] text-[var(--app-text-muted)]">
-        Add up to four user accounts. Invited evaluators can edit only their own value column.
+        {ownerUserId ? "The report owner is included automatically. Add up to four additional user accounts." : "Add up to four user accounts."} Invited evaluators can edit only their own value column.
       </p>
     </div>
   );

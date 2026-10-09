@@ -65,6 +65,9 @@ import type {
   ReportPreviewPayload,
 } from "@/app/components/reports/reportPreviewTypes";
 import {
+  additionalEvaluatorIds,
+  canAddEvaluator,
+  canRemoveEvaluator,
   cloneAssetScheduleSheet,
   deriveAssetScheduleSummary,
   formatCurrencyCell,
@@ -321,9 +324,11 @@ function evaluatorOptionLabel(option: AssetAdminScheduleEvaluatorOption) {
 const EvaluatorColumnPill = memo(function EvaluatorColumnPill({
   column,
   onRemove,
+  isOwner = false,
 }: {
   column: AssetAdminScheduleEvaluatorColumn;
   onRemove: () => void;
+  isOwner?: boolean;
 }) {
   return (
     <Box
@@ -361,7 +366,11 @@ const EvaluatorColumnPill = memo(function EvaluatorColumnPill({
           </Typography>
         )}
       </Box>
-      {column.user_id ? (
+      {isOwner ? (
+        <Typography title="Report owner is included automatically" sx={{ mx: 1, color: "text.secondary", fontSize: 10, fontWeight: 700 }}>
+          Report owner
+        </Typography>
+      ) : column.user_id ? (
         <Tooltip title="Remove evaluator" arrow>
           <IconButton
             aria-label={`Remove ${column.name || "evaluator"}`}
@@ -1092,11 +1101,7 @@ export default function AssetScheduleSheet({
 
   const addEvaluator = useCallback((option: AssetAdminScheduleEvaluatorOption) => {
     updateSheet((draft) => {
-      const linkedColumns = draft.evaluator_columns.filter((column) => Boolean(column.user_id));
-      if (
-        linkedColumns.length >= 4 ||
-        linkedColumns.some((column) => column.user_id === option.id)
-      ) {
+      if (!canAddEvaluator(draft, option.id, preview.ownerColumnId)) {
         return draft;
       }
       const nextColumn: AssetAdminScheduleEvaluatorColumn = {
@@ -1115,12 +1120,12 @@ export default function AssetScheduleSheet({
         })),
       };
     });
-  }, [updateSheet]);
+  }, [preview.ownerColumnId, updateSheet]);
 
   const removeEvaluator = useCallback((columnId: string) => {
     updateSheet((draft) => {
       const targetColumn = draft.evaluator_columns.find((column) => column.id === columnId);
-      if (!targetColumn?.user_id) return draft;
+      if (!targetColumn || !canRemoveEvaluator(targetColumn, preview.ownerColumnId)) return draft;
       return {
         ...draft,
         evaluator_columns: draft.evaluator_columns.filter((column) => column.id !== columnId),
@@ -1131,7 +1136,7 @@ export default function AssetScheduleSheet({
         }),
       };
     });
-  }, [updateSheet]);
+  }, [preview.ownerColumnId, updateSheet]);
 
   const updateRowField = useCallback(<T extends keyof AssetAdminScheduleRow>(
     lotId: string,
@@ -1165,7 +1170,7 @@ export default function AssetScheduleSheet({
     () => evaluatorOptions.filter((option) => !linkedEvaluatorIds.has(option.id)),
     [evaluatorOptions, linkedEvaluatorIds]
   );
-  const linkedEvaluatorLimitReached = linkedEvaluatorIds.size >= 4;
+  const linkedEvaluatorLimitReached = sheet ? additionalEvaluatorIds(sheet, preview.ownerColumnId).size >= 4 : false;
 
   async function handleSave() {
     const current = sheetRef.current;
@@ -1922,6 +1927,7 @@ export default function AssetScheduleSheet({
                   >
                     <EvaluatorColumnPill
                       column={column}
+                      isOwner={column.id === preview.ownerColumnId}
                       onRemove={() => removeEvaluator(column.id)}
                     />
                   </Box>
@@ -2375,6 +2381,7 @@ export default function AssetScheduleSheet({
                       <EvaluatorColumnPill
                         key={column.id}
                         column={column}
+                        isOwner={column.id === preview.ownerColumnId}
                         onRemove={() => removeEvaluator(column.id)}
                       />
                     ))}
@@ -2388,7 +2395,7 @@ export default function AssetScheduleSheet({
                     />
                     {linkedEvaluatorLimitReached ? (
                       <Typography sx={{ color: "text.secondary", fontSize: 11.5 }}>
-                        Maximum of four linked evaluator users reached.
+                        Maximum of four additional evaluator users reached.
                       </Typography>
                     ) : null}
                     {evaluatorOptionsError ? (

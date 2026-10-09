@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { readFileSync } from 'node:fs';
-import { ACTIVITY_LABELS, activityEventLabel, activityOutcomeLabel, activityQuery, activityReceiptNote, activityRemoval, activityIdValid, backupReasonLabel, isBackupActivity, logoLabel, parseActivityPage, parseActivityDetail, parseActivityLotPage } from '../lib/reportActivity.ts';
+import { ACTIVITY_LABELS, activityEventLabel, activityOutcomeLabel, activityQuery, activityReceiptNote, activityRemoval, activityIdValid, backupReasonLabel, isBackupActivity, isUploadTransferActivity, uploadReasonLabel, logoLabel, parseActivityPage, parseActivityDetail, parseActivityLotPage } from '../lib/reportActivity.ts';
 test('offline review opens have a distinct searchable label, never a submission label', () => {
  assert.equal(ACTIVITY_LABELS.draft_opened, 'Draft opened for review');
  assert.equal(new URLSearchParams(activityQuery(new URLSearchParams('action=draft_opened'))).get('action'), 'draft_opened');
@@ -68,7 +68,7 @@ test('completed backup requires server verification of every file and photo', ()
 });
 test('delayed device receipt explains timing without identifying a cause or treating clocks as authoritative', () => {
  const event=backupEvent();
- assert.match(activityReceiptNote(event),/does not identify why a backup stopped/);
+ assert.match(activityReceiptNote(event),/does not identify why an upload or backup stopped/);
  assert.match(activityReceiptNote(event),/device clock may also differ/);
  assert.equal(activityReceiptNote({...event,authority:'server'}),null);
  assert.equal(activityReceiptNote({...event,observedAt:null}),null);
@@ -117,4 +117,46 @@ test('admin BFF preserves auth boundary and guarded removal',()=>{
  const route=readFileSync(new URL('../app/api/admin/report-activity/[id]/route.ts',import.meta.url),'utf8');
  assert.match(route,/proxyJsonWithAdminAuth/);assert.match(route,/readPreviewMutationJson\(request, 1024\)/);assert.match(route,/activityRemoval/);
  const legacy=readFileSync(new URL('../app/offline-captures/page.tsx',import.meta.url),'utf8');assert.match(legacy,/report-activity\?tab=captures/);
+});
+
+const transferEvent = (changes = {}) => ({
+ id,action:'upload_interrupted',outcome:'completed',source:'android',authority:'device',actor:null,actorRole:'user',
+ observedAt:'2026-10-08T08:00:00Z',receivedAt:'2026-10-08T09:00:00Z',sequence:4,appVersion:'1.0.4 (build 29)',
+ data:{beforeCounts:null,afterCounts:null,uploadSessionId:'b'.repeat(24),uploadReason:'unknown',uploadCountAuthority:'server_verified',uploadCounts:{totalFiles:974,verifiedFiles:843}},...changes,
+});
+test('background transfer observations have distinct searchable labels, not completed reports',()=>{
+ for(const action of ['upload_queued','upload_paused','upload_resumed','upload_interrupted','upload_failed']) {
+  assert.equal(isUploadTransferActivity(action),true);
+  assert.equal(new URLSearchParams(activityQuery(new URLSearchParams({action}))).get('action'),action);
+  assert.equal(activityOutcomeLabel(action,'completed'),'Recorded');
+  assert.doesNotMatch(ACTIVITY_LABELS[action],/report accepted|deleted|report ready/i);
+ }
+ assert.equal(isUploadTransferActivity('upload_accepted'),false);
+ assert.equal(activityOutcomeLabel('upload_accepted','completed'),'completed');
+ assert.equal(activityOutcomeLabel('upload_failed','failed'),'failed');
+});
+test('only explicit pause evidence attributes a background upload stop to the user',()=>{
+ const event=transferEvent();
+ assert.equal(activityEventLabel(event),'Upload interrupted');
+ assert.equal(activityEventLabel({...event,action:'upload_paused'}),'Upload paused');
+ assert.equal(activityEventLabel({...event,action:'upload_paused',data:{...event.data,uploadReason:'user_pause'}}),'Upload paused by user');
+ assert.equal(uploadReasonLabel('unknown'),'Cause not recorded');
+ assert.equal(uploadReasonLabel('system_stop'),'Android stopped or deferred the transfer');
+ assert.equal(uploadReasonLabel('network_unavailable'),'Network unavailable');
+ assert.equal(uploadReasonLabel('authentication_required'),'Sign-in required');
+ assert.throws(()=>parseActivityPage(eventPage({...event,data:{...event.data,uploadReason:'user_pause'}})));
+ assert.match(activityReceiptNote(event),/delay does not identify why/);
+});
+test('transfer verification counts stay separate from captures and reject invalid receipts',()=>{
+ const event=transferEvent();
+ const parsed=parseActivityPage(eventPage(event)).items[0];
+ assert.equal(parsed.data.afterCounts,null);
+ assert.equal(parsed.data.uploadCounts.verifiedFiles,843);
+ for(const uploadCounts of [{totalFiles:974,verifiedFiles:975},{totalFiles:974,verifiedFiles:-1},{totalFiles:974,verifiedFiles:'843'},{totalFiles:-1,verifiedFiles:0}]) {
+  assert.throws(()=>parseActivityPage(eventPage({...event,data:{...event.data,uploadCounts}})));
+ }
+ for(const extra of [{uploadReason:'user_deleted'},{uploadSessionId:'../reports'},{uploadCountAuthority:'device_reported'}]) {
+  assert.throws(()=>parseActivityPage(eventPage({...event,data:{...event.data,...extra}})));
+ }
+ assert.equal(parseActivityPage(eventPage({...event,data:{...event.data,uploadCounts:null,uploadCountAuthority:undefined}})).items[0].data.uploadCounts,null);
 });

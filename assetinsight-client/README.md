@@ -22,6 +22,33 @@ This project uses [`next/font`](https://nextjs.org/docs/app/building-your-applic
 
 ## Learn More
 
+### Proposal Valuation report owner (2026-10-09, local)
+
+The server-provided report owner now has a fixed **Report owner** participant
+chip and valuation column. The web client matches the owner's participant ID to
+the supplied column's `user_id`; it never invents a column ID or relabels a
+legacy evaluator as the owner. The owner cannot be removed or selected again,
+does not consume any of the four additional evaluator slots, and is omitted
+from add/remove assignment payloads. Existing legacy columns and saved values
+remain intact. Owner/evaluator editing and file-generation permissions still
+come from the existing server permission fields.
+
+Deploy the supporting backend owner-column behavior before this client update.
+Focused rendered tests cover the fourth additional assignment, owner exclusion
+from removal payloads/options, preserved owner values/legacy columns, and an
+invited evaluator's unchanged column restrictions. No customer data migration,
+automatic report generation, production access, push or deployment is performed.
+
+Local verification: all 1,264 tests across 114 files, typecheck, lint and the
+production build pass. Isolated production Chromium checks at 1366px/light and
+320px/dark cover the owner chip, fourth additional evaluator, removal payloads
+and reopening with unchanged owner/legacy amounts. No runtime console errors,
+framework overlays or viewport overflow were observed in those flows. Browser
+plugin was unavailable; the installed Playwright was used with synthetic API
+fixtures and non-loopback requests blocked. Native apps and live accounts were
+not exercised. Team Reports is not part of this owner-column implementation:
+its management relationship still requires clarification.
+
 ### Appraiser CRM
 
 Explicitly enabled CRM agents enter through `/workspaces` to choose **Listings**

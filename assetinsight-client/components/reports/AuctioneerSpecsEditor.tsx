@@ -2,6 +2,7 @@
 
 import React from "react";
 import { createPortal } from "react-dom";
+import { previewSpecFieldKey } from "@/lib/previewSpecEdits";
 
 export interface AssetCategorySpec {
   parentCategory: string;
@@ -42,23 +43,23 @@ const isUsefulValue = (value: unknown) => {
 const normalizeVisiblePresenceValue = (value: unknown) => {
   const text = String(value ?? "").trim();
   if (!text) return "";
-  if (/\b(?:not|no)\s+visible\b|\bvisible\s*[:=-]?\s*(?:no|false)\b/i.test(text)) {
+  if (/^(?:(?:not|no)\s+visible|visible\s*[:=-]?\s*(?:no|false))$/i.test(text)) {
     return "No";
   }
-  if (/\bvisible\b/i.test(text)) {
+  if (/^visible(?:\s*[:=-]?\s*(?:yes|true))?$/i.test(text)) {
     return "Yes";
   }
   return "";
 };
 
-const getSpecRecord = (value: unknown): Record<string, string> => {
+const getSpecRecord = (value: unknown, reviewed = false): Record<string, string> => {
   const out: Record<string, string> = {};
   if (Array.isArray(value)) {
     value.forEach((entry: any) => {
       const field = String(entry?.field ?? "").trim();
       const rawText = String(entry?.value ?? "");
       const text = rawText.trim();
-      if (field && (entry?.value === "" || (typeof entry?.value === "string" && !text) || isUsefulValue(rawText))) {
+      if (field && (reviewed || entry?.value === "" || (typeof entry?.value === "string" && !text) || isUsefulValue(rawText))) {
         out[field] = rawText;
       }
     });
@@ -68,7 +69,7 @@ const getSpecRecord = (value: unknown): Record<string, string> => {
     Object.entries(value as Record<string, unknown>).forEach(([field, raw]) => {
       const rawText = String(raw ?? "");
       const text = rawText.trim();
-      if (field && (raw === "" || (typeof raw === "string" && !text) || isUsefulValue(rawText))) {
+      if (field && (reviewed || raw === "" || (typeof raw === "string" && !text) || isUsefulValue(rawText))) {
         out[field] = rawText;
       }
     });
@@ -76,20 +77,10 @@ const getSpecRecord = (value: unknown): Record<string, string> => {
   return out;
 };
 
-const fieldAliases = (fieldName: string) => {
-  const aliases = [fieldName];
-  if (/^serial\s*number$/i.test(fieldName)) aliases.push("VIN", "SN", "S/N", "Serial No");
-  if (/^vin$/i.test(fieldName)) aliases.push("Serial Number", "SN", "S/N");
-  if (/^has\s*key$/i.test(fieldName)) aliases.push("Has Keys", "Keys", "Key");
-  if (/^running\s*condition$/i.test(fieldName)) aliases.push("Condition", "Working Condition");
-  if (/^ownership\s*type$/i.test(fieldName)) aliases.push("Legal", "Title Status");
-  return aliases.map(normalizeKey);
-};
-
-const getValueForField = (record: Record<string, string>, fieldName: string) => {
+const getValueForField = (record: Record<string, string>, fieldName: string, categoryFields: string[]) => {
   if (record[fieldName] !== undefined) return record[fieldName];
-  const aliases = fieldAliases(fieldName);
-  const matchingKey = Object.keys(record).find((key) => aliases.includes(normalizeKey(key)));
+  const key = previewSpecFieldKey(fieldName, categoryFields);
+  const matchingKey = Object.keys(record).find((field) => previewSpecFieldKey(field, categoryFields) === key);
   return matchingKey ? record[matchingKey] : "";
 };
 
@@ -155,30 +146,32 @@ export default function AuctioneerSpecsEditor({
   } | null>(null);
   const categoryKey = normalizeKey(lot?.categories);
   const categorySpec = specsByCategory.get(categoryKey);
-  const specRecord = getSpecRecord(lot?.condition_report_specs);
+  const reviewed = lot?.condition_report_specs_reviewed === true;
+  const specRecord = getSpecRecord(lot?.condition_report_specs, reviewed);
   const fields = categorySpec?.fields?.filter((field) => !isDamageField(field)) || [];
   const orderedFields = [...priorityFields, ...fields].filter((field, index, allFields) => {
-    const key = normalizeKey(field);
-    return key && allFields.findIndex((candidate) => normalizeKey(candidate) === key) === index;
+    const key = previewSpecFieldKey(field, fields);
+    return key && allFields.findIndex((candidate) => previewSpecFieldKey(candidate, fields) === key) === index;
   });
   const deletedSpecKeys = new Set(
     (Array.isArray(lot?.condition_report_specs_deleted)
       ? lot.condition_report_specs_deleted
       : []
     )
-      .map((field: unknown) => normalizeKey(field))
+      .map((field: unknown) => previewSpecFieldKey(field, fields))
       .filter(Boolean)
   );
   const extraFields = Object.keys(specRecord).filter((field) => {
     if (isDamageField(field)) return false;
-    const key = normalizeKey(field);
+    const key = previewSpecFieldKey(field, fields);
     return (
       !deletedSpecKeys.has(key) &&
-      !orderedFields.some((knownField) => fieldAliases(knownField).includes(key))
+      !orderedFields.some((knownField) => previewSpecFieldKey(knownField, fields) === key)
     );
   });
   const visibleFields = [
-    ...orderedFields.filter((field) => !deletedSpecKeys.has(normalizeKey(field))),
+    ...orderedFields.filter((field) => !deletedSpecKeys.has(previewSpecFieldKey(field, fields)) &&
+      (!reviewed || Object.keys(specRecord).some(key => previewSpecFieldKey(key, fields) === previewSpecFieldKey(field, fields)))),
     ...extraFields,
   ];
   const accentClasses =
@@ -206,7 +199,7 @@ export default function AuctioneerSpecsEditor({
   const openExpandedEditor = (fieldName: string) => {
     setExpandedEditor({
       fieldName,
-      value: cleanDisplayValueForField(fieldName, getValueForField(specRecord, fieldName)),
+      value: cleanDisplayValueForField(fieldName, getValueForField(specRecord, fieldName, fields)),
     });
   };
 
@@ -278,7 +271,7 @@ export default function AuctioneerSpecsEditor({
       if (existingField) {
         setExpandedEditor({
           fieldName: existingField,
-          value: getValueForField(specRecord, existingField),
+          value: getValueForField(specRecord, existingField, fields),
           error: "This field already exists. Edit the existing value.",
         });
         return;
@@ -533,7 +526,7 @@ export default function AuctioneerSpecsEditor({
                     title="Click to open large editor"
                   >
                     <span className="block truncate">
-                      {cleanDisplayValueForField(fieldName, getValueForField(specRecord, fieldName)) || "\u00a0"}
+                      {cleanDisplayValueForField(fieldName, getValueForField(specRecord, fieldName, fields)) || "\u00a0"}
                     </span>
                   </button>
                 </div>

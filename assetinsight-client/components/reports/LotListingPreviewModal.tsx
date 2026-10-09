@@ -32,8 +32,8 @@ import {
 } from "@/lib/previewPhotoDeletion";
 import {
   applyPrimarySerialEdit,
-  isPrimarySerialField,
 } from "@/lib/previewSerialNumber";
+import { applyPreviewSpecEdit } from "@/lib/previewSpecEdits";
 import { getPreviewLotPhotoEntries } from "@/lib/previewLotPhotos";
 import { ReportDraftService } from "@/services/reportDrafts";
 import { useExclusivePreviewMutation } from "@/components/reports/useExclusivePreviewMutation";
@@ -352,123 +352,19 @@ export default function LotListingPreviewModal({
     setHasChanges(true);
   };
 
-  const updateLotSpec = (index: number, fieldName: string, value: string) => {
+  const changeLotSpec = (index: number, fieldName: string, value: string, options: { deleted?: boolean; added?: boolean } = {}) => {
     setPreviewData((prev: any) => {
       const newLots = [...(prev?.lots || [])];
-      const lot = { ...(newLots[index] || {}) };
-      const existingSpecs =
-        lot.condition_report_specs && typeof lot.condition_report_specs === "object" && !Array.isArray(lot.condition_report_specs)
-          ? { ...lot.condition_report_specs }
-          : Array.isArray(lot.condition_report_specs)
-            ? Object.fromEntries(
-                lot.condition_report_specs
-                  .map((entry: any) => [String(entry?.field || "").trim(), String(entry?.value || "").trim()])
-                  .filter((entry: string[]) => entry[0])
-              )
-            : {};
-      const deletedSpecs = Array.isArray(lot.condition_report_specs_deleted)
-        ? lot.condition_report_specs_deleted
-            .map((field: any) => String(field || "").trim())
-            .filter(Boolean)
-        : [];
-      const fieldKey = normalizeSpecKey(fieldName);
-      if (isPrimarySerialField(fieldName)) {
-        newLots[index] = applyPrimarySerialEdit(lot, value);
-        return { ...prev, lots: newLots, total_value: calculateTotalValue(newLots) };
-      }
-      existingSpecs[fieldName] = value;
-      lot.condition_report_specs_deleted = deletedSpecs.filter(
-        (field: string) => normalizeSpecKey(field) !== fieldKey
-      );
-      lot.condition_report_specs = existingSpecs;
-      newLots[index] = lot;
-      return { ...prev, lots: newLots, total_value: calculateTotalValue(newLots) };
+      const lot = newLots[index] || {};
+      const categoryFields = categorySpecs.find(spec => normalizeSpecKey(spec.childCategory) === normalizeSpecKey(lot.categories))?.fields || [];
+      newLots[index] = applyPreviewSpecEdit(lot, fieldName, value, categoryFields, options);
+      return { ...prev, lots: newLots, ...(options.added ? { total_value: calculateTotalValue(newLots) } : {}) };
     });
     setHasChanges(true);
   };
-
-  const deleteLotSpec = (index: number, fieldName: string) => {
-    setPreviewData((prev: any) => {
-      const newLots = [...(prev?.lots || [])];
-      const lot = { ...(newLots[index] || {}) };
-      const existingSpecs =
-        lot.condition_report_specs && typeof lot.condition_report_specs === "object" && !Array.isArray(lot.condition_report_specs)
-          ? { ...lot.condition_report_specs }
-          : Array.isArray(lot.condition_report_specs)
-            ? Object.fromEntries(
-                lot.condition_report_specs
-                  .map((entry: any) => [String(entry?.field || "").trim(), String(entry?.value || "").trim()])
-                  .filter((entry: string[]) => entry[0])
-              )
-            : {};
-      const deletedSpecs = Array.isArray(lot.condition_report_specs_deleted)
-        ? lot.condition_report_specs_deleted
-            .map((field: any) => String(field || "").trim())
-            .filter(Boolean)
-        : [];
-      const fieldKey = normalizeSpecKey(fieldName);
-      if (isPrimarySerialField(fieldName)) {
-        newLots[index] = applyPrimarySerialEdit(lot, "");
-        return { ...prev, lots: newLots, total_value: calculateTotalValue(newLots) };
-      }
-      const existingKey = Object.keys(existingSpecs).find(
-        (field) => normalizeSpecKey(field) === fieldKey
-      );
-      if (existingKey) delete existingSpecs[existingKey];
-      if (!deletedSpecs.some((field: string) => normalizeSpecKey(field) === fieldKey)) {
-        deletedSpecs.push(fieldName);
-      }
-      lot.condition_report_specs = existingSpecs;
-      lot.condition_report_specs_deleted = deletedSpecs;
-      newLots[index] = lot;
-      return { ...prev, lots: newLots, total_value: calculateTotalValue(newLots) };
-    });
-    setHasChanges(true);
-  };
-
-  const addLotSpec = (index: number, fieldName: string, value: string) => {
-    setPreviewData((prev: any) => {
-      const newLots = [...(prev?.lots || [])];
-      const lot = { ...(newLots[index] || {}) };
-      const existingSpecs =
-        lot.condition_report_specs && typeof lot.condition_report_specs === "object" && !Array.isArray(lot.condition_report_specs)
-          ? { ...lot.condition_report_specs }
-          : Array.isArray(lot.condition_report_specs)
-            ? Object.fromEntries(
-                lot.condition_report_specs
-                  .map((entry: any) => [String(entry?.field || "").trim(), String(entry?.value || "").trim()])
-                  .filter((entry: string[]) => entry[0])
-              )
-            : {};
-      const field = String(fieldName || "").trim();
-      const fieldKey = normalizeSpecKey(field);
-      const existingKey = Object.keys(existingSpecs).find(
-        (candidate) => normalizeSpecKey(candidate) === fieldKey
-      );
-      existingSpecs[existingKey || field] = value;
-      const deletedSpecs = Array.isArray(lot.condition_report_specs_deleted)
-        ? lot.condition_report_specs_deleted
-            .map((item: any) => String(item || "").trim())
-            .filter(Boolean)
-        : [];
-      const customOrder = Array.isArray(lot.condition_report_specs_custom_order)
-        ? lot.condition_report_specs_custom_order
-            .map((item: any) => String(item || "").trim())
-            .filter(Boolean)
-        : [];
-      if (!customOrder.some((item: string) => normalizeSpecKey(item) === fieldKey)) {
-        customOrder.push(existingKey || field);
-      }
-      lot.condition_report_specs = existingSpecs;
-      lot.condition_report_specs_deleted = deletedSpecs.filter(
-        (item: string) => normalizeSpecKey(item) !== fieldKey
-      );
-      lot.condition_report_specs_custom_order = customOrder;
-      newLots[index] = lot;
-      return { ...prev, lots: newLots, total_value: calculateTotalValue(newLots) };
-    });
-    setHasChanges(true);
-  };
+  const updateLotSpec = (index: number, fieldName: string, value: string) => changeLotSpec(index, fieldName, value);
+  const deleteLotSpec = (index: number, fieldName: string) => changeLotSpec(index, fieldName, '', { deleted: true });
+  const addLotSpec = (index: number, fieldName: string, value: string) => changeLotSpec(index, fieldName, value, { added: true });
 
   const deleteLotImage = (
     lotIndex: number,

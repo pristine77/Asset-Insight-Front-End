@@ -1,5 +1,40 @@
 # Preview queue reliability — 2026-10-03
 
+## Reviewed specification authority — 2026-10-08 (local)
+
+Asset/Lot spec edits, explicit blanks and deletions now replace earlier CR/Excel
+manual overrides and matching legacy deletion markers, not only the visible
+`condition_report_specs` map. A deletion retains a blank override and tombstone;
+deleting the last field sends an explicit `{}`. Re-entering that field clears
+its old suppression without altering unrelated specs, lot identity, media or
+cover choices. The combined Save & Generate/Regenerate still sends one snapshot.
+
+The backend marks explicitly supplied canonical spec maps/arrays as
+`condition_report_specs_reviewed: true`. Clients retain this marker and display
+only canonical reviewed fields, including blank values. Empty reviewed tables
+remain empty after reopen/category changes, with Add field available; legacy
+unreviewed previews retain category placeholders. Overall Length/Width/Height
+and their bare-axis aliases match only when the category registry defines one
+unambiguous form; distinct registry, Internal/Cargo/Bed/Working dimensions stay
+separate. The editor no longer turns narratives containing “visible” into Yes/No;
+only standalone presence labels receive that display normalization.
+
+Focused verification: 59 web tests across five files and 40 native tests across
+three suites, both typechecks, clean scoped web lint, native scoped lint with
+zero errors / nine existing warnings. The final web full suite passes 1,260 tests
+across 114 files; typecheck, lint and production build pass. Eight isolated
+production-browser flows cover Asset/Lot first generation and regeneration at
+1366px/light and 320px/dark, with keyboard submit, reopen and a second generation.
+The intercepted loopback API uses the actual built backend spec normalization;
+payloads preserve edits/blanks/deletions and issue one POST, no preceding PUT.
+Four real XLSX workbooks were reopened and the corresponding five-page CR PDF
+was rendered and visually checked, including an empty reviewed-table fixture.
+No provider or customer data was used. Source verification retained browser
+logs, artifact readback results, screenshots and PDF page renders locally.
+Backend API/workers must precede web and the new native binary.
+No historical data repair, automatic regeneration, provider calls, deployment
+or customer mutation was performed for these client changes.
+
 ## Combined preview save and generation — 2026-10-05 (local)
 
 Asset and Lot Listing editors have one primary action: **Save & Generate** for

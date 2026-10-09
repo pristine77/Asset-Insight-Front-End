@@ -132,6 +132,23 @@ function makePayload(): ProposalValuationPayload {
   };
 }
 
+function makeOwnerPayload(additionalCount = 3): ProposalValuationPayload {
+  const payload = makePayload();
+  payload.assetScheduleSheet.evaluator_columns = [
+    { id: "retained-owner-column", name: "Report Creator", user_id: "report-owner", email: "owner@example.test" },
+    ...payload.assetScheduleSheet.evaluator_columns.map((column, index) => ({
+      ...column, ...(index < additionalCount ? { user_id: `evaluator-${index + 1}` } : {}),
+    })),
+  ];
+  payload.assetScheduleSheet.rows[0].evaluator_values["retained-owner-column"] = 39000;
+  payload.participants = [
+    { id: "report-owner", email: "owner@example.test", isOwner: true, columnId: "retained-owner-column" },
+    ...payload.assetScheduleSheet.evaluator_columns.filter(column => column.user_id && column.user_id !== "report-owner")
+      .map(column => ({ id: column.user_id!, email: `${column.user_id}@example.test`, isOwner: false, columnId: column.id })),
+  ];
+  return payload;
+}
+
 describe("ProposalValuationDialog", () => {
   beforeEach(() => {
     const payload = makePayload();
@@ -427,6 +444,62 @@ describe("ProposalValuationDialog", () => {
         { baseRevision: 7, clientMutationId: "mutation-1" }
       )
     );
+  });
+
+  it("keeps the report owner fixed while adding the fourth additional evaluator and retaining legacy columns", async () => {
+    const payload = makeOwnerPayload();
+    mocks.get.mockResolvedValue(payload);
+    mocks.updateEvaluators.mockResolvedValue({ ...payload, revision: 8 });
+    mocks.evaluatorOptions.mockResolvedValue([
+      { id: "report-owner", username: "Report Creator", email: "owner@example.test" },
+      { id: "evaluator-4", username: "Fourth Evaluator", email: "fourth@example.test" },
+    ]);
+    render(<ProposalValuationDialog open pageMode reportId="report-1" />);
+    expect(await screen.findByText("Report owner")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Remove Report Creator" })).not.toBeInTheDocument();
+    expect(screen.getByRole("columnheader", { name: "Femi" })).toBeInTheDocument();
+    expect(screen.getByText("legacy")).toBeInTheDocument();
+    expect(screen.getAllByLabelText("Report Creator valuation for 13").every(field => !field.hasAttribute("disabled"))).toBe(true);
+    fireEvent.click(screen.getByRole("button", { name: "Add evaluator" }));
+    expect(await screen.findByRole("option", { name: /Fourth Evaluator/ })).toBeInTheDocument();
+    expect(screen.queryByRole("option", { name: /Report Creator/ })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("option", { name: /Fourth Evaluator/ }));
+    await waitFor(() => expect(mocks.updateEvaluators).toHaveBeenCalledWith("report-1",
+      ["evaluator-1", "evaluator-2", "evaluator-3", "evaluator-4"],
+      { baseRevision: 7, clientMutationId: "mutation-1" }));
+    expect(screen.getByRole("columnheader", { name: "Report Creator" })).toBeInTheDocument();
+    expect(screen.getAllByLabelText("Report Creator valuation for 13")[0]).toHaveValue(39000);
+  });
+
+  it("removes only an additional evaluator and never sends the intrinsic owner as an assignment", async () => {
+    const payload = makeOwnerPayload();
+    mocks.get.mockResolvedValue(payload);
+    mocks.updateEvaluators.mockResolvedValue({ ...payload, revision: 8 });
+    render(<ProposalValuationDialog open pageMode reportId="report-1" />);
+    fireEvent.click(await screen.findByRole("button", { name: "Remove Jay" }));
+    await waitFor(() => expect(mocks.updateEvaluators).toHaveBeenCalledWith("report-1",
+      ["evaluator-1", "evaluator-3"], { baseRevision: 7, clientMutationId: "mutation-1" }));
+    expect(screen.queryByRole("button", { name: "Remove Report Creator" })).not.toBeInTheDocument();
+  });
+
+  it("limits four additional accounts independently from the fixed owner", async () => {
+    mocks.get.mockResolvedValue(makeOwnerPayload(4));
+    render(<ProposalValuationDialog open pageMode reportId="report-1" />);
+    expect(await screen.findByRole("button", { name: "4 additional evaluators added" })).toBeDisabled();
+    expect(screen.getAllByRole("button", { name: /^Remove (Riley|Jay|Chad|Femi)$/ })).toHaveLength(4);
+    expect(screen.queryByRole("button", { name: "Remove Report Creator" })).not.toBeInTheDocument();
+  });
+
+  it("does not grant an invited evaluator access to the report owner's value column", async () => {
+    const payload = makeOwnerPayload();
+    payload.permissions = { canManageEvaluators: false, canEditAll: false, evaluatorColumnId: "jay", canRegenerateFiles: false };
+    mocks.get.mockResolvedValue(payload);
+    render(<ProposalValuationDialog open pageMode reportId="report-1" />);
+    await screen.findByText("Report owner");
+    expect(screen.getAllByLabelText("Report Creator valuation for 13").every(field => field.hasAttribute("disabled"))).toBe(true);
+    expect(screen.getAllByLabelText("Jay valuation for 13").every(field => !field.hasAttribute("disabled"))).toBe(true);
+    expect(screen.getByRole("button", { name: "Add evaluator" })).toBeDisabled();
+    expect(screen.queryByRole("button", { name: "Update report files" })).not.toBeInTheDocument();
   });
 
   it("keeps evaluator assignment disabled while a draft retry is unresolved", async () => {

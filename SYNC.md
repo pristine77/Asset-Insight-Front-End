@@ -1,5 +1,55 @@
 # Sanitized application synchronization
 
+## 9 October 2026 follow-up
+
+Content-only update retaining Pristine77 history through `9d4bc4b`, including
+both newer web background-upload commits without replacing their files.
+
+| Application | Source revision |
+| --- | --- |
+| Admin | `fb51fcd` |
+| Web | `222cb0b` |
+| Native | `dc73c68` |
+
+Adds explicit durable Android Asset/Lot submission, queued Incoming Create Lot
+& Continue, interruption/acceptance activity, reviewed CR specification
+preservation across regeneration, and the automatic Proposal Valuation owner
+evaluator in web/admin. Existing owner values and four additional evaluator
+slots remain intact. Team Reports is not implemented; its management assignment
+is still to be clarified. Nothing grants broader access by inference.
+
+Preserves Pristine's Bank/logo policy, native CameraX/September controls,
+fixed-lot locks, asynchronous journal snapshots, 3000px photo policy and
+720p/30fps video. Capture backup remains disabled. The separate Mobile-APK
+repository receives the same application changes; its standalone README remains
+repository-specific. Report layouts and source media are not rewritten.
+
+OpenAI/provider usage accounting, credit/cost calculations, multipliers and
+Salvage provider-cost tracking remain excluded. Only application content is
+exported: no source Git history, environment secrets, signing credentials,
+generated binaries or private operational records are included.
+
+Merged checks pass: 1,304 web tests across 117 files, 102 admin policy tests,
+five root boundary tests, lint/typechecks and production builds. Both native
+copies pass 1,430 tests across 115 suites and TypeScript; Android/iOS Hermes
+exports and Android transfer/camera/app main/instrumentation Kotlin compile
+pass. Two native 100-lot cases timed out during concurrent compilation, then
+passed unchanged in focused and both full runs; no test timeout was relaxed.
+
+Twelve isolated production Chromium flows at 1366px/light and 320px/dark cover
+owner locking and additional evaluator assignments, plus Asset/Lot first and
+repeat generation with reviewed fields/blanks/deletions preserved after reopen.
+Actual exported backend normalization was used for preview fixtures. Page,
+content, console, overlay, screenshot and interaction checks pass. Browser
+plugin unavailable; installed Playwright reused. The temporary build dependency
+symlink was replaced with a local dependency copy for Turbopack; no app config
+was changed to make builds pass.
+
+Deploy the matching backend before web/admin and a new native binary. This push
+does not deploy, sign/release an APK, submit to Play, regenerate historical
+reports, or modify customer data. Physical-device, real storage/mail/provider
+behavior and large-original concurrency remain normal release-validation gates.
+
 ## 7 October 2026 follow-up
 
 Content-only update on Pristine77 `ed75dbb`:

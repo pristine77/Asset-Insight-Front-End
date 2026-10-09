@@ -360,6 +360,22 @@ export function recalculateAssetScheduleSheet(sheet: AssetAdminScheduleSheet): A
   };
 }
 
+export function additionalEvaluatorIds(sheet: AssetAdminScheduleSheet, ownerColumnId?: string | null): Set<string> {
+  const ownerId = sheet.evaluator_columns.find(column => column.id === ownerColumnId)?.user_id;
+  return new Set(sheet.evaluator_columns
+    .filter(column => column.id !== ownerColumnId && column.user_id && column.user_id !== ownerId)
+    .map(column => column.user_id!));
+}
+
+export function canRemoveEvaluator(column: AssetAdminScheduleEvaluatorColumn, ownerColumnId?: string | null): boolean {
+  return Boolean(column.user_id) && column.id !== ownerColumnId;
+}
+
+export function canAddEvaluator(sheet: AssetAdminScheduleSheet, userId: string, ownerColumnId?: string | null): boolean {
+  return Boolean(userId) && !sheet.evaluator_columns.some(column => column.user_id === userId)
+    && additionalEvaluatorIds(sheet, ownerColumnId).size < 4;
+}
+
 export function formatCurrencyCell(value: number | null | undefined) {
   if (value === null || value === undefined || !Number.isFinite(value)) return "";
   return new Intl.NumberFormat("en-US", {

@@ -682,6 +682,7 @@ export default function ProposalValuationDialog({
   const deferredQuery = useDeferredValue(query.trim().toLowerCase());
   const currency = payload?.currencyCode || "CAD";
   const permissions = payload?.permissions || LEGACY_OWNER_PERMISSIONS;
+  const ownerUserId = payload?.participants?.find((participant) => participant.isOwner === true)?.id;
   const workspaceCanEditAll =
     permissions.canEditAll && !terminalMessage && !assigning && !saving;
   const workspaceEvaluatorColumnId = terminalMessage || assigning || saving
@@ -1327,7 +1328,7 @@ export default function ProposalValuationDialog({
             const baseRevision = revisionRef.current;
             const response = await ProposalValuationService.updateEvaluators(
               reportId,
-              evaluatorUserIds,
+              evaluatorUserIds.filter((id) => id !== ownerUserId),
               {
                 baseRevision,
                 clientMutationId:
@@ -1384,6 +1385,7 @@ export default function ProposalValuationDialog({
       assigning,
       dirty,
       permissions.canManageEvaluators,
+      ownerUserId,
       reportId,
       resyncWithPending,
       stopForTerminalError,
@@ -1392,26 +1394,26 @@ export default function ProposalValuationDialog({
 
   const addLinkedEvaluator = useCallback(
     (candidate: ProposalValuationCandidate) => {
-      if (!sheet) return;
+      if (!sheet || candidate.id === ownerUserId) return;
       const ids = sheet.evaluator_columns
         .map((column) => column.user_id)
-        .filter((id): id is string => Boolean(id));
+        .filter((id): id is string => Boolean(id) && id !== ownerUserId);
       if (!ids.includes(candidate.id) && ids.length < 4) {
         void updateLinkedEvaluators([...ids, candidate.id]);
       }
     },
-    [sheet, updateLinkedEvaluators]
+    [sheet, ownerUserId, updateLinkedEvaluators]
   );
 
   const removeLinkedEvaluator = useCallback(
     (userId: string) => {
-      if (!sheet) return;
+      if (!sheet || userId === ownerUserId) return;
       const ids = sheet.evaluator_columns
         .map((column) => column.user_id)
-        .filter((id): id is string => Boolean(id) && id !== userId);
+        .filter((id): id is string => Boolean(id) && id !== userId && id !== ownerUserId);
       void updateLinkedEvaluators(ids);
     },
-    [sheet, updateLinkedEvaluators]
+    [sheet, ownerUserId, updateLinkedEvaluators]
   );
 
   const updateFileSummary = useCallback<FileSummaryChange>((key, value) => {
@@ -1762,6 +1764,7 @@ export default function ProposalValuationDialog({
                       <EvaluatorPicker
                         reportId={reportId}
                         evaluators={sheet.evaluator_columns}
+                        ownerUserId={ownerUserId}
                         disabled={
                           !permissions.canManageEvaluators ||
                           dirty ||

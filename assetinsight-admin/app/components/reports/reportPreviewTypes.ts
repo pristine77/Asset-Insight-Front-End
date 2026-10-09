@@ -100,6 +100,8 @@ export type ReportPreviewPayload = {
   variant?: "assetScheduleSheet";
   currencyCode?: string;
   assetScheduleSheet?: AssetAdminScheduleSheet;
+  /** Server-projected intrinsic owner column; not an editable assignment. */
+  ownerColumnId?: string | null;
   revision?: number;
   summary?: Record<string, unknown>;
   calculationVersion?: string;

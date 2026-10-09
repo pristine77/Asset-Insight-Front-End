@@ -91,6 +91,39 @@ function makeListingPreview() {
 }
 
 describe("LotListingPreviewModal inspection location", () => {
+
+  it('submits edited, cleared and deleted specs with authoritative overrides and unchanged lot/media identity', async () => {
+    const response: any = makeListingPreview();
+    response.data.preview_data.total_value = 9876;
+    const lot = response.data.preview_data.lots[0];
+    Object.assign(lot, { categories: 'Equipment', condition_report_specs_reviewed: true,
+      condition_report_specs: { Length: '10 ft', Width: '5 ft', Height: '6 ft', Notes: 'Scratches visible on left side' },
+      condition_report_specs_manual_overrides: { Length: 'old length', Width: 'old width', Height: 'old height' },
+      hidden_condition_report_specs: { Length: true, Colour: true },
+    });
+    mocks.getAssetCategorySpecs.mockResolvedValue({ categories: [], specs: [{ parentCategory: 'Assets', childCategory: 'Equipment', fields: ['Overall Length', 'Overall Width', 'Overall Height'] }] });
+    render(<LotListingPreviewModal isOpen reportId="spec-authority" onClose={vi.fn()} loadPreviewDataOverride={vi.fn().mockResolvedValue(response)} />);
+    await screen.findByDisplayValue('LOT-LOCATION-1');
+    fireEvent.click(screen.getAllByRole('button', { name: '10 ft' })[0]);
+    fireEvent.change(screen.getByPlaceholderText('Edit the full field value'), { target: { value: '12 ft' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    fireEvent.click(screen.getAllByRole('button', { name: 'Remove Overall Width' })[0]);
+    fireEvent.click(screen.getAllByRole('button', { name: '6 ft' })[0]);
+    fireEvent.change(screen.getByPlaceholderText('Edit the full field value'), { target: { value: '' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Save & Generate' }));
+    await waitFor(() => expect(mocks.submitForApproval).toHaveBeenCalledTimes(1));
+    const edited = mocks.submitForApproval.mock.calls[0][1].preview_data.lots[0];
+    expect(mocks.submitForApproval.mock.calls[0][1].preview_data.total_value).toBe(9876);
+    expect(edited.condition_report_specs).toEqual({ 'Overall Length': '12 ft', 'Overall Height': '', Notes: 'Scratches visible on left side' });
+    expect(edited.condition_report_specs_manual_overrides).toEqual({ 'Overall Length': '12 ft', 'Overall Width': '', 'Overall Height': '' });
+    expect(edited.condition_report_specs_deleted).toEqual(['Overall Width']);
+    expect(edited.hidden_condition_report_specs).toEqual({ Colour: true });
+    expect(edited.lot_id).toBe(lot.lot_id);
+    expect(edited.description).toBe(lot.description);
+    expect(edited.image_indices).toEqual(lot.image_indices);
+    expect(edited.condition_report_specs_reviewed).toBe(true);
+  });
   it("submits without FMV or appraisal selections and does not display their required blocks", async () => {
     const response = makeListingPreview();
     response.data.preview_data.lots[0].estimated_value = "";
