@@ -41,7 +41,14 @@ export function ColumnTotalsFooter({ totals, currency }: Props) {
         <td className="text-right" aria-label="High total for all lots">{formatTotal(totals.high, currency)}</td>
         <td className="text-right text-[var(--app-text-muted)]" aria-label="Buyer premium percentages are not summed">—</td>
         <td className="text-right" aria-label="Buyer premium total for all lots">{formatTotal(totals.buyerPremium, currency)}</td>
-        <td colSpan={8} aria-hidden="true" />
+        <td className="text-right" aria-label="Total expected gross total for all lots">{formatTotal(totals.totalExpectedGross, currency)}</td>
+        <td className="text-right" aria-label="Allocated value total for all lots">{formatTotal(totals.allocatedValue, currency)}</td>
+        <td aria-hidden="true" />
+        <td className="text-right" aria-label="Cleaning total for all lots">{formatTotal(totals.cleaning, currency)}</td>
+        <td className="text-right" aria-label="Lien search total for all lots">{formatTotal(totals.lienSearch, currency)}</td>
+        <td className="text-right" aria-label="Video cost total for all lots">{formatTotal(totals.videoCost, currency)}</td>
+        <td className="text-right" aria-label="Lotting fee total for all lots">{formatTotal(totals.lottingFee, currency)}</td>
+        <td className="text-right" aria-label="Advertising total for all lots">{formatTotal(totals.advertising, currency)}</td>
       </tr>
     </tfoot>
   );
@@ -55,6 +62,13 @@ export function MobileColumnTotals({ totals, currency }: Props) {
     { key: "low", label: "Low", value: totals.low },
     { key: "high", label: "High", value: totals.high },
     { key: "premium", label: "Buyer premium ($)", value: totals.buyerPremium },
+    { key: "gross", label: "Total expected gross", value: totals.totalExpectedGross },
+    { key: "allocated", label: "Allocated value", value: totals.allocatedValue },
+    { key: "cleaning", label: "Cleaning", value: totals.cleaning },
+    { key: "lien", label: "Lien search", value: totals.lienSearch },
+    { key: "video", label: "Video cost", value: totals.videoCost },
+    { key: "lotting", label: "Lotting fee", value: totals.lottingFee },
+    { key: "advertising", label: "Advertising", value: totals.advertising },
   ];
   return (
     <section aria-label="All-lot valuation totals" className="mt-2 rounded-lg border border-[var(--app-border)] border-t-2 border-t-[var(--app-accent)] bg-[var(--app-panel-alt)] p-3">

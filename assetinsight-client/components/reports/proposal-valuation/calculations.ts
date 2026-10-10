@@ -62,16 +62,33 @@ export function cloneProposalValuationSheet(sheet: ProposalValuationSheet) {
   return structuredClone(sheet);
 }
 
-export function rowAverage(
+function evaluatorAmounts(values: number[]) {
+  const average = values.length
+    ? values.reduce((sum, value) => sum + value, 0) / values.length
+    : null;
+  const low = values.length ? Math.min(...values) : null;
+  const high = values.length ? Math.max(...values) : null;
+  const premium = average === null ? null : Math.min(average * 0.15, 2000);
+  const gross = average === null || premium === null ? null : average + premium;
+  return { average, low, high, premium, gross };
+}
+
+/** One formula for stored recalculation, live rows and whole-sheet totals. */
+export function rowValuationAmounts(
   row: ProposalValuationRow,
   evaluators: ProposalValuationEvaluator[]
 ) {
   const values = evaluators
     .map((evaluator) => numberOrNull(row.evaluator_values?.[evaluator.id]))
     .filter((value): value is number => value !== null);
-  return values.length
-    ? values.reduce((sum, value) => sum + value, 0) / values.length
-    : 0;
+  return evaluatorAmounts(values);
+}
+
+export function rowAverage(
+  row: ProposalValuationRow,
+  evaluators: ProposalValuationEvaluator[]
+) {
+  return rowValuationAmounts(row, evaluators).average ?? 0;
 }
 
 export function recalculateProposalValuationSheet(
@@ -96,10 +113,7 @@ export function recalculateProposalValuationSheet(
       const filled = Object.values(evaluatorValues).filter(
         (value): value is number => value !== null
       );
-      const low = filled.length ? Math.min(...filled) : null;
-      const high = filled.length ? Math.max(...filled) : null;
-      const premium = high === null ? null : Math.min(high * 0.15, 2000);
-      const gross = high === null || premium === null ? null : high + premium;
+      const { low, high, premium, gross } = evaluatorAmounts(filled);
 
       return {
         ...row,
@@ -326,6 +340,26 @@ export function proposalValuationColumnTotals(
       0
     ),
   }));
+  const monetaryTotals = {
+    totalExpectedGross: 0,
+    allocatedValue: 0,
+    cleaning: 0,
+    lienSearch: 0,
+    videoCost: 0,
+    lottingFee: 0,
+    advertising: 0,
+  };
+  // Reuse row formulas so current edits win over stale saved derived amounts.
+  // Gross and its premium use the unrounded average of entered evaluator values.
+  for (const row of recalculateProposalValuationSheet(sheet).rows) {
+    monetaryTotals.totalExpectedGross += finite(row.total_expected_gross);
+    monetaryTotals.allocatedValue += finite(row.allocated_value);
+    monetaryTotals.cleaning += finite(row.cleaning);
+    monetaryTotals.lienSearch += finite(row.lien_search);
+    monetaryTotals.videoCost += finite(row.video_cost);
+    monetaryTotals.lottingFee += finite(row.lotting_fee);
+    monetaryTotals.advertising += finite(row.advertising);
+  }
   return {
     lotCount: sheet.rows.length,
     evaluators: evaluatorTotals,
@@ -333,6 +367,7 @@ export function proposalValuationColumnTotals(
     low: summary.total_low_est_value,
     high: summary.total_high_est_value,
     buyerPremium: summary.total_capped_bp,
+    ...monetaryTotals,
   };
 }
 

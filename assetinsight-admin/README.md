@@ -10,6 +10,29 @@ The production administration console for Asset Insight. It is a Next.js App Rou
 
 ## Runtime architecture
 
+### Proposal Valuation average-based buyer premium (2026-10-09, local)
+
+Each lot's Buyer Premium is 15% of its active evaluators' average, capped at
+2,000 per lot. Total Expected Gross is that average plus its buyer premium;
+Allocated Value matches gross. Blank or unavailable evaluator values do not
+dilute the average, explicit zero participates, and an entirely blank row stays
+blank. Adding/removing evaluators or editing amounts recalculates immediately.
+Low/High estimates and high-based 1% cost formulas remain unchanged. Backend
+support must precede rollout so saves and Excel exports use the same basis;
+no historical files are rewritten automatically.
+
+### Proposal Valuation monetary column totals (2026-10-09, local)
+
+The desktop footer and mobile all-lot card now include Total Expected Gross,
+Allocated Value, Cleaning, Lien Search, Video Cost, Lotting Fee and Advertising.
+They sum the same recalculated row amounts across the entire sheet, not only
+the current page or selected lot. Buyer-premium percentages remain nonsummed;
+the formatted Asset Insight reference column is not parsed as a valuation.
+Row formulas, saved inputs, permissions and export layouts are unchanged. Cents
+are retained until display, and blank row values remain blank.
+
+Focused regressions: `node --test tests/asset-schedule-totals.test.mjs`.
+
 ### Proposal Valuation report owner (2026-10-09, local)
 
 The backend supplies an intrinsic owner evaluator column and its read-only

@@ -15,6 +15,13 @@ export type AssetScheduleDerivedSummary = {
   total_low_est_value: number;
   total_high_est_value: number;
   total_capped_bp: number;
+  total_expected_gross: number;
+  total_allocated_value: number;
+  total_cleaning: number;
+  total_lien_search: number;
+  total_video_cost: number;
+  total_lotting_fee: number;
+  total_advertising: number;
   total_projected_costs: number;
   low_risk_value: number;
   medium_risk_value: number;
@@ -141,10 +148,13 @@ function recalculateRow(
 
   const low = filledValues.length ? Math.min(...filledValues) : null;
   const high = filledValues.length ? Math.max(...filledValues) : null;
+  const average = filledValues.length
+    ? filledValues.reduce((sum, value) => sum + value, 0) / filledValues.length
+    : null;
   const buyerPremiumPercent = 15;
-  const buyerPremiumAmount = high === null ? null : Math.min(high * 0.15, 2000);
+  const buyerPremiumAmount = average === null ? null : Math.min(average * 0.15, 2000);
   const totalExpectedGross =
-    high === null || buyerPremiumAmount === null ? null : high + buyerPremiumAmount;
+    average === null || buyerPremiumAmount === null ? null : average + buyerPremiumAmount;
   const allocatedValue = totalExpectedGross;
   const cleaning = high === null ? null : high * 0.01;
   const lottingFee = high === null ? null : high * 0.01;
@@ -209,6 +219,13 @@ export function deriveAssetScheduleSummary(sheet: AssetAdminScheduleSheet): Asse
   let totalLowEstValue = 0;
   let totalHighEstValue = 0;
   let totalCappedBp = 0;
+  let totalExpectedGross = 0;
+  let totalAllocatedValue = 0;
+  let totalCleaning = 0;
+  let totalLienSearch = 0;
+  let totalVideoCost = 0;
+  let totalLottingFee = 0;
+  let totalAdvertising = 0;
   let totalProjectedCosts = 0;
   let lowRiskValue = 0;
   let mediumRiskValue = 0;
@@ -227,6 +244,13 @@ export function deriveAssetScheduleSummary(sheet: AssetAdminScheduleSheet): Asse
     totalLowEstValue += toFiniteNumber(row.low_est_sale_value);
     totalHighEstValue += toFiniteNumber(row.high_est_sale_value);
     totalCappedBp += toFiniteNumber(row.buyer_premium_amount);
+    totalExpectedGross += toFiniteNumber(row.total_expected_gross);
+    totalAllocatedValue += toFiniteNumber(row.allocated_value);
+    totalCleaning += toFiniteNumber(row.cleaning);
+    totalLienSearch += toFiniteNumber(row.lien_search);
+    totalVideoCost += toFiniteNumber(row.video_cost);
+    totalLottingFee += toFiniteNumber(row.lotting_fee);
+    totalAdvertising += toFiniteNumber(row.advertising);
     totalProjectedCosts +=
       toFiniteNumber(row.cleaning) +
       toFiniteNumber(row.lien_search) +
@@ -285,6 +309,13 @@ export function deriveAssetScheduleSummary(sheet: AssetAdminScheduleSheet): Asse
     total_low_est_value: totalLowEstValue,
     total_high_est_value: totalHighEstValue,
     total_capped_bp: totalCappedBp,
+    total_expected_gross: totalExpectedGross,
+    total_allocated_value: totalAllocatedValue,
+    total_cleaning: totalCleaning,
+    total_lien_search: totalLienSearch,
+    total_video_cost: totalVideoCost,
+    total_lotting_fee: totalLottingFee,
+    total_advertising: totalAdvertising,
     total_projected_costs: totalProjectedCosts,
     low_risk_value: lowRiskValue,
     medium_risk_value: mediumRiskValue,

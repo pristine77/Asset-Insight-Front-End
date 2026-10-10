@@ -1083,6 +1083,13 @@ export default function AssetScheduleSheet({
       low_est_sale_value: { label: "Low", value: derivedSummary.total_low_est_value },
       high_est_sale_value: { label: "High", value: derivedSummary.total_high_est_value },
       buyer_premium_amount: { label: "B.P. amount ($)", value: derivedSummary.total_capped_bp },
+      total_expected_gross: { label: "Total Expected Gross ($)", value: derivedSummary.total_expected_gross },
+      allocated_value: { label: "Allocated Value ($)", value: derivedSummary.total_allocated_value },
+      cleaning: { label: "Cleaning", value: derivedSummary.total_cleaning },
+      lien_search: { label: "Lien Search", value: derivedSummary.total_lien_search },
+      video_cost: { label: "Video Cost", value: derivedSummary.total_video_cost },
+      lotting_fee: { label: "Lotting Fee", value: derivedSummary.total_lotting_fee },
+      advertising: { label: "Advertising", value: derivedSummary.total_advertising },
     };
   }, [derivedSummary, stableEvaluatorColumns]);
 

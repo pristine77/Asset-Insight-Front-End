@@ -1,5 +1,25 @@
 # Sanitized application synchronization
 
+## 10 October 2026 follow-up
+
+Content-only update on Pristine77 `474a712`, from web `ddcc11e` and admin
+`9623890`. Adds the missing all-lot monetary column totals and changes each
+lot's Buyer Premium to 15% of the entered evaluator average, capped at 2,000.
+Total Expected Gross and Allocated Value use average plus premium. Blank/zero
+handling, full precision, low/high estimates and existing high-based costs are
+preserved. The matching backend calculation contract is
+`asset-pv-v2-average-premium`.
+
+Native source `dc73c68` and both exported mobile copies are unchanged.
+Pristine's web upload changes, Bank/logo policy and camera behavior remain
+untouched. No dependencies or lockfiles changed. Provider usage/accounting,
+credit-cost calculations and multipliers remain excluded; no source Git history,
+secrets, generated binaries or private operational records are exported.
+
+Deploy the matching backend before web/admin. This synchronization does not
+deploy, publish a mobile release or rewrite customer data or existing files.
+Downloaded valuation spreadsheets need a fresh export after deployment.
+
 ## 9 October 2026 follow-up
 
 Content-only update retaining Pristine77 history through `9d4bc4b`, including

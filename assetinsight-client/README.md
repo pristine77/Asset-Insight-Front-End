@@ -22,6 +22,48 @@ This project uses [`next/font`](https://nextjs.org/docs/app/building-your-applic
 
 ## Learn More
 
+### Proposal Valuation monetary column totals (2026-10-09, local)
+
+The Lots footer and mobile totals card now include Total Expected Gross,
+Allocated Value, Cleaning, Lien Search, Video Cost, Lotting Fee and Advertising.
+The previous footer left those cells empty even though the rows
+and Excel export calculated them. Totals cover the entire sheet, including rows
+hidden by search or pagination, and update from the current edits. Existing row
+buyer-premium caps remain unchanged. Following the average-basis correction
+below, gross now uses the entered evaluator average plus its premium. Blanks
+contribute zero, percentages and the formatted Asset Insight reference are not summed, and cents are preserved
+until display. No backend schema change or customer-data repair is required.
+
+Local verification: 1,265 web tests across 114 files, typecheck, lint and
+production build pass. Isolated Chromium desktop/light and 320px/dark checks
+cover whole-sheet totals across pages/search (including no matches), zero/blank/
+decimal edits, footer/body alignment and synthetic save/reopen. The matching
+admin flow and existing backend formula/XLSX tests also pass. No production
+access, customer changes, push or deployment; the QA build targets loopback and
+must not be deployed without a production rebuild.
+
+### Proposal Valuation average-based Buyer Premium (2026-10-09, local)
+
+Buyer Premium is 15% of the unrounded average of entered active evaluator values,
+capped at 2,000 per lot. Total Expected Gross and Allocated Value equal that
+average plus premium. Empty evaluator values are excluded, explicit zero counts,
+and an all-blank row keeps its premium/gross blank. Removed evaluator entries
+cannot affect the average. The live row and saved recalculation share one helper
+so desktop/mobile rows and all-lot totals use the same formula.
+
+Low/high estimates, existing 1%-of-high cost formulas, the separately labelled
+Potential Get high-estimate scenario and row display rounding are unchanged.
+Backend calculation/export support must deploy first, followed by web/admin.
+Existing downloaded files are not rewritten; export again or explicitly update
+report files after deployment. No automatic customer-data rewrite is performed.
+
+Verification: 1,273 tests across 114 files, typecheck, lint and production build
+pass. Four isolated production Chromium flows cover web/admin at 1366px/light
+and 320px/dark, using the built backend normalizer with synthetic accounts and
+data. They verify average-based examples, blank/zero/cap boundaries, all-lot
+totals through pagination/search, decimal edits and save/reopen. No live account
+or physical-device test; no push/deployment. QA builds target loopback only.
+
 ### Proposal Valuation report owner (2026-10-09, local)
 
 The server-provided report owner now has a fixed **Report owner** participant

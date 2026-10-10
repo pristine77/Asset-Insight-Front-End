@@ -200,13 +200,13 @@ describe("ProposalValuationDialog", () => {
         expect(within(footer).getByLabelText(`${column} total for all lots`)).toHaveTextContent(value);
       }
     };
-    const initialTotals = { Riley: "US$45,000", Jay: "US$105,000", "New appraiser": "US$0", Average: "US$75,000", Low: "US$45,000", High: "US$105,000", "Buyer premium": "US$13,250" };
+    const initialTotals = { Riley: "US$45,000", Jay: "US$105,000", "New appraiser": "US$0", Average: "US$75,000", Low: "US$45,000", High: "US$105,000", "Buyer premium": "US$9,500", "Total expected gross": "US$84,500.00", "Allocated value": "US$84,500.00", Cleaning: "US$1,050.00", "Lotting fee": "US$1,050.00", Advertising: "US$1,050.00" };
     expectTotals(initialTotals);
     expect(within(footer).getByText("All 26 lots")).toBeInTheDocument();
     expect(within(footer).getByLabelText("Buyer premium percentages are not summed")).toHaveTextContent("—");
     const mobileTotals = screen.getByRole("region", { name: "All-lot valuation totals" });
     expect(within(mobileTotals).getByRole("heading", { name: "Totals · All 26 lots" })).toBeInTheDocument();
-    expect(within(mobileTotals).getByText("US$13,250.00")).toBeInTheDocument();
+    expect(within(mobileTotals).getByText("US$9,500.00")).toBeInTheDocument();
     expect(screen.getByRole("region", { name: "Proposal valuation lots table" })).toHaveAttribute("tabindex", "0");
 
     fireEvent.click(screen.getByRole("button", { name: "Next assets page" }));
@@ -222,13 +222,33 @@ describe("ProposalValuationDialog", () => {
     fireEvent.change(screen.getByPlaceholderText("Search assets"), { target: { value: "QA-001" } });
     const riley = (await screen.findAllByRole("spinbutton", { name: "Riley valuation for QA-001" }))[0];
     fireEvent.change(riley, { target: { value: "0" } });
-    expectTotals({ ...initialTotals, Riley: "US$44,000", Average: "US$74,500", Low: "US$44,000" });
+    expectTotals({ ...initialTotals, Riley: "US$44,000", Average: "US$74,500", Low: "US$44,000", "Buyer premium": "US$9,425", "Total expected gross": "US$83,925.00", "Allocated value": "US$83,925.00" });
     fireEvent.change(screen.getAllByRole("spinbutton", { name: "Jay valuation for QA-001" })[0], { target: { value: "" } });
-    expectTotals({ Riley: "US$44,000", Jay: "US$102,000", Average: "US$73,000", Low: "US$44,000", High: "US$102,000", "Buyer premium": "US$12,800" });
-    expect(within(mobileTotals).getByText("US$12,800.00")).toBeInTheDocument();
+    expectTotals({ Riley: "US$44,000", Jay: "US$102,000", Average: "US$73,000", Low: "US$44,000", High: "US$102,000", "Buyer premium": "US$9,200", "Total expected gross": "US$82,200.00", "Allocated value": "US$82,200.00", Cleaning: "US$1,020.00", "Lotting fee": "US$1,020.00", Advertising: "US$1,020.00" });
+    expect(within(mobileTotals).getByText("US$9,200.00")).toBeInTheDocument();
     expect(riley).toHaveValue(0);
     expect(screen.getAllByRole("spinbutton", { name: "Jay valuation for QA-001" })[0]).toHaveValue(null);
     view.unmount();
+  });
+
+  it("shows average-based premium and gross in live rows as well as the exact-cent footer", async () => {
+    const payload = makePayload();
+    payload.assetScheduleSheet.evaluator_columns = [{ id: "riley", name: "Riley" }, { id: "jay", name: "Jay" }];
+    payload.assetScheduleSheet.rows[0].evaluator_values = { riley: 4000, jay: 4500 };
+    // Saved derived fields intentionally still use the old high-based amounts.
+    Object.assign(payload.assetScheduleSheet.rows[0], { buyer_premium_amount: 675, total_expected_gross: 5175, allocated_value: 5175 });
+    mocks.get.mockResolvedValue(payload);
+    render(<ProposalValuationDialog open pageMode reportId="report-1" />);
+    const footer = await screen.findByRole("rowgroup", { name: "All-lot valuation totals" });
+    const table = within(screen.getByRole("region", { name: "Proposal valuation lots table" })).getByRole("table");
+    const row = table.querySelector("tbody tr")!;
+    for (const [label, text] of Object.entries({ "Buyer Premium ($)": "US$638", "Total Expected Gross ($)": "US$4,888", "Allocated Value ($)": "US$4,888" })) {
+      const header = within(table).getByRole("columnheader", { name: label });
+      const index = Array.from(header.parentElement!.children).indexOf(header);
+      expect(row.children[index]).toHaveTextContent(text);
+    }
+    expect(within(footer).getByLabelText("Buyer premium total for all lots")).toHaveTextContent("US$637.50");
+    expect(within(footer).getByLabelText("Total expected gross total for all lots")).toHaveTextContent("US$4,887.50");
   });
 
   it("keeps an explicitly scoped zero totals row and mobile summary for an empty sheet", async () => {
@@ -238,7 +258,7 @@ describe("ProposalValuationDialog", () => {
     render(<ProposalValuationDialog open pageMode reportId="report-1" />);
     const footer = await screen.findByRole("rowgroup", { name: "All-lot valuation totals" });
     expect(within(footer).getByText("All 0 lots")).toBeInTheDocument();
-    for (const column of ["Riley", "Jay", "Chad", "Femi", "Average", "Low", "High", "Buyer premium"]) {
+    for (const column of ["Riley", "Jay", "Chad", "Femi", "Average", "Low", "High", "Buyer premium", "Total expected gross", "Allocated value", "Cleaning", "Lien search", "Video cost", "Lotting fee", "Advertising"]) {
       expect(within(footer).getByLabelText(`${column} total for all lots`)).toHaveTextContent("US$0");
     }
     expect(within(screen.getByRole("region", { name: "All-lot valuation totals" })).getByRole("heading", { name: "Totals · All 0 lots" })).toBeInTheDocument();

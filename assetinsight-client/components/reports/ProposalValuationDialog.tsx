@@ -41,7 +41,7 @@ import {
   proposalValuationColumnTotals,
   proposalValuationTotals,
   recalculateProposalValuationSheet,
-  rowAverage,
+  rowValuationAmounts,
 } from "./proposal-valuation/calculations";
 import EvaluatorPicker from "./proposal-valuation/EvaluatorPicker";
 import FormulaDetailsDialog from "./proposal-valuation/FormulaDetailsDialog";
@@ -142,16 +142,6 @@ function applyDraftChanges(
   return recalculateProposalValuationSheet(next);
 }
 
-function rowRange(row: ProposalValuationRow, evaluators: ProposalValuationEvaluator[]) {
-  const values = evaluators
-    .map((column) => row.evaluator_values?.[column.id])
-    .filter((value): value is number => typeof value === "number" && Number.isFinite(value));
-  return {
-    low: values.length ? Math.min(...values) : null,
-    high: values.length ? Math.max(...values) : null,
-  };
-}
-
 const textControlClass =
   "w-full rounded border border-[var(--app-control-border)] bg-[var(--app-input)] px-2 py-1 text-xs text-[var(--app-text)] outline-none focus:border-[var(--app-accent)] focus:ring-2 focus:ring-[var(--app-accent-ring)]";
 const numericControlClass = `${textControlClass} text-right font-semibold tabular-nums`;
@@ -174,22 +164,19 @@ function rowDisplayValues(
   row: ProposalValuationRow,
   evaluators: ProposalValuationEvaluator[]
 ) {
-  const average = rowAverage(row, evaluators);
-  const range = rowRange(row, evaluators);
-  const premium = range.high === null ? null : Math.min(range.high * 0.15, 2000);
-  const gross = range.high === null || premium === null ? null : range.high + premium;
+  const { average, low, high, premium, gross } = rowValuationAmounts(row, evaluators);
 
   return {
-    average,
-    low: range.low,
-    high: range.high,
+    average: average ?? 0,
+    low,
+    high,
     buyerPremiumPercent: row.buyer_premium_percent || 15,
     buyerPremiumAmount: premium,
     totalExpectedGross: gross,
     allocatedValue: gross,
-    cleaning: range.high === null ? null : range.high * 0.01,
-    lottingFee: range.high === null ? null : range.high * 0.01,
-    advertising: range.high === null ? null : range.high * 0.01,
+    cleaning: high === null ? null : high * 0.01,
+    lottingFee: high === null ? null : high * 0.01,
+    advertising: high === null ? null : high * 0.01,
   };
 }
 
