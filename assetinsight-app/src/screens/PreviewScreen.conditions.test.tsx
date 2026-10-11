@@ -32,8 +32,8 @@ jest.mock('../services/api', () => ({
   __esModule: true,
   default: { get: jest.fn(), put: jest.fn(), post: jest.fn() },
 }));
-jest.mock('../services/assetService', () => ({ __esModule: true, default: {} }));
-jest.mock('../services/lotListingService', () => ({ __esModule: true, default: {} }));
+jest.mock('../services/assetService', () => ({ __esModule: true, default: { regenerateLot: jest.fn() } }));
+jest.mock('../services/lotListingService', () => ({ __esModule: true, default: { regenerateLot: jest.fn() } }));
 jest.mock('../services/assignedApprovalService', () => ({ __esModule: true, default: {} }));
 jest.mock('../components/FarmlandValuationSummary', () => () => null);
 
@@ -123,7 +123,7 @@ it.each(['Asset', 'LotListing'] as const)('opens the %s Android photo picker wit
   }
 });
 
-it.each(['Asset', 'LotListing'] as const)('saves and regenerates %s with one current snapshot and no separate save', async reportType => {
+it.each(['Asset', 'LotListing'] as const)('saves %s with one current snapshot through the single Save action', async reportType => {
   saved = fixture(2);
   jest.mocked(api.get).mockImplementation(async url => String(url).includes('category-specs')
     ? { data: { data: { specs: [] } } }
@@ -134,8 +134,12 @@ it.each(['Asset', 'LotListing'] as const)('saves and regenerates %s with one cur
   await render(<PreviewScreen reportId="combined" reportType={reportType} mode="pending" onBack={onBack} onSuccess={success} />);
   const contract = await screen.findByDisplayValue('93530');
   await fireEvent.changeText(contract, 'UPDATED-93530');
+  // The footer carries exactly one save action: no grey "Save preview
+  // changes" button beside it, and no old "Save & ..." generation label.
   expect(screen.queryByRole('button', { name: 'Save preview changes' })).toBeNull();
-  await fireEvent.press(screen.getByRole('button', { name: 'Save & Regenerate' }));
+  expect(screen.queryByRole('button', { name: /^Save & / })).toBeNull();
+  expect(screen.getAllByRole('button', { name: 'Save' })).toHaveLength(1);
+  await fireEvent.press(screen.getByRole('button', { name: 'Save' }));
   const confirm = confirmGeneration();
   await act(() => { void confirm.onPress?.(); void confirm.onPress?.(); });
   expect(api.post).toHaveBeenCalledTimes(1);
@@ -143,7 +147,7 @@ it.each(['Asset', 'LotListing'] as const)('saves and regenerates %s with one cur
     preview_data: expect.objectContaining({ contract_no: 'UPDATED-93530', lots: saved.lots }),
   });
   expect(api.put).not.toHaveBeenCalled();
-  expect(screen.getByRole('button', { name: 'Save & Regenerate' })).toBeDisabled();
+  expect(screen.getByRole('button', { name: 'Save' })).toBeDisabled();
   await fireEvent.changeText(contract, 'DO NOT REPLACE IN-FLIGHT SNAPSHOT');
   expect(contract.props.value).toBe('UPDATED-93530');
   expect(screen.queryByRole('button', { name: 'Back from report preview' })).toBeNull();
@@ -156,7 +160,7 @@ it.each(['Asset', 'LotListing'] as const)('saves and regenerates %s with one cur
 
 it('ignores a generation confirmation after refreshed data replaces its snapshot', async () => {
   await open(2);
-  await fireEvent.press(screen.getByRole('button', { name: 'Save & Generate' }));
+  await fireEvent.press(screen.getByRole('button', { name: 'Save' }));
   const confirm = confirmGeneration();
   saved = { ...saved, contract_no: 'REFRESHED' };
   await fireEvent(screen.getByTestId('preview-refresh'), 'refresh');
@@ -175,10 +179,10 @@ it('submits Lot Listing without FMV or appraisal selection blocks while retainin
   expect(screen.queryByText('Required selections')).toBeNull();
   expect(screen.queryByText(/Running Condition for all lots/i)).toBeNull();
   expect(screen.queryByRole('button', { name: /^Edit required selections/ })).toBeNull();
-  await fireEvent.press(screen.getByText('Save & Generate'));
-  const confirmation = jest.mocked(Alert.alert).mock.calls.find(([title]) => title === 'Save & Generate');
+  await fireEvent.press(screen.getByText('Save'));
+  const confirmation = jest.mocked(Alert.alert).mock.calls.find(([title]) => title === 'Save');
   expect(confirmation).toBeDefined();
-  await act(async () => { await confirmation![2]!.find((button) => button.text === 'Save & Generate')!.onPress?.(); });
+  await act(async () => { await confirmation![2]!.find((button) => button.text === 'Save')!.onPress?.(); });
   expect(api.post).toHaveBeenCalledWith('/lot-listing/listing-report/submit-approval', {
     preview_data: expect.objectContaining({ lots: expect.arrayContaining([
       expect.objectContaining({ ...original.lots[0] }),
@@ -200,11 +204,13 @@ const select = (lot: number) =>
   fireEvent.press(screen.getByRole('checkbox', { name: `Select lot ${lot} for bulk update` }));
 const apply = (group: string, value: string) =>
   fireEvent.press(screen.getByRole('button', { name: `${group}: ${value} to selected lots` }));
+// The footer Save confirmation (owner decision 2026-10-11: Save rebuilds the
+// files from the on-screen edits; it is no longer labelled as a generation).
 const confirmGeneration = () => jest.mocked(Alert.alert).mock.calls
-  .filter(([title]) => title === 'Save & Generate' || title === 'Save & Regenerate')
-  .at(-1)![2]!.find(button => button.text?.startsWith('Save &'))!;
+  .filter(([title]) => title === 'Save')
+  .at(-1)![2]!.find(button => button.text === 'Save')!;
 const save = async () => {
-  await fireEvent.press(screen.getByRole('button', { name: 'Save & Generate' }));
+  await fireEvent.press(screen.getByRole('button', { name: 'Save' }));
   await act(async () => { await confirmGeneration().onPress?.(); });
 };
 
@@ -404,7 +410,7 @@ it('does not let a late save response overwrite another report or its new select
   );
   await select(4);
   await apply('Legal', 'Salvage');
-  await fireEvent.press(screen.getByRole('button', { name: 'Save & Generate' }));
+  await fireEvent.press(screen.getByRole('button', { name: 'Save' }));
   await act(() => { void confirmGeneration().onPress?.(); });
   expect(screen.getByText('0 of 10 lots selected', { includeHiddenElements: true })).toBeTruthy();
   expect(

@@ -8,6 +8,7 @@ import {
   RefreshControl,
   ActivityIndicator,
   Alert,
+  AppState,
   Image,
   Modal,
   Dimensions,
@@ -37,6 +38,15 @@ import { API_ENDPOINTS } from "../config/api";
 import assetService from "../services/assetService";
 import lotListingService from "../services/lotListingService";
 import assignedApprovalService from "../services/assignedApprovalService";
+import {
+  LOT_REGENERATION_POLL_MS,
+  type LotRegenerationState,
+  isLotRegenerationPending,
+  isLotRegenerationPendingError,
+  isLotRegenerationTarget,
+  lotRegenerationStageText,
+  readLotRegeneration,
+} from "../services/lotRegeneration";
 import {
   ConditionSelectionKey,
 } from "../utils/conditionSelections";
@@ -450,10 +460,27 @@ const PreviewScreen = ({
   const [keyboardVisible, setKeyboardVisible] = useState(false);
   const [specFieldEditor, setSpecFieldEditor] = useState<SpecFieldEditorState | null>(null);
   const [uploadingLotKey, setUploadingLotKey] = useState<string | null>(null);
+  // Per-lot Re-Generate (owner decision 2026-10-11). `lotRegeneration` mirrors
+  // the server's record: queued/processing while the AI re-reads one lot,
+  // failed after it gave up, null otherwise. `startingRegenerationKey` covers
+  // the moment between the confirmation and the server's 202.
+  const [lotRegeneration, setLotRegeneration] = useState<LotRegenerationState | null>(null);
+  const [startingRegenerationKey, setStartingRegenerationKey] = useState<string | null>(null);
+  const lotRegenerationRef = useRef(lotRegeneration);
+  lotRegenerationRef.current = lotRegeneration;
+  const lotRegenerationPending = isLotRegenerationPending(lotRegeneration);
+  const lotRegenerationPendingRef = useRef(false);
+  lotRegenerationPendingRef.current = lotRegenerationPending || startingRegenerationKey !== null;
   const lastSpecTapRef = useRef<{ key: string; time: number } | null>(null);
   const previewBusyRef = useRef(false);
+  // A pending Re-Generate locks the report like a submit does: the server
+  // refuses saves and uploads until the fresh lot is written, and the poll
+  // that picks it up replaces the preview on screen.
   previewBusyRef.current =
-    loading || refreshing || saving || submitting || filesGenerating || uploadingLotKey !== null;
+    loading || refreshing || saving || submitting || filesGenerating || uploadingLotKey !== null ||
+    lotRegenerationPendingRef.current;
+  const previewLoadingRef = useRef(false);
+  previewLoadingRef.current = loading || refreshing;
 
   const isAsset = reportType === "Asset";
   const isLotListing = reportType === "LotListing";
@@ -461,9 +488,12 @@ const PreviewScreen = ({
   const resubmitMode = isAssignedApproval || (reportType === "RealEstate"
     ? shouldResubmitRealEstate(status, mode)
     : status ? ["pending_approval", "approved", "error"].includes(status) : mode === "submitted");
-  const generationLabel = isAssignedApproval
-    ? "Save, Regenerate & Approve"
-    : resubmitMode ? "Save & Regenerate" : "Save & Generate";
+  // Owner decision 2026-10-11: the footer action saves exactly what is on
+  // screen and rebuilds the files; it never re-runs the AI. Re-reading a lot's
+  // photos is the separate per-lot Re-Generate, offered to the report owner
+  // only (an assigned approver reviews, and Real Estate keeps its own flow).
+  const saveLabel = isAssignedApproval ? "Save & Approve" : "Save";
+  const canRegenerateLots = (isAsset || isLotListing) && !isAssignedApproval;
   const themeColor = isAsset ? "#F43F5E" : isLotListing ? "#8B5CF6" : "#10B981";
 
   const getLotDisplayNumber = (lot: any, index: number) => {
@@ -545,6 +575,59 @@ const PreviewScreen = ({
     };
   }, []);
 
+  // One read of the report preview. Shared by the screen load and the
+  // Re-Generate poll so both see the same endpoint and payload.
+  const fetchPreviewPayload = useCallback(async (): Promise<any> => {
+    if (isAssignedApproval) return assignedApprovalService.getPreview(reportId);
+    let endpoint: string;
+    if (mode === "submitted") {
+      if (isAsset) endpoint = `${API_ENDPOINTS.GET_PREVIEW}/${reportId}/submitted-preview`;
+      else if (isLotListing) endpoint = `/lot-listing/${reportId}/submitted-preview`;
+      else endpoint = `/real-estate/${reportId}/submitted-preview`;
+    } else {
+      if (isAsset) endpoint = `${API_ENDPOINTS.GET_PREVIEW}/${reportId}/preview`;
+      else if (isLotListing) endpoint = `/lot-listing/${reportId}/preview`;
+      else endpoint = `${API_ENDPOINTS.GET_REAL_ESTATE_PREVIEW}/${reportId}`;
+    }
+    const response = await api.get(endpoint);
+    return response.data.data;
+  }, [isAsset, isAssignedApproval, isLotListing, mode, reportId]);
+
+  // Puts a fetched preview payload on screen, replacing any local edits.
+  const applyLoadedPreview = useCallback((data: any) => {
+    setStatus(data.status || "");
+    setFilesGenerating(Boolean(data.files_generating || data.files_regenerating));
+    setDeclineReason(data.decline_reason || "");
+    const nextPreviewData = data.preview_data || {};
+    setPreviewData(applyDamageAnalysisLotPolicy(
+      isLotListing
+        ? {
+            ...nextPreviewData,
+            include_damage_analysis:
+              nextPreviewData.include_damage_analysis ?? (data.include_damage_analysis !== false),
+            valuation_methods:
+              nextPreviewData.valuation_methods || data.valuation_methods || ["FML"],
+          }
+        : nextPreviewData
+    ));
+    const loadedImages = data.imageUrls || [];
+    const reportOnlyImages = !isAsset && !isLotListing ? data.extraImageUrls || [] : [];
+    setImageUrls([...loadedImages, ...reportOnlyImages]);
+    setImageCount((data.image_count || loadedImages.length) + reportOnlyImages.length);
+    setPreviewFiles(data.preview_files || data.files || {});
+    // A pending record resumes the Re-Generate wait (and its poll) when the
+    // screen is reopened; a failed one shows its notice on the lot.
+    setLotRegeneration(readLotRegeneration(data.lot_regeneration));
+    setHasChanges(false);
+
+    if (isAsset) {
+      setGroupingMode(data.grouping_mode || "mixed");
+    } else {
+      setPropertyType(data.property_type || "residential");
+      setLanguage(data.language || "en");
+    }
+  }, [isAsset, isLotListing]);
+
   const loadPreviewData = useCallback(async () => {
     const requestRevision = ++previewRequestRevisionRef.current;
     const isCurrent = () =>
@@ -556,60 +639,17 @@ const PreviewScreen = ({
       setSaving(false);
       setSubmitting(false);
       setUploadingLotKey(null);
-
-      let endpoint = "";
-      if (!isAssignedApproval) {
-        if (mode === "submitted") {
-          if (isAsset) endpoint = `${API_ENDPOINTS.GET_PREVIEW}/${reportId}/submitted-preview`;
-          else if (isLotListing) endpoint = `/lot-listing/${reportId}/submitted-preview`;
-          else endpoint = `/real-estate/${reportId}/submitted-preview`;
-        } else {
-          if (isAsset) endpoint = `${API_ENDPOINTS.GET_PREVIEW}/${reportId}/preview`;
-          else if (isLotListing) endpoint = `/lot-listing/${reportId}/preview`;
-          else endpoint = `${API_ENDPOINTS.GET_REAL_ESTATE_PREVIEW}/${reportId}`;
-        }
-      }
+      setStartingRegenerationKey(null);
 
       const [previewResponse, categorySpecResponse] = await Promise.all([
-        isAssignedApproval
-          ? assignedApprovalService.getPreview(reportId)
-          : api.get(endpoint).then((response) => response.data.data),
+        fetchPreviewPayload(),
         isAsset || isLotListing
           ? api.get("/asset/category-specs").catch(() => ({ data: { data: { specs: [] } } }))
           : Promise.resolve({ data: { data: { specs: [] } } }),
       ]);
       if (!isCurrent()) return;
-      const data = previewResponse;
       setCategorySpecs(categorySpecResponse.data?.data?.specs || []);
-
-      setStatus(data.status || "");
-      setFilesGenerating(Boolean(data.files_generating || data.files_regenerating));
-      setDeclineReason(data.decline_reason || "");
-      const nextPreviewData = data.preview_data || {};
-      setPreviewData(applyDamageAnalysisLotPolicy(
-        isLotListing
-          ? {
-              ...nextPreviewData,
-              include_damage_analysis:
-                nextPreviewData.include_damage_analysis ?? (data.include_damage_analysis !== false),
-              valuation_methods:
-                nextPreviewData.valuation_methods || data.valuation_methods || ["FML"],
-            }
-          : nextPreviewData
-      ));
-      const loadedImages = data.imageUrls || [];
-      const reportOnlyImages = !isAsset && !isLotListing ? data.extraImageUrls || [] : [];
-      setImageUrls([...loadedImages, ...reportOnlyImages]);
-      setImageCount((data.image_count || loadedImages.length) + reportOnlyImages.length);
-      setPreviewFiles(data.preview_files || data.files || {});
-      setHasChanges(false);
-
-      if (isAsset) {
-        setGroupingMode(data.grouping_mode || "mixed");
-      } else {
-        setPropertyType(data.property_type || "residential");
-        setLanguage(data.language || "en");
-      }
+      applyLoadedPreview(previewResponse);
     } catch (error: any) {
       if (!isCurrent()) return;
       console.error("Error loading preview:", error);
@@ -621,13 +661,122 @@ const PreviewScreen = ({
         setRefreshing(false);
       }
     }
-  }, [isAsset, isAssignedApproval, isLotListing, mode, onBack, reportId, reportType,
+  }, [applyLoadedPreview, fetchPreviewPayload, isAsset, isLotListing, onBack, reportType,
     reportContextKey, resetAssetLotSelection]);
 
   useEffect(() => {
     loadPreviewData();
     return () => { previewRequestRevisionRef.current += 1; };
   }, [loadPreviewData]);
+
+  // The server refused a request because a lot is being re-generated (for
+  // example from another device). Say so, then reload so the lock and its
+  // progress banner show. Returns false for any other error.
+  const handleLotRegenerationConflict = (error: any) => {
+    if (!isLotRegenerationPendingError(error)) return false;
+    Alert.alert(
+      "Re-Generate in progress",
+      error?.response?.data?.message || "A lot is being re-generated. Wait for it to finish, then save."
+    );
+    void loadPreviewData();
+    return true;
+  };
+
+  // Called by the poll once the server's record is no longer pending.
+  const finishLotRegeneration = (data: any, next: LotRegenerationState | null) => {
+    const previous = lotRegenerationRef.current;
+    if (next?.status === "failed") {
+      // Nothing on the lot changed: keep the screen as it is and show why.
+      setLotRegeneration(next);
+      Alert.alert("Re-Generate failed", next.error || "The lot was not changed. You can try again.");
+      return;
+    }
+    // Cleared: the server wrote the fresh lot into the preview.
+    resetAssetLotSelection();
+    applyLoadedPreview(data);
+    const lots = Array.isArray(data?.preview_data?.lots) ? data.preview_data.lots : [];
+    const lotIndex = previous
+      ? lots.findIndex((lot: any, index: number) =>
+          isLotRegenerationTarget(previous, lot, getLotUploadKey(lot, index)))
+      : -1;
+    const lotLabel = lotIndex >= 0
+      ? getLotDisplayNumber(lots[lotIndex], lotIndex)
+      : previous?.lot_number || "";
+    Alert.alert(
+      lotLabel ? `Lot ${lotLabel} re-generated` : "Lot re-generated",
+      "Review it, then tap Save to rebuild the files."
+    );
+  };
+  const finishLotRegenerationRef = useRef(finishLotRegeneration);
+  finishLotRegenerationRef.current = finishLotRegeneration;
+
+  // Foreground-only, one-at-a-time poll while a lot is being re-generated.
+  // Keyed by the record's lot and request time, so stage updates from the
+  // poll itself do not restart it. A dropped request is not a failed
+  // Re-Generate (the reading runs on the server), so it simply tries again.
+  const lotRegenerationPollKey = lotRegenerationPending
+    ? `${lotRegeneration.lot_id}|${lotRegeneration.lot_key}|${lotRegeneration.requested_at}`
+    : null;
+  useEffect(() => {
+    if (!lotRegenerationPollKey) return;
+    const contextAtStart = reportContextKey;
+    let stopped = false;
+    let inFlight = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const isForeground = (state: unknown) => state !== "background" && state !== "inactive";
+    const schedule = (delayMs = LOT_REGENERATION_POLL_MS) => {
+      if (timer) clearTimeout(timer);
+      timer = setTimeout(() => { void poll(); }, delayMs);
+    };
+    const poll = async () => {
+      timer = undefined;
+      if (stopped || inFlight) return;
+      // Paused in the background; the AppState listener resumes it.
+      if (!isForeground(AppState.currentState)) return;
+      // A screen load is already fetching the same record.
+      if (previewLoadingRef.current) {
+        schedule();
+        return;
+      }
+      const revisionAtStart = previewRequestRevisionRef.current;
+      inFlight = true;
+      try {
+        const data = await fetchPreviewPayload();
+        if (stopped || reportContextRef.current !== contextAtStart) return;
+        // A load started meanwhile and carries a newer answer.
+        if (previewRequestRevisionRef.current === revisionAtStart) {
+          const next = readLotRegeneration(data?.lot_regeneration);
+          if (!isLotRegenerationPending(next)) {
+            stopped = true;
+            finishLotRegenerationRef.current(data, next);
+            return;
+          }
+          setLotRegeneration(next);
+        }
+      } catch (error: any) {
+        if (stopped) return;
+        console.warn("Re-Generate status check failed:", error?.message || error);
+      } finally {
+        inFlight = false;
+      }
+      if (!stopped) schedule();
+    };
+    const appStateSubscription = AppState.addEventListener("change", (state) => {
+      if (stopped) return;
+      if (isForeground(state)) {
+        if (!inFlight) schedule(0);
+      } else if (timer) {
+        clearTimeout(timer);
+        timer = undefined;
+      }
+    });
+    schedule();
+    return () => {
+      stopped = true;
+      if (timer) clearTimeout(timer);
+      appStateSubscription?.remove();
+    };
+  }, [fetchPreviewPayload, lotRegenerationPollKey, reportContextKey]);
 
   useEffect(() => {
     const showSubscription = Keyboard.addListener("keyboardDidShow", () => {
@@ -656,6 +805,8 @@ const PreviewScreen = ({
   };
 
   const updateAppraiserSignature = (dataUrl: string | null) => {
+    // The fresh lot from a pending Re-Generate replaces the preview on screen.
+    if (lotRegenerationPendingRef.current) return;
     setPreviewData((prev: any) => {
       const next = { ...(prev || {}) };
       if (dataUrl) {
@@ -743,6 +894,7 @@ const PreviewScreen = ({
   }, [categorySpecs]);
 
   const changeLotSpec = (index: number, fieldName: string, value: string, options: { deleted?: boolean; added?: boolean } = {}) => {
+    if (lotRegenerationPendingRef.current) return;
     setPreviewData((prev: any) => {
       const newLots = [...(prev?.lots || [])];
       const lot = newLots[index] || {};
@@ -760,6 +912,7 @@ const PreviewScreen = ({
     lotIndex: number,
     entry: Pick<GalleryEntry, "globalIndex" | "url">
   ) => {
+    if (lotRegenerationPendingRef.current) return;
     Alert.alert(
       "Remove photo?",
       "The photo will be removed from this lot now and permanently deleted from storage after you Save or Submit. Closing without saving leaves storage unchanged.",
@@ -769,6 +922,8 @@ const PreviewScreen = ({
           text: "Remove",
           style: "destructive",
           onPress: () => {
+            // The AI may be reading this very photo; the server keeps it.
+            if (lotRegenerationPendingRef.current) return;
             setPreviewData((prev: any) =>
               removeLotPhotoReference(prev, lotIndex, entry)
             );
@@ -846,6 +1001,7 @@ const PreviewScreen = ({
       Alert.alert("Images added", response?.files_regeneration_queued ? "Files are regenerating with the added photos." : "Photos were added to this lot.");
     } catch (error: any) {
       if (!isCurrent()) return;
+      if (handleLotRegenerationConflict(error)) return;
       Alert.alert("Upload failed", error?.response?.data?.message || "Could not upload photos for this lot.");
     } finally {
       if (isCurrent()) setUploadingLotKey(null);
@@ -860,6 +1016,7 @@ const PreviewScreen = ({
     if (isAsset && (previewBusyRef.current || reportContextRef.current !== reportContextKey)) {
       return;
     }
+    if (lotRegenerationPendingRef.current) return;
     setPreviewData((prev: any) => {
       const newLots = [...(prev?.lots || [])];
       if (!newLots[index]) return prev;
@@ -927,6 +1084,69 @@ const PreviewScreen = ({
               return { ...prev, lots };
             });
             setHasChanges(true);
+          },
+        },
+      ]
+    );
+  };
+
+  // Per-lot Re-Generate (owner decision 2026-10-11): the AI re-reads one
+  // lot's photos and replaces its AI-written fields. The server saves the
+  // whole on-screen preview first (other lots' edits are kept), then queues
+  // the reading; the poll above brings the fresh lot back for review. Files
+  // are rebuilt only by the next Save.
+  const regenerateLot = (lot: any, lotIndex: number) => {
+    if (!canRegenerateLots || previewBusyRef.current) return;
+    const contextAtOpen = reportContextKey;
+    const revisionAtOpen = previewRequestRevisionRef.current;
+    const lotLabel = getLotDisplayNumber(lot, lotIndex);
+    const lotKey = getLotUploadKey(lot, lotIndex);
+    Alert.alert(
+      `Re-Generate Lot ${lotLabel}?`,
+      "The AI will re-read this lot's photos, including any you added, and replace its title, description, condition report, details and value. Your edits on this lot will be replaced. The lot number and photos stay, and your other edits are saved first.",
+      [
+        { text: "Cancel", style: "cancel" },
+        {
+          text: "Re-Generate",
+          style: "destructive",
+          onPress: async () => {
+            if (reportContextRef.current !== contextAtOpen ||
+                previewRequestRevisionRef.current !== revisionAtOpen ||
+                previewBusyRef.current) return;
+            previewBusyRef.current = true;
+            lotRegenerationPendingRef.current = true;
+            const requestRevision = ++previewRequestRevisionRef.current;
+            const isCurrent = () =>
+              reportContextRef.current === contextAtOpen &&
+              previewRequestRevisionRef.current === requestRevision;
+            resetAssetLotSelection();
+            setStartingRegenerationKey(lotKey);
+            try {
+              // The same snapshot Save posts, so the server stores exactly
+              // what is on screen before the reading starts.
+              const previewForRequest = applyDamageAnalysisLotPolicy(previewDataRef.current);
+              setPreviewData(previewForRequest);
+              const response = isLotListing
+                ? await lotListingService.regenerateLot(reportId, lotKey, previewForRequest)
+                : await assetService.regenerateLot(reportId, lotKey, previewForRequest);
+              if (!isCurrent()) return;
+              const payload = response?.data || {};
+              if (payload.preview_data) {
+                setPreviewData(applyDamageAnalysisLotPolicy(payload.preview_data));
+              }
+              if (Array.isArray(payload.imageUrls)) {
+                setImageUrls(payload.imageUrls);
+                setImageCount(payload.image_count || payload.imageUrls.length);
+              }
+              setHasChanges(false);
+              setLotRegeneration(readLotRegeneration(payload.lot_regeneration));
+            } catch (error: any) {
+              if (!isCurrent()) return;
+              if (handleLotRegenerationConflict(error)) return;
+              Alert.alert("Error", error?.response?.data?.message || "Could not start Re-Generate.");
+            } finally {
+              if (isCurrent()) setStartingRegenerationKey(null);
+            }
           },
         },
       ]
@@ -1062,24 +1282,35 @@ const PreviewScreen = ({
     const confirmationRevision = previewRequestRevisionRef.current;
     let confirmed = false;
     const isSubmittedMode = resubmitMode;
-    Alert.alert(
-      isAsset || isLotListing
-        ? generationLabel
-        : isAssignedApproval ? "Submit and Approve" : (isSubmittedMode ? "Regenerate Files" : "Submit Report"),
-      isAssignedApproval
+    // Asset and Lot Listing: Save keeps the edits exactly as shown and only
+    // rebuilds the files (owner decision 2026-10-11); the second sentence
+    // says what happens to the files next. Real Estate keeps its own wording.
+    const saveConfirmationMessage = isAsset || isLotListing
+      ? [
+          "Saves your edits exactly as shown and rebuilds the Excel, PDF and Word files. Nothing is re-read by the AI.",
+          isAssignedApproval
+            ? "The report is approved once the files are rebuilt."
+            : isLotListing
+              ? "The files are released automatically once they are built."
+              : isSubmittedMode
+                ? "The approval and release steps then continue."
+                : "Any assigned approval and release steps follow.",
+        ].join(" ")
+      : isAssignedApproval
         ? "This will save your latest edits, regenerate the report files, and approve the report after generation succeeds."
         : isSubmittedMode
-        ? isLotListing
-          ? "This will save your latest edits and regenerate all lot listing files. They will be released automatically after generation succeeds."
-          : "This will save your latest edits, regenerate all report files, and continue the approval and release workflow."
-        : isLotListing
-          ? "This will save your latest edits, generate all lot listing files, and release them automatically after generation succeeds."
-          : "This will save your latest edits, generate files, and continue through any assigned approval and release steps.",
+          ? "This will save your latest edits, regenerate all report files, and continue the approval and release workflow."
+          : "This will save your latest edits, generate files, and continue through any assigned approval and release steps.";
+    Alert.alert(
+      isAsset || isLotListing
+        ? saveLabel
+        : isAssignedApproval ? "Submit and Approve" : (isSubmittedMode ? "Regenerate Files" : "Submit Report"),
+      saveConfirmationMessage,
       [
         { text: "Cancel", style: "cancel" },
         {
           text: isAsset || isLotListing
-            ? generationLabel
+            ? saveLabel
             : isAssignedApproval ? "Submit" : (isSubmittedMode ? "Resubmit" : "Submit"),
           onPress: async () => {
             if (confirmed || reportContextRef.current !== submissionContext || previewBusyRef.current ||
@@ -1141,10 +1372,13 @@ const PreviewScreen = ({
                     : "Report submitted. Files are being generated."
                 );
               }
+              // A successful Save clears a failed Re-Generate on the server.
+              setLotRegeneration(null);
               if (onSuccess) onSuccess();
               onBack();
             } catch (error: any) {
               if (!isCurrent()) return;
+              if (handleLotRegenerationConflict(error)) return;
               console.error("Error submitting:", error);
               Alert.alert("Error", error.response?.data?.message || "Failed to submit report");
             } finally {
@@ -1614,6 +1848,82 @@ const PreviewScreen = ({
     );
   };
 
+  // Lot number shown for the lot named by the Re-Generate record.
+  const lotRegenerationLabel = () => {
+    if (!lotRegeneration) return "";
+    const lots: any[] = Array.isArray(previewData?.lots) ? previewData.lots : [];
+    const index = lots.findIndex((lot, lotIndex) =>
+      isLotRegenerationTarget(lotRegeneration, lot, getLotUploadKey(lot, lotIndex)));
+    return index >= 0
+      ? getLotDisplayNumber(lots[index], index)
+      : lotRegeneration.lot_number || "";
+  };
+
+  // Progress banner at the top of the lots while the AI re-reads one lot. It
+  // shows for every viewer (an assigned approver included), because the
+  // report is locked for all of them until the fresh lot is written.
+  const renderLotRegenerationBanner = () => {
+    if (!lotRegenerationPending) return null;
+    const label = lotRegenerationLabel();
+    const stageText = lotRegenerationStageText(lotRegeneration.stage);
+    return (
+      <View
+        style={[styles.regenerationBanner, { borderColor: `${themeColor}55`, backgroundColor: `${themeColor}0F` }]}
+        accessibilityLiveRegion="polite"
+      >
+        <ActivityIndicator size="small" color={themeColor} />
+        <Text style={styles.regenerationBannerText}>
+          {`${label ? `Re-generating Lot ${label}` : "Re-generating a lot"} — ${stageText || "The AI is reading its photos…"}`}
+        </Text>
+      </View>
+    );
+  };
+
+  // The per-lot Re-Generate pill in a lot's header, styled like "Add photos".
+  // Owner mode only: hidden for an assigned approver and for Real Estate.
+  const renderRegenerateLotButton = (lot: any, lotIndex: number) => {
+    if (!canRegenerateLots) return null;
+    const lotKey = getLotUploadKey(lot, lotIndex);
+    const lotLabel = getLotDisplayNumber(lot, lotIndex);
+    const working =
+      startingRegenerationKey === lotKey ||
+      (lotRegenerationPending && isLotRegenerationTarget(lotRegeneration, lot, lotKey));
+    const disabled = previewBusyRef.current;
+    return (
+      <TouchableOpacity
+        style={[styles.addPhotosButton, disabled && styles.disabledButton]}
+        onPress={() => regenerateLot(lot, lotIndex)}
+        disabled={disabled}
+        accessibilityRole="button"
+        accessibilityLabel={working ? `Re-generating lot ${lotLabel}` : `Re-Generate lot ${lotLabel}`}
+        accessibilityState={{ disabled, busy: working }}
+      >
+        {working ? (
+          <ActivityIndicator size="small" color={themeColor} />
+        ) : (
+          <Feather name="refresh-cw" size={14} color={themeColor} />
+        )}
+        <Text style={[styles.addPhotosText, { color: themeColor }]}>
+          {working ? "Re-generating…" : "Re-Generate"}
+        </Text>
+      </TouchableOpacity>
+    );
+  };
+
+  // A failed reading changed nothing on the lot; the server clears the record
+  // on the next Save.
+  const renderLotRegenerationFailure = (lot: any, lotIndex: number) => {
+    if (lotRegeneration?.status !== "failed" ||
+        !isLotRegenerationTarget(lotRegeneration, lot, getLotUploadKey(lot, lotIndex))) {
+      return null;
+    }
+    return (
+      <Text style={styles.regenerationFailedText} accessibilityRole="alert">
+        {`Re-Generate failed: ${lotRegeneration.error || "The lot was not changed. You can try again."}`}
+      </Text>
+    );
+  };
+
   // Asset Preview Content
   const renderAssetPreview = () => {
     const lots: AssetLot[] = Array.isArray(previewData?.lots) ? previewData.lots : [];
@@ -1744,6 +2054,7 @@ const PreviewScreen = ({
               <Text style={[styles.sectionCountText, { color: themeColor }]}>{lots.length}</Text>
             </View>
           </View>
+          {renderLotRegenerationBanner()}
           {lots.map((lot, idx) => {
             const lotImages = getLotPhotoEntries(lot);
             const lotUploadKey = getLotUploadKey(lot, idx);
@@ -1772,17 +2083,21 @@ const PreviewScreen = ({
                       />
                     </TouchableOpacity>
                   ) : null}
-                  <Text style={styles.lotTitle}>Lot {getLotDisplayNumber(lot, idx)}</Text>
-                  <TouchableOpacity 
-                    onPress={() => deleteLot(idx)}
-                    style={styles.deleteLotBtn}
-                    accessibilityRole="button"
-                    accessibilityLabel={`Delete lot ${getLotDisplayNumber(lot, idx)}`}
-                    disabled={previewBusyRef.current}
-                  >
-                    <Feather name="trash-2" size={16} color="#EF4444" />
-                  </TouchableOpacity>
+                  <Text style={[styles.lotTitle, styles.lotHeaderTitle]}>Lot {getLotDisplayNumber(lot, idx)}</Text>
+                  <View style={styles.lotHeaderActions}>
+                    {renderRegenerateLotButton(lot, idx)}
+                    <TouchableOpacity
+                      onPress={() => deleteLot(idx)}
+                      style={styles.deleteLotBtn}
+                      accessibilityRole="button"
+                      accessibilityLabel={`Delete lot ${getLotDisplayNumber(lot, idx)}`}
+                      disabled={previewBusyRef.current}
+                    >
+                      <Feather name="trash-2" size={16} color="#EF4444" />
+                    </TouchableOpacity>
+                  </View>
                 </View>
+                {renderLotRegenerationFailure(lot, idx)}
 
                 {/* Lot Images */}
                 <View style={styles.lotImagesContainer}>
@@ -1791,9 +2106,12 @@ const PreviewScreen = ({
                         <Feather name="image" size={12} color="#6B7280" /> Photos ({lotImages.length})
                       </Text>
                       <TouchableOpacity
-                        style={[styles.addPhotosButton, uploadingLotKey === lotUploadKey && styles.disabledButton]}
+                        style={[
+                          styles.addPhotosButton,
+                          (uploadingLotKey === lotUploadKey || lotRegenerationPending) && styles.disabledButton,
+                        ]}
                         onPress={() => addPhotosToLot(lot, idx)}
-                        disabled={uploadingLotKey === lotUploadKey}
+                        disabled={uploadingLotKey === lotUploadKey || lotRegenerationPending}
                       >
                         {uploadingLotKey === lotUploadKey ? (
                           <ActivityIndicator size="small" color={themeColor} />
@@ -2203,6 +2521,7 @@ const PreviewScreen = ({
               <Text style={[styles.sectionCountText, { color: themeColor }]}>{lots.length}</Text>
             </View>
           </View>
+          {renderLotRegenerationBanner()}
           {lots.map((lot, idx) => {
             const lotImages = getLotPhotoEntries(lot);
             const lotUploadKey = getLotUploadKey(lot, idx);
@@ -2210,11 +2529,15 @@ const PreviewScreen = ({
             return (
               <View key={idx} style={styles.lotCard}>
                 <View style={[styles.lotHeader, { borderTopColor: themeColor }]}>
-                  <Text style={styles.lotTitle}>Lot {getLotDisplayNumber(lot, idx)}</Text>
-                  <View style={[styles.badge, { backgroundColor: "#F3F4F6" }]}>
-                    <Text style={[styles.badgeText, { color: "#6B7280" }]}>{lot.sub_mode || "bundle"}</Text>
+                  <Text style={[styles.lotTitle, styles.lotHeaderTitle]}>Lot {getLotDisplayNumber(lot, idx)}</Text>
+                  <View style={styles.lotHeaderActions}>
+                    {renderRegenerateLotButton(lot, idx)}
+                    <View style={[styles.badge, { backgroundColor: "#F3F4F6" }]}>
+                      <Text style={[styles.badgeText, { color: "#6B7280" }]}>{lot.sub_mode || "bundle"}</Text>
+                    </View>
                   </View>
                 </View>
+                {renderLotRegenerationFailure(lot, idx)}
 
                 {/* Lot Images */}
                 <View style={styles.lotImagesContainer}>
@@ -2223,9 +2546,12 @@ const PreviewScreen = ({
                         <Feather name="image" size={12} color="#6B7280" /> Photos ({lotImages.length})
                       </Text>
                       <TouchableOpacity
-                        style={[styles.addPhotosButton, uploadingLotKey === lotUploadKey && styles.disabledButton]}
+                        style={[
+                          styles.addPhotosButton,
+                          (uploadingLotKey === lotUploadKey || lotRegenerationPending) && styles.disabledButton,
+                        ]}
                         onPress={() => addPhotosToLot(lot, idx)}
-                        disabled={uploadingLotKey === lotUploadKey}
+                        disabled={uploadingLotKey === lotUploadKey || lotRegenerationPending}
                       >
                         {uploadingLotKey === lotUploadKey ? (
                           <ActivityIndicator size="small" color={themeColor} />
@@ -2749,9 +3075,9 @@ const PreviewScreen = ({
                     </Text>
                     <Text style={styles.heroSubtitle}>
                       {isAssignedApproval
-                        ? `Status: ${status} - Edit, regenerate, and approve`
+                        ? `Status: ${status} - Edit, save and approve`
                         : mode === "submitted"
-                        ? `Status: ${status} - Edit and regenerate files`
+                        ? `Status: ${status} - Edit, then Save to rebuild the files`
                         : status === "preview"
                           ? isLotListing
                             ? "Edit and generate approved files"
@@ -2874,10 +3200,13 @@ const PreviewScreen = ({
             const submitDisabled =
               previewBusyRef.current || (!isAssignedApproval && !isLotListing && !isAsset &&
                 (reportType === "RealEstate" ? !shouldResubmitRealEstate(status, mode) : mode === "pending") && hasChanges);
+            // Asset and Lot Listing show one footer action, Save (or Save &
+            // Approve); a pending Re-Generate keeps it disabled through
+            // previewBusyRef.
             const submitText = filesGenerating
               ? "Generating files..."
               : isAsset || isLotListing
-                ? generationLabel
+                ? saveLabel
                 : isAssignedApproval ? "Submit & Approve" : resubmitMode ? "Resubmit" : "Submit Report";
             return (
           <TouchableOpacity
@@ -3580,6 +3909,40 @@ const styles = StyleSheet.create({
     padding: 8,
     backgroundColor: "#FEE2E2",
     borderRadius: 8,
+  },
+  // Lets a long lot number shrink beside the header actions on narrow phones.
+  lotHeaderTitle: {
+    flexShrink: 1,
+    marginRight: 8,
+  },
+  lotHeaderActions: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+  },
+  regenerationBanner: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+    borderWidth: 1,
+    borderRadius: 12,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    marginBottom: 12,
+  },
+  regenerationBannerText: {
+    flex: 1,
+    fontSize: 13,
+    fontWeight: "700",
+    color: "#111827",
+  },
+  regenerationFailedText: {
+    paddingHorizontal: 16,
+    paddingVertical: 8,
+    fontSize: 12,
+    fontWeight: "700",
+    color: "#DC2626",
+    backgroundColor: "#FEF2F2",
   },
   lotImagesContainer: {
     padding: 12,
