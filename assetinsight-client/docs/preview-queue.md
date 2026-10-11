@@ -1,5 +1,32 @@
 # Preview queue reliability — 2026-10-03
 
+## Save and per-lot Re-Generate — 2026-10-11 (local)
+
+Owner decision: the single footer action is split in two.
+
+- **Save** (accessible name "Save preview"; "Save & Approve" for an assigned
+  Asset approver) is the previous Save & Generate / Save & Regenerate path,
+  unchanged: one submit/resubmit request with the complete on-screen snapshot,
+  files rebuilt from it. The AI never runs again on saved work; the button's
+  title says so.
+- **Re-Generate** is a per-lot button (Lot Listing card header; Asset phone
+  card header and desktop Actions column). It asks first
+  (`lotRegenerationConfirmMessage`), then posts the on-screen preview to
+  `POST /lot-listing/:id/preview/lots/:lotKey/regenerate` or
+  `POST /asset/:id/preview/lots/:lotKey/regenerate`. The API saves that
+  preview and queues an AI re-read of the one lot's photos (the first
+  reading's photo limit, photos added since always included). The lot's
+  title, description, condition report, details, category, serial, value,
+  item condition and damage are replaced; lot number, photos, auction
+  settings and Condition / Completeness / Legal choices stay.
+- While the server reports `lot_regeneration` queued/processing, the editor is
+  read-only with a status banner (`useLotRegeneration` polls the preview every
+  4 s, skipping hidden tabs) and the API refuses saves, uploads and generation
+  with 409 `LOT_REGENERATION_PENDING`. Reopening a preview resumes the wait.
+  When the record clears, the fresh lot is shown for review; files are built
+  on the next Save. A failed reading changes nothing and is shown on the lot
+  until the next Save. Drafts and assigned approvers have no Re-Generate.
+
 ## Reviewed specification authority — 2026-10-08 (local)
 
 Asset/Lot spec edits, explicit blanks and deletions now replace earlier CR/Excel

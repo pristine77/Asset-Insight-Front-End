@@ -1,7 +1,7 @@
 "use client";
 
 import React, { useEffect, useLayoutEffect, useRef, useState } from "react";
-import { Send, AlertCircle, Image, ChevronLeft, ChevronRight, X, RefreshCw, Download, Printer, Upload, Trash2, GitMerge as MergeIcon } from "lucide-react";
+import { Save, AlertCircle, Image, ChevronLeft, ChevronRight, X, RefreshCw, Download, Printer, Upload, GitMerge as MergeIcon } from "lucide-react";
 import { toast } from "@/components/ui/toast";
 import {
   getPreviewData, 
@@ -10,11 +10,22 @@ import {
   resubmitReport,
   getAssetCategorySpecs,
   uploadPreviewLotImages,
+  regenerateAssetPreviewLot,
   type AssetCategorySpec,
 } from "@/services/assets";
+import {
+  SAVE_PREVIEW_TITLE,
+  isLotRegenerationFor,
+  lotRegenerationConfirmMessage,
+  lotRegenerationLotLabel,
+  lotRegenerationStageText,
+  readLotRegeneration,
+} from "@/lib/lotRegeneration";
+import { useLotRegeneration } from "@/components/reports/useLotRegeneration";
 import { mergeSubmittedPreviewData } from "@/lib/previewSaveMerge";
 import BottomDrawer from "@/components/BottomDrawer";
 import AuctioneerSpecsEditor from "@/components/reports/AuctioneerSpecsEditor";
+import FloatingPhotoViewer from "@/components/reports/FloatingPhotoViewer";
 import {
   normalizePreviewLocationData,
 } from "@/lib/browserLocation";
@@ -444,6 +455,32 @@ export default function PreviewModal({
   const effectiveResubmitMode = isAssignedApprovalMode || (status
     ? status === "pending_approval" || status === "approved" || status === "error"
     : isResubmitMode);
+  const loadAssetPreview = (id: string) =>
+    loadPreviewDataOverride
+      ? loadPreviewDataOverride(id)
+      : isResubmitMode
+        ? getSubmittedPreviewData(id)
+        : getPreviewData(id);
+  // Re-Generate works on a saved report the owner is editing; drafts and
+  // assigned approvers use Save only.
+  const canRegenerateLots = Boolean(reportId) && !draftPreviewId && !isAssignedApprovalMode;
+  const { lotRegeneration, lotRegenerationPending, setLotRegeneration } = useLotRegeneration({
+    enabled: canRegenerateLots && isOpen,
+    reportId,
+    load: loadAssetPreview,
+    onFinished: (response, finished) => {
+      applyAssetPreviewResponse(response);
+      setHasChanges(false);
+      toast.success(
+        `${lotRegenerationLotLabel(finished, "The lot")} was re-generated. Review it, then Save to rebuild the files.`
+      );
+    },
+    onFailed: (failed) => {
+      toast.error(failed.error || "Re-Generate failed. Nothing on the lot was changed.");
+    },
+  });
+  // A lot being re-read keeps the editor read-only until the fresh lot arrives.
+  const editorLocked = activeMutation !== null || lotRegenerationPending;
   const focusStateRef = useRef<{
     fieldId: string | null;
     selectionStart: number | null;
@@ -547,6 +584,25 @@ export default function PreviewModal({
     setExpandedLotTextEditor(null);
   }
 
+  /** Puts a preview read (load, or a finished Re-Generate) on screen. */
+  const applyAssetPreviewResponse = (response: any) => {
+    const data = response?.data || {};
+    setStatus(data.status);
+    setFilesGenerating(Boolean(data.files_generating));
+    setFilesRegenerating(Boolean(data.files_regenerating));
+    setDeclineReason(data.decline_reason || "");
+    setPreviewData(
+      applyDamageAnalysisLotPolicy(
+        normalizePreviewLocationData(data.preview_data || {})
+      )
+    );
+    setPreviewFiles(data.preview_files || null);
+    setGroupingMode(data.grouping_mode);
+    setImageCount(data.image_count);
+    setImageUrls(data.imageUrls || []);
+    setLotRegeneration(readLotRegeneration(data.lot_regeneration));
+  };
+
   const loadPreviewData = async () => {
     const requestId = loadRequestRef.current + 1;
     loadRequestRef.current = requestId;
@@ -556,29 +612,12 @@ export default function PreviewModal({
       setFilesRegenerating(false);
       // Use different endpoint based on mode
       const [response, categorySpecResponse] = await Promise.all([
-        loadPreviewDataOverride
-          ? loadPreviewDataOverride(reportId)
-          : isResubmitMode
-            ? getSubmittedPreviewData(reportId)
-            : getPreviewData(reportId),
+        loadAssetPreview(reportId),
         getAssetCategorySpecs().catch(() => ({ categories: [], specs: [] })),
       ]);
       if (loadRequestRef.current !== requestId) return;
       setCategorySpecs(categorySpecResponse.specs || []);
-      setStatus(response.data.status);
-      setFilesGenerating(Boolean((response.data as any).files_generating));
-      setFilesRegenerating(Boolean((response.data as any).files_regenerating));
-      setDeclineReason((response.data as any).decline_reason || "");
-      const nextPreviewData = response.data.preview_data || {};
-      setPreviewData(
-        applyDamageAnalysisLotPolicy(
-          normalizePreviewLocationData(nextPreviewData)
-        )
-      );
-      setPreviewFiles((response.data as any).preview_files || null);
-      setGroupingMode(response.data.grouping_mode);
-      setImageCount(response.data.image_count);
-      setImageUrls(response.data.imageUrls || []);
+      applyAssetPreviewResponse(response);
       setLotPage(1);
       setSelectedLotIndexes(new Set());
       setHasChanges(false);
@@ -592,7 +631,7 @@ export default function PreviewModal({
   };
 
   const handleSubmitForApproval = async () => {
-    if (isMutationLocked()) return;
+    if (isMutationLocked() || lotRegenerationPending) return;
     if (!previewData) {
       toast.error("No preview data available");
       return;
@@ -926,6 +965,75 @@ export default function PreviewModal({
       finishMutation(mutation);
     }
   };
+
+  /**
+   * Re-Generate one lot: after confirmation, the on-screen preview is saved
+   * and the AI re-reads the lot's photos in the background. The editor stays
+   * read-only until the fresh lot arrives (useLotRegeneration polls).
+   */
+  const handleRegenerateLot = async (lot: any, index: number) => {
+    if (!canRegenerateLots || isMutationLocked() || lotRegenerationPending) return;
+    if (filesGenerating || filesRegenerating || !previewData) return;
+    const lotLabel = `Lot ${getLotDisplayNumber(lot, index)}`;
+    if (!window.confirm(lotRegenerationConfirmMessage(lotLabel))) return;
+    const mutation = beginMutation("regenerate");
+    if (!mutation) return;
+    const mutationContext = previewContextRef.current;
+    try {
+      const previewForRequest = applyDamageAnalysisLotPolicy(previewData);
+      const response = await regenerateAssetPreviewLot(
+        reportId,
+        getLotUploadKey(lot, index),
+        previewForRequest
+      );
+      if (previewContextRef.current !== mutationContext) return;
+      if (response.data?.preview_data) {
+        setPreviewData(applyDamageAnalysisLotPolicy(response.data.preview_data));
+      }
+      if (Array.isArray(response.data?.imageUrls)) setImageUrls(response.data.imageUrls);
+      setLotRegeneration(readLotRegeneration(response.data?.lot_regeneration));
+      if (!hasEditsSince(mutation)) setHasChanges(false);
+      toast.info(response.message || `Re-generating ${lotLabel}.`);
+    } catch (error: any) {
+      if (previewContextRef.current === mutationContext) {
+        const data = error?.response?.data;
+        if (data?.lot_regeneration) setLotRegeneration(readLotRegeneration(data.lot_regeneration));
+        toast.error(data?.message || "Could not start Re-Generate.");
+      }
+    } finally {
+      finishMutation(mutation);
+    }
+  };
+
+  /** Re-Generate control for one lot, shared by the phone cards and the desktop table. */
+  const renderRegenerateLotButton = (lot: any, idx: number, size: "mobile" | "desktop") => {
+    if (!canRegenerateLots) return null;
+    const regenerating =
+      lotRegenerationPending && isLotRegenerationFor(lotRegeneration, lot, getLotUploadKey(lot, idx));
+    return (
+      <button
+        type="button"
+        onClick={() => void handleRegenerateLot(lot, idx)}
+        disabled={editorLocked || loading || filesGenerating || filesRegenerating}
+        aria-label={`Re-Generate lot ${getLotDisplayNumber(lot, idx)}`}
+        title="Have the AI re-read this lot's photos and replace its title, description, condition report, details and value."
+        className={`app-button app-button--secondary !rounded-md !text-xs ${
+          size === "mobile" ? "!min-h-7 !px-2 !py-1" : "!min-h-8 !px-2.5 !py-1.5"
+        }`}
+      >
+        <RefreshCw className={`h-3.5 w-3.5 ${regenerating ? "animate-spin" : ""}`} />
+        {regenerating ? "Re-generating…" : "Re-Generate"}
+      </button>
+    );
+  };
+
+  const renderRegenerateLotFailure = (lot: any, idx: number) =>
+    lotRegeneration?.status === "failed" &&
+    isLotRegenerationFor(lotRegeneration, lot, getLotUploadKey(lot, idx)) ? (
+      <p className="mt-1 text-xs font-medium text-[var(--app-danger)]" role="alert">
+        Re-Generate failed: {lotRegeneration.error || "Nothing on the lot was changed."}
+      </p>
+    ) : null;
 
   const specsByCategory = React.useMemo(
     () =>
@@ -1444,11 +1552,18 @@ export default function PreviewModal({
   const mutationMessage =
     activeMutation === "upload"
       ? "Uploading images and updating this preview…"
-      : activeMutation === "submit"
-        ? effectiveResubmitMode
-          ? "Saving changes and queuing regenerated report files…"
-          : "Saving changes and queuing report files…"
-        : "";
+      : activeMutation === "regenerate"
+        ? "Saving your edits and starting Re-Generate…"
+        : activeMutation === "submit"
+          ? effectiveResubmitMode
+            ? "Saving changes and queuing regenerated report files…"
+            : "Saving changes and queuing report files…"
+          : "";
+  const lockMessage = activeMutation
+    ? `${mutationMessage} Keep this page open until it finishes.`
+    : lotRegenerationPending
+      ? `Re-generating ${lotRegenerationLotLabel(lotRegeneration)}. ${lotRegenerationStageText(lotRegeneration?.stage)} You can close this preview; the lot updates when it's done.`
+      : "";
   const specPdfUrl = previewFiles?.spec_pdf;
   const crDocxUrl = previewFiles?.cr_docx;
 
@@ -1519,28 +1634,28 @@ export default function PreviewModal({
       open={isOpen}
       onClose={requestClose}
       title="Preview & Edit Report"
-      description="Review your edits, then save and generate all report files in one action. Existing approval and release steps still apply."
+      description="Review your edits, then Save: they are kept exactly as shown and all report files are rebuilt. Use Re-Generate on a lot to have the AI re-read its photos. Existing approval and release steps still apply."
       fullscreen
       dismissOnBackdrop={false}
       closeDisabled={activeMutation !== null}
     >
       <div
         className="preview-editor relative min-h-full bg-[var(--app-bg)] text-[var(--app-text)]"
-        aria-busy={activeMutation !== null}
+        aria-busy={editorLocked}
       >
-      {activeMutation ? (
+      {editorLocked ? (
         <div
           className="sticky top-0 z-[70] mb-3 flex items-center gap-3 border border-[var(--app-info-border)] bg-[var(--app-info-soft)] px-4 py-3 text-sm font-semibold text-[var(--app-text-strong)] shadow-sm"
           role="status"
           aria-live="polite"
         >
           <RefreshCw className="h-4 w-4 shrink-0 animate-spin text-[var(--app-info)]" />
-          <span>{mutationMessage} Keep this page open until it finishes.</span>
+          <span>{lockMessage}</span>
         </div>
       ) : null}
       <div
-        inert={activeMutation ? true : undefined}
-        className={activeMutation ? "pointer-events-none select-none opacity-60" : undefined}
+        inert={editorLocked ? true : undefined}
+        className={editorLocked ? "pointer-events-none select-none opacity-60" : undefined}
       >
       {status === "declined" && declineReason && (
         <div className="app-alert app-alert--error mb-4 flex items-start gap-3">
@@ -2018,105 +2133,28 @@ export default function PreviewModal({
 
           </div>
 
-          {/* Lot-Specific Photo Gallery Modal */}
+          {/* Lot photo viewer: a floating window that can be moved, resized,
+              minimized and maximized; Left/Right arrows step through photos. */}
           {galleryLotImages !== null && (
-            <div
-              className="fixed inset-0 z-50 flex flex-col bg-black/95"
-              role="dialog"
-              aria-modal="true"
-              aria-label="Lot photo gallery"
-              onClick={() => setGalleryLotImages(null)}
-            >
-              {/* Header */}
-              <div
-                className="flex items-center justify-between gap-3 bg-black/50 p-4"
-                onClick={(event) => event.stopPropagation()}
-              >
-                <div className="text-white text-sm font-medium">
-                  Photo {galleryLotImages.currentIdx + 1} of {galleryLotImages.entries.length}
-                </div>
-                <div className="flex items-center gap-2">
-                  <button
-                    type="button"
-                    onClick={() => {
-                      const current = galleryLotImages.entries[galleryLotImages.currentIdx];
-                      if (current) deleteLotImage(current.lotIndex, current);
-                    }}
-                    className="inline-flex items-center gap-2 rounded-lg bg-[var(--app-danger)] px-3 py-2 text-sm font-bold text-white shadow transition hover:opacity-90 focus:outline-none focus:ring-2 focus:ring-[var(--app-danger-ring)]"
-                    aria-label={`Remove photo ${galleryLotImages.currentIdx + 1}`}
-                  >
-                    <Trash2 className="h-4 w-4" />
-                    <span className="hidden sm:inline">Remove photo</span>
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setGalleryLotImages(null)}
-                    className="p-2 text-white transition-colors hover:text-gray-300"
-                    aria-label="Close photo gallery"
-                  >
-                    <X className="h-6 w-6" />
-                  </button>
-                </div>
-              </div>
-
-              {/* Main Image */}
-              <div className="flex-1 flex items-center justify-center p-4 relative" onClick={(e) => e.stopPropagation()}>
-                {galleryLotImages.currentIdx > 0 && (
-                  <button
-                    type="button"
-                    onClick={() => setGalleryLotImages(prev => prev ? { ...prev, currentIdx: prev.currentIdx - 1 } : null)}
-                    className="absolute left-4 text-white hover:text-gray-300 transition-colors bg-black/30 rounded-full p-2"
-                    aria-label="Previous photo"
-                  >
-                    <ChevronLeft className="h-8 w-8" />
-                  </button>
-                )}
-                {galleryLotImages.currentIdx < galleryLotImages.entries.length - 1 && (
-                  <button
-                    type="button"
-                    onClick={() => setGalleryLotImages(prev => prev ? { ...prev, currentIdx: prev.currentIdx + 1 } : null)}
-                    className="absolute right-4 text-white hover:text-gray-300 transition-colors bg-black/30 rounded-full p-2"
-                    aria-label="Next photo"
-                  >
-                    <ChevronRight className="h-8 w-8" />
-                  </button>
-                )}
-                { }
-                <img
-                  src={galleryLotImages.entries[galleryLotImages.currentIdx]?.url}
-                  alt={`Photo ${galleryLotImages.currentIdx + 1}`}
-                  decoding="async"
-                  className="max-w-full max-h-[60vh] object-contain rounded-lg shadow-sm"
-                />
-              </div>
-
-              {/* Thumbnail Strip */}
-              <div className="bg-black/70 p-3" onClick={(e) => e.stopPropagation()}>
-                <div className="flex gap-2 overflow-x-auto pb-2 justify-center">
-                  {galleryLotImages.entries.map((entry, i) => (
-                    <button
-                      type="button"
-                      key={`${entry.globalIndex ?? "url"}-${entry.url}`}
-                      onClick={() => setGalleryLotImages(prev => prev ? { ...prev, currentIdx: i } : null)}
-                      className={`flex-shrink-0 w-16 h-16 sm:w-20 sm:h-20 rounded-lg overflow-hidden cursor-pointer transition-all ${
-                        i === galleryLotImages.currentIdx 
-                          ? 'ring-2 ring-white ring-offset-2 ring-offset-black scale-105' 
-                          : 'opacity-60 hover:opacity-100'
-                      }`}
-                    >
-                      { }
-                      <img
-                        src={entry.url}
-                        alt={`Photo ${i + 1} thumbnail`}
-                        loading="lazy"
-                        decoding="async"
-                        className="h-full w-full object-cover"
-                      />
-                    </button>
-                  ))}
-                </div>
-              </div>
-            </div>
+            <FloatingPhotoViewer
+              title={(() => {
+                const lotIndex = galleryLotImages.entries[0]?.lotIndex ?? 0;
+                return `Lot ${getLotDisplayNumber(lotsArray[lotIndex], lotIndex)}`;
+              })()}
+              entries={galleryLotImages.entries.map((entry) => ({
+                url: entry.url,
+                key: `${entry.globalIndex ?? "url"}-${entry.url}`,
+              }))}
+              index={galleryLotImages.currentIdx}
+              onIndexChange={(currentIdx) =>
+                setGalleryLotImages((prev) => (prev ? { ...prev, currentIdx } : null))
+              }
+              onClose={() => setGalleryLotImages(null)}
+              onRemove={(photoIndex) => {
+                const entry = galleryLotImages.entries[photoIndex];
+                if (entry) deleteLotImage(entry.lotIndex, entry);
+              }}
+            />
           )}
 
           {/* Assets/Lots */}
@@ -2164,14 +2202,18 @@ export default function PreviewModal({
                                 {renderLotSelectionCheckbox(lot, idx, "mobile")}
                                 <div className="text-sm font-semibold text-[var(--app-text)]">Lot {getLotDisplayNumber(lot, idx)}</div>
                               </div>
-                              <button
-                                onClick={() => deleteLot(idx)}
-                                aria-label={`Delete lot ${idx + 1}`}
-                                className="app-button app-button--danger !min-h-7 !rounded-md !px-2 !py-1 !text-xs"
-                              >
-                                Delete
-                              </button>
+                              <div className="flex items-center gap-2">
+                                {renderRegenerateLotButton(lot, idx, "mobile")}
+                                <button
+                                  onClick={() => deleteLot(idx)}
+                                  aria-label={`Delete lot ${idx + 1}`}
+                                  className="app-button app-button--danger !min-h-7 !rounded-md !px-2 !py-1 !text-xs"
+                                >
+                                  Delete
+                                </button>
+                              </div>
                             </div>
+                            {renderRegenerateLotFailure(lot, idx)}
                             {/* Lot Images */}
                             {(() => {
                               const lotImages = getLotPhotoEntries(lot);
@@ -2376,15 +2418,15 @@ export default function PreviewModal({
                       <table className="w-full min-w-[1280px] table-fixed text-sm border border-[var(--app-border)] rounded-lg overflow-hidden">
                         <thead className="bg-[var(--app-panel-alt)] text-[var(--app-text-muted)]">
                           <tr>
-                            <th className="w-[7%] px-2 py-2 text-left">Lot #</th>
+                            <th className="w-[6%] px-2 py-2 text-left">Lot #</th>
                             <th className="w-[13%] px-2 py-2 text-left">Photos</th>
                             <th className="w-[12%] px-2 py-2 text-left">Title</th>
-                            <th className="w-[13%] px-2 py-2 text-left">Category</th>
+                            <th className="w-[12%] px-2 py-2 text-left">Category</th>
                             <th className="w-[15%] px-2 py-2 text-left">Description</th>
                             <th className="w-[14%] px-2 py-2 text-left">Specs</th>
-                            <th className="w-[11%] px-2 py-2 text-left">Selections / valuations</th>
-                            <th className="w-[11%] px-2 py-2 text-left">Value</th>
-                            <th className="w-[4%] px-2 py-2 text-left">Actions</th>
+                            <th className="w-[10%] px-2 py-2 text-left">Selections / valuations</th>
+                            <th className="w-[10%] px-2 py-2 text-left">Value</th>
+                            <th className="w-[8%] px-2 py-2 text-left">Actions</th>
                           </tr>
                         </thead>
                         <tbody>
@@ -2569,13 +2611,17 @@ export default function PreviewModal({
                                 />
                               </td>
                               <td className="px-2 py-2 align-top">
-                                <button
-                                  onClick={() => deleteLot(idx)}
-                                  aria-label={`Delete lot ${idx + 1}`}
-                                  className="app-button app-button--danger !min-h-8 !rounded-md !px-2.5 !py-1.5 !text-xs"
-                                >
-                                  Delete
-                                </button>
+                                <div className="flex flex-col items-stretch gap-1.5">
+                                  {renderRegenerateLotButton(lot, idx, "desktop")}
+                                  <button
+                                    onClick={() => deleteLot(idx)}
+                                    aria-label={`Delete lot ${idx + 1}`}
+                                    className="app-button app-button--danger !min-h-8 !rounded-md !px-2.5 !py-1.5 !text-xs"
+                                  >
+                                    Delete
+                                  </button>
+                                  {renderRegenerateLotFailure(lot, idx)}
+                                </div>
                               </td>
                             </tr>
                             <tr className={i % 2 === 0 ? "bg-[var(--app-panel)]" : "bg-[var(--app-panel-alt)]"}>
@@ -2894,24 +2940,24 @@ export default function PreviewModal({
               <button
                 onClick={handleSubmitForApproval}
                 disabled={
-                  activeMutation !== null ||
+                  editorLocked ||
                   loading ||
                   locationBusy ||
                   workflowLocked
                 }
                 className="app-button app-button--primary"
+                aria-label={isAssignedApprovalMode ? "Save and approve preview" : "Save preview"}
+                title={SAVE_PREVIEW_TITLE}
               >
-                {effectiveResubmitMode ? <RefreshCw className="h-4 w-4" /> : <Send className="h-4 w-4" />}
+                {submitting ? <RefreshCw className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}
                 <span>
                   {submitting
-                    ? "Saving & queuing files..."
+                    ? "Saving..."
                     : workflowLocked
                       ? "Generating files..."
                       : isAssignedApprovalMode
-                        ? "Save, Regenerate & Approve"
-                        : effectiveResubmitMode
-                          ? "Save & Regenerate"
-                          : "Save & Generate"}
+                        ? "Save & Approve"
+                        : "Save"}
                 </span>
               </button>
             </div>

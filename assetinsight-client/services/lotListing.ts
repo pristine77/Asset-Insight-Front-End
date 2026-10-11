@@ -1,3 +1,4 @@
+import type { LotRegeneration } from "@/lib/lotRegeneration";
 import API from "@/lib/api";
 import type { ReportWorkflowStage } from "./assets";
 import {
@@ -375,6 +376,31 @@ export async function createLotListing(
   return response.data as Record<string, unknown>;
 }
 
+/**
+ * Re-Generate one lot: saves the on-screen preview, then the AI re-reads the
+ * lot's photos in the background (HTTP 202). Poll the preview until
+ * `lot_regeneration` clears or reports failed.
+ */
+export async function regenerateLotListingPreviewLot(
+  id: string,
+  lotKey: string | number,
+  previewData: any
+): Promise<{
+  message: string;
+  data: {
+    preview_data: any;
+    lot_regeneration: LotRegeneration | null;
+    imageUrls?: string[];
+    image_count?: number;
+  };
+}> {
+  const response = await API.post(
+    `/lot-listing/${id}/preview/lots/${encodeURIComponent(String(lotKey))}/regenerate`,
+    { preview_data: previewData }
+  );
+  return response.data;
+}
+
 export const LotListingService = {
   createLotListing,
   getLotListings,
@@ -384,6 +410,7 @@ export const LotListingService = {
   getLotListingSubmittedPreview,
   updateLotListingPreview,
   uploadLotListingPreviewLotImages,
+  regenerateLotListingPreviewLot,
   refreshLotListingSpecPdf,
   submitLotListingForApproval,
   resubmitLotListing,

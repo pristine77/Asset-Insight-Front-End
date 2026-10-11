@@ -162,11 +162,11 @@ describe("preview submission routing by loaded status", () => {
     );
 
     const resubmitButton = await screen.findByRole("button", {
-      name: "Save & Regenerate",
+      name: "Save preview",
     });
     expect(
-      screen.queryByRole("button", { name: "Save & Generate" })
-    ).not.toBeInTheDocument();
+      screen.getAllByRole("button", { name: "Save preview" })
+    ).toHaveLength(1);
     fireEvent.click(resubmitButton);
 
     await waitFor(() => {
@@ -190,11 +190,11 @@ describe("preview submission routing by loaded status", () => {
     );
 
     const regenerateButton = await screen.findByRole("button", {
-      name: "Save & Regenerate",
+      name: "Save preview",
     });
     expect(
-      screen.queryByRole("button", { name: "Save & Generate" })
-    ).not.toBeInTheDocument();
+      screen.getAllByRole("button", { name: "Save preview" })
+    ).toHaveLength(1);
     fireEvent.click(regenerateButton);
 
     await waitFor(() => {
@@ -222,11 +222,11 @@ describe("preview submission routing by loaded status", () => {
     );
 
     const submitButton = await screen.findByRole("button", {
-      name: "Save & Generate",
+      name: "Save preview",
     });
     expect(
-      screen.queryByRole("button", { name: "Save & Regenerate" })
-    ).not.toBeInTheDocument();
+      screen.getAllByRole("button", { name: "Save preview" })
+    ).toHaveLength(1);
     fireEvent.click(submitButton);
 
     await waitFor(() => {
@@ -252,11 +252,11 @@ describe("preview submission routing by loaded status", () => {
     );
 
     const generateButton = await screen.findByRole("button", {
-      name: "Save & Generate",
+      name: "Save preview",
     });
     expect(
-      screen.queryByRole("button", { name: "Save & Regenerate" })
-    ).not.toBeInTheDocument();
+      screen.getAllByRole("button", { name: "Save preview" })
+    ).toHaveLength(1);
     fireEvent.click(generateButton);
 
     await waitFor(() => {

@@ -36,7 +36,7 @@ describe.each(["asset", "lotListing"] as const)("%s preview integrity", (type) =
     const props = { isOpen: true, onClose, onSuccess, loadPreviewDataOverride: load, resubmitReportOverride: generate };
     const view = render(<Component {...props} reportId="first-report" />);
     await screen.findByDisplayValue("first-report");
-    fireEvent.click(screen.getByRole("button", { name: "Save & Regenerate" }));
+    fireEvent.click(screen.getByRole("button", { name: "Save preview" }));
     expect(generate).toHaveBeenCalledOnce();
     view.rerender(<Component {...props} reportId="second-report" />);
     await screen.findByDisplayValue("second-report");
@@ -44,7 +44,7 @@ describe.each(["asset", "lotListing"] as const)("%s preview integrity", (type) =
     expect(onClose).not.toHaveBeenCalled();
     expect(onSuccess).not.toHaveBeenCalled();
     expect(screen.getByDisplayValue("second-report")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Save & Regenerate" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Save preview" })).toBeEnabled();
   });
 
   it("saves a serial correction without changing separate lot photo order or cover choices", async () => {
@@ -80,7 +80,7 @@ describe.each(["asset", "lotListing"] as const)("%s preview integrity", (type) =
     const serial = (await screen.findAllByDisplayValue("OLD-SERIAL"))[0];
     fireEvent.change(serial, { target: { value: "1FTWW3DR9AEA01459" } });
     if (type === "asset") fireEvent.click(screen.getByRole("button", { name: "Save" }));
-    fireEvent.click(screen.getByRole("button", { name: /save & regenerate/i }));
+    fireEvent.click(screen.getByRole("button", { name: /^save preview$/i }));
     await waitFor(() => expect(save).toHaveBeenCalledTimes(1));
     const saved = save.mock.calls[0][1];
     expect(saved.lots).toHaveLength(2);
@@ -123,7 +123,7 @@ describe.each(["asset", "lotListing"] as const)("%s preview integrity", (type) =
     const props = { isOpen: true, reportId: "deletion-integrity", onClose: vi.fn(), loadPreviewDataOverride: load, resubmitReportOverride: save };
     const view = render(<Component {...props} />);
     fireEvent.click((await screen.findAllByRole("button", { name: "Remove photo 1" }))[0]);
-    fireEvent.click(screen.getByRole("button", { name: /save & regenerate/i }));
+    fireEvent.click(screen.getByRole("button", { name: /^save preview$/i }));
     await waitFor(() => expect(save).toHaveBeenCalledTimes(1));
     const saved = save.mock.calls[0][1];
     expect(saved.lots[0].image_urls).toEqual([remaining]);

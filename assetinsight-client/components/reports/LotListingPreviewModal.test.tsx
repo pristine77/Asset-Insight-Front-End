@@ -111,7 +111,7 @@ describe("LotListingPreviewModal inspection location", () => {
     fireEvent.click(screen.getAllByRole('button', { name: '6 ft' })[0]);
     fireEvent.change(screen.getByPlaceholderText('Edit the full field value'), { target: { value: '' } });
     fireEvent.click(screen.getByRole('button', { name: 'Save' }));
-    fireEvent.click(screen.getByRole('button', { name: 'Save & Generate' }));
+    fireEvent.click(screen.getByRole('button', { name: "Save preview" }));
     await waitFor(() => expect(mocks.submitForApproval).toHaveBeenCalledTimes(1));
     const edited = mocks.submitForApproval.mock.calls[0][1].preview_data.lots[0];
     expect(mocks.submitForApproval.mock.calls[0][1].preview_data.total_value).toBe(9876);
@@ -134,7 +134,7 @@ describe("LotListingPreviewModal inspection location", () => {
     await screen.findByDisplayValue("LOT-LOCATION-1");
     expect(screen.queryByText("Required selections")).toBeNull();
     expect(screen.queryByText(/Set Running Condition for all lots/i)).toBeNull();
-    fireEvent.click(screen.getByRole("button", { name: "Save & Generate" }));
+    fireEvent.click(screen.getByRole("button", { name: "Save preview" }));
     await waitFor(() => expect(mocks.submitForApproval).toHaveBeenCalledTimes(1));
     expect(mocks.submitForApproval.mock.calls[0][1].preview_data.lots[0]).toMatchObject({
       lot_id: "lot-1", description: "Test description", estimated_value: "",
@@ -151,7 +151,7 @@ describe("LotListingPreviewModal inspection location", () => {
     const contract = await screen.findByDisplayValue("LOT-LOCATION-1");
     expect(screen.getByRole("alert")).toHaveTextContent("saved preview is available");
     fireEvent.change(contract, { target: { value: "93530" } });
-    fireEvent.click(screen.getByRole("button", { name: "Save & Regenerate" }));
+    fireEvent.click(screen.getByRole("button", { name: "Save preview" }));
     await waitFor(() => expect(retry).toHaveBeenCalledWith("failed-lot", expect.objectContaining({ contract_no: "93530" })));
     expect(mocks.submitForApproval).not.toHaveBeenCalled();
   });
@@ -266,7 +266,7 @@ describe("LotListingPreviewModal inspection location", () => {
       name: "Inspection Location *",
     });
     fireEvent.change(location, { target: { value: "New Inspection Yard" } });
-    fireEvent.click(screen.getByRole("button", { name: /save & generate/i }));
+    fireEvent.click(screen.getByRole("button", { name: /^save preview$/i }));
 
     await waitFor(() => expect(updatePreview).toHaveBeenCalled());
     const savedPreview = updatePreview.mock.calls[0][1];
@@ -298,7 +298,7 @@ describe("LotListingPreviewModal inspection location", () => {
 
     const contract = await screen.findByDisplayValue("LOT-LOCATION-1");
     fireEvent.change(contract, { target: { value: "LOT-EDITED-1" } });
-    fireEvent.click(screen.getByRole("button", { name: "Save & Generate" }));
+    fireEvent.click(screen.getByRole("button", { name: "Save preview" }));
 
     await waitFor(() =>
       expect(mocks.promoteDraftPreview).toHaveBeenCalledWith(
@@ -333,7 +333,7 @@ describe("LotListingPreviewModal inspection location", () => {
       uploadPreviewLotImagesOverride={uploadImages} refreshSpecPdfOverride={refreshSpecPdf} />);
     fireEvent.change(await screen.findByDisplayValue("Test description"), { target: { value: "Complete edited description" } });
     expect(screen.queryByRole("button", { name: /^Save changes$/i })).toBeNull();
-    const action = screen.getByRole("button", { name: "Save & Regenerate" });
+    const action = screen.getByRole("button", { name: "Save preview" });
     fireEvent.click(action); fireEvent.click(action);
     fireEvent.change(document.querySelector('input[type="file"]')!, {
       target: { files: [new File(["photo"], "locked.jpg", { type: "image/jpeg" })] },
@@ -364,11 +364,11 @@ describe("LotListingPreviewModal inspection location", () => {
       loadPreviewDataOverride={vi.fn().mockResolvedValue(response)} resubmitReportOverride={resubmit} />);
     const description = await screen.findByDisplayValue("Test description");
     fireEvent.change(description, { target: { value: "Retain this edit" } });
-    fireEvent.click(screen.getByRole("button", { name: "Save & Regenerate" }));
+    fireEvent.click(screen.getByRole("button", { name: "Save preview" }));
     await waitFor(() => expect(mocks.toastError).toHaveBeenCalledWith("Another file generation is in progress. Try again when it finishes."));
     expect(description).toHaveValue("Retain this edit");
     expect(onClose).not.toHaveBeenCalled();
-    fireEvent.click(screen.getByRole("button", { name: "Save & Regenerate" }));
+    fireEvent.click(screen.getByRole("button", { name: "Save preview" }));
     await waitFor(() => expect(onClose).toHaveBeenCalledOnce());
     expect(resubmit.mock.calls[0][1]).toEqual(resubmit.mock.calls[1][1]);
   });
@@ -390,7 +390,7 @@ describe("LotListingPreviewModal inspection location", () => {
     const contract = await screen.findByDisplayValue("LOT-LOCATION-1");
     fireEvent.change(contract, { target: { value: "LOT-FINAL-SNAPSHOT" } });
     const submitButton = screen.getByRole("button", {
-      name: "Save & Generate",
+      name: "Save preview",
     });
     expect(submitButton).toBeEnabled();
 

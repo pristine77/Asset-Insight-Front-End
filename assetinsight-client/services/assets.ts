@@ -1,3 +1,4 @@
+import type { LotRegeneration } from "@/lib/lotRegeneration";
 import API from "@/lib/api";
 
 export type ReportStatus = 'draft' | 'processing' | 'preview' | 'pending_approval' | 'approved' | 'declined' | 'error';
@@ -224,6 +225,31 @@ export const uploadPreviewLotImages = async (
         onProgress(Math.min(100, Math.round((event.loaded * 100) / event.total)));
       },
     }
+  );
+  return data;
+};
+
+/**
+ * Re-Generate one lot: saves the on-screen preview, then the AI re-reads the
+ * lot's photos in the background (HTTP 202). Poll the preview until
+ * `lot_regeneration` clears or reports failed.
+ */
+export const regenerateAssetPreviewLot = async (
+  reportId: string,
+  lotKey: string | number,
+  previewData: any
+): Promise<{
+  message: string;
+  data: {
+    preview_data: any;
+    lot_regeneration: LotRegeneration | null;
+    imageUrls?: string[];
+    image_count?: number;
+  };
+}> => {
+  const { data } = await API.post(
+    `/asset/${reportId}/preview/lots/${encodeURIComponent(String(lotKey))}/regenerate`,
+    { preview_data: previewData }
   );
   return data;
 };
