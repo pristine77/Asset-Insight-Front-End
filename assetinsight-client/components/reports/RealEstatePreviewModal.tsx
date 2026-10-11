@@ -1,10 +1,11 @@
 "use client";
 
 import React, { useState, useEffect, useRef } from "react";
-import { Save, Send, AlertCircle, Building2, Image, ChevronLeft, ChevronRight, X } from "lucide-react";
+import { Save, Send, AlertCircle, Building2, Image } from "lucide-react";
 import { toast } from "@/components/ui/toast";
 import { RealEstateService } from "@/services/realEstate";
 import BottomDrawer from "@/components/BottomDrawer";
+import FloatingPhotoViewer from "@/components/reports/FloatingPhotoViewer";
 
 interface RealEstatePreviewModalProps {
   reportId: string;
@@ -690,46 +691,16 @@ export default function RealEstatePreviewModal({
             )}
           </fieldset>
 
-          {/* Photo Lightbox Modal */}
+          {/* Property photo viewer: a floating window that can be moved,
+              resized, minimized and maximized; Left/Right arrows step through photos. */}
           {selectedImageIndex !== null && (
-            <div className="fixed inset-0 z-50 bg-black/90 flex items-center justify-center p-4" onClick={() => setSelectedImageIndex(null)}>
-              <button
-                aria-label="Close photo"
-                onClick={() => setSelectedImageIndex(null)}
-                className="absolute top-4 right-4 text-white hover:text-gray-300 transition-colors"
-              >
-                <X className="h-8 w-8" />
-              </button>
-              {selectedImageIndex > 0 && (
-                <button
-                  aria-label="Previous photo"
-                  onClick={(e) => { e.stopPropagation(); setSelectedImageIndex(selectedImageIndex - 1); }}
-                  className="absolute left-4 text-white hover:text-gray-300 transition-colors"
-                >
-                  <ChevronLeft className="h-10 w-10" />
-                </button>
-              )}
-              {selectedImageIndex < imageUrls.length - 1 && (
-                <button
-                  aria-label="Next photo"
-                  onClick={(e) => { e.stopPropagation(); setSelectedImageIndex(selectedImageIndex + 1); }}
-                  className="absolute right-4 text-white hover:text-gray-300 transition-colors"
-                >
-                  <ChevronRight className="h-10 w-10" />
-                </button>
-              )}
-              <div className="max-w-4xl max-h-[80vh] relative" onClick={(e) => e.stopPropagation()}>
-                { }
-                <img
-                  src={imageUrls[selectedImageIndex]}
-                  alt={`Property Photo ${selectedImageIndex + 1}`}
-                  className="max-w-full max-h-[80vh] object-contain rounded-lg"
-                />
-                <div className="absolute bottom-4 left-1/2 -translate-x-1/2 bg-black/60 text-white px-4 py-2 rounded-lg text-sm">
-                  Photo {selectedImageIndex + 1} of {imageUrls.length}
-                </div>
-              </div>
-            </div>
+            <FloatingPhotoViewer
+              title="Property"
+              entries={imageUrls.map((url, index) => ({ url, key: `${index}-${url}` }))}
+              index={selectedImageIndex}
+              onIndexChange={setSelectedImageIndex}
+              onClose={() => setSelectedImageIndex(null)}
+            />
           )}
 
           {/* Action Buttons */}

@@ -45,7 +45,7 @@ describe("Real Estate preview compatibility", () => {
     expect(screen.getByRole("button", { name: "View main photo 1" }).querySelector("img")).toHaveAttribute("src", "https://images.sellsnap.store/existing.jpg");
     fireEvent.click(screen.getByRole("button", { name: "View report-only photo 1" }));
     expect(screen.getByText("Photo 2 of 2")).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "Close photo" }));
+    fireEvent.click(screen.getByRole("button", { name: "Close photo viewer" }));
     expect(screen.queryByText("Photo 2 of 2")).not.toBeInTheDocument();
   });
 
