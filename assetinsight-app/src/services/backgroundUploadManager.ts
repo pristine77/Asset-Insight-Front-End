@@ -116,6 +116,8 @@ export type BackgroundUploadEntry = {
   pausing: boolean;
   /** Whether Pause may be offered; false while the submission is being finalized. */
   canPause: boolean;
+  /** False when there is nothing left to send (the server accepted it); Resume is then not offered. */
+  canResume?: boolean;
   message?: string;
 };
 
@@ -129,6 +131,8 @@ export type BackgroundUploadNotice = {
   heading: string;
   message: string;
   reportId?: string;
+  /** False when there is nothing left to send (the server accepted it); Resume is then not offered. */
+  canResume?: boolean;
   /**
    * Only an ordinary "Sent" goes away by itself. An acceptance this phone could
    * not record stays until dismissed: the draft still shows Resume upload, and

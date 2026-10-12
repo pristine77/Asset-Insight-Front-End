@@ -102,6 +102,10 @@ export type OfflineDraftSummary = {
   inventoryError?: string;
 };
 const hidden = (draft: OfflineReportDraft) => ['accepted', 'submitted', 'discarded'].includes(draft.submissionState || '');
+/** The cloud copy's bookkeeping on a draft; never part of what is uploaded or compared. */
+export const CLOUD_SYNC_FIELDS = ['cloudId', 'cloudSyncedAt', 'cloudSyncError', 'cloudSyncErrorKind',
+  'cloudSyncRetryAt', 'cloudSyncAttempts', 'cloudSyncLastAttemptAt'] as const;
+export type CloudSyncField = typeof CLOUD_SYNC_FIELDS[number];
 const legacyNeedsIncomingReview = (details: Record<string, any>) => Boolean(
   details.legacyRequiresIncomingReview ||
   ((details.auctioneer_work_item_id || details.auctioneerWorkItemId) && !details.auctioneerSnapshot) ||
@@ -504,6 +508,30 @@ export function createOfflineCaptureStore(openDatabase: DatabaseFactory, legacyS
         const next = change(draft);
         if (next === draft) return draft;
         return persist(next, expected, undefined, explicitSave);
+      });
+    },
+    /**
+     * Cloud-copy bookkeeping is not an edit, so it is written in place without a
+     * new revision. Only the CLOUD_SYNC_FIELDS returned by `change` are applied;
+     * return null to leave the draft as it is. A new revision here made a queued
+     * Android upload fail its acceptance check ("This draft changed after the
+     * upload was saved") when the cloud copy finished syncing just after Submit
+     * (phone test 2026-10-11).
+     */
+    async updateDraftSyncState(id: string, change: (draft: OfflineReportDraft) => Partial<Pick<OfflineReportDraft, CloudSyncField>> | null) {
+      const expected = requireOwner();
+      return serialize(async () => {
+        const draft = await readDraft(id, expected);
+        if (!draft) return null;
+        const fields = change(draft);
+        if (!fields || draft.localRevision == null) return draft;
+        const next: OfflineReportDraft = { ...draft };
+        for (const key of CLOUD_SYNC_FIELDS) if (key in fields) (next as any)[key] = (fields as any)[key];
+        assertOwner(expected);
+        // Same revision as read: a save that landed in between wins, and this write is skipped.
+        await (await db()).runAsync('UPDATE capture_drafts SET data=? WHERE owner_id=? AND id=? AND revision=?',
+          JSON.stringify(next), expected, id, draft.localRevision);
+        return next;
       });
     },
     async deleteDraft(id: string) {

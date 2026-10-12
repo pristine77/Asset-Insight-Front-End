@@ -12,7 +12,7 @@ jest.mock('./localMediaStore', () => ({ LocalMediaStore: {
 } }));
 jest.mock('./offlineCaptureStore', () => ({ __esModule: true, default: {
   setOwner: jest.fn(), getOwnerId: jest.fn(), initialize: jest.fn(), getDraft: jest.fn(),
-  saveDraft: jest.fn(), createCloudDraft: jest.fn(), updateDraft: jest.fn(), listDrafts: jest.fn(),
+  saveDraft: jest.fn(), createCloudDraft: jest.fn(), updateDraft: jest.fn(), updateDraftSyncState: jest.fn(), listDrafts: jest.fn(),
   listSummaries: jest.fn(), setSubmissionState: jest.fn(),
 } }));
 
@@ -29,6 +29,12 @@ beforeEach(() => {
   jest.mocked(OfflineCaptureStore.saveDraft).mockImplementation(async (draft) => { const next = { ...draft, localRevision: (draft.localRevision || 0) + 1 }; saved.set(next.id, next); return next; });
   jest.mocked(OfflineCaptureStore.updateDraft).mockImplementation(async (id, change) => {
     const next = change(saved.get(id)!); saved.set(id, next); return next;
+  });
+  // As the store does: only the cloud-copy fields change, and the revision stays.
+  jest.mocked(OfflineCaptureStore.updateDraftSyncState).mockImplementation(async (id, change) => {
+    const current = saved.get(id); if (!current) return null;
+    const fields = change(current); if (!fields) return current;
+    const next = { ...current, ...fields, localRevision: current.localRevision }; saved.set(id, next); return next;
   });
   jest.mocked(OfflineCaptureStore.listDrafts).mockImplementation(async () => [...saved.values()]);
   // The store's visible summaries, as offlineCaptureStore.ts builds them.
@@ -148,9 +154,20 @@ it('late cloud success and failure cannot mark a newer revision clean or failed'
   });
   expect(saved.get(initial.id)).toEqual(latest);
   jest.mocked(OfflineCaptureStore.getOwnerId).mockReturnValue('other');
-  jest.mocked(OfflineCaptureStore.updateDraft).mockClear();
+  jest.mocked(OfflineCaptureStore.updateDraftSyncState).mockClear();
   await AutoSaveService.markDraftCloudSynced(initial.id, 'cloud-id', undefined, 'owner');
   await AutoSaveService.markDraftCloudSyncError(initial.id, 'Old account failed', { expectedOwnerId: 'owner' });
+  expect(OfflineCaptureStore.updateDraftSyncState).not.toHaveBeenCalled();
+});
+
+it('records the cloud copy without a new revision, so a queued upload of that revision is still accepted', async () => {
+  const initial = await AutoSaveService.saveDraft(form());
+  jest.mocked(OfflineCaptureStore.updateDraft).mockClear();
+  await AutoSaveService.markDraftCloudSynced(initial.id, 'cloud-id', initial.updatedAt, 'owner', initial.localRevision);
+  expect(saved.get(initial.id)).toMatchObject({ cloudId: 'cloud-id', localRevision: initial.localRevision });
+  await AutoSaveService.markDraftCloudSyncError(initial.id, 'Offline', { expectedOwnerId: 'owner', expectedLocalRevision: initial.localRevision, attempts: 1 });
+  expect(saved.get(initial.id)).toMatchObject({ cloudSyncError: 'Offline', cloudSyncAttempts: 1, localRevision: initial.localRevision });
+  // Neither is a draft edit.
   expect(OfflineCaptureStore.updateDraft).not.toHaveBeenCalled();
 });
 

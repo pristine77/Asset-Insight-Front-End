@@ -974,12 +974,13 @@ export const AutoSaveService = {
   ): Promise<void> {
     if (expectedOwnerId && OfflineCaptureStore.getOwnerId() !== expectedOwnerId) return;
     const now = new Date().toISOString();
-    await OfflineCaptureStore.updateDraft(id, (draft) =>
+    // Bookkeeping only: no new revision, so an upload already queued from this
+    // revision still matches when the server accepts it.
+    await OfflineCaptureStore.updateDraftSyncState(id, (draft) =>
         (!expectedOwnerId || draft.ownerId === expectedOwnerId) &&
         (!expectedUpdatedAt || draft.updatedAt === expectedUpdatedAt) &&
         (expectedLocalRevision === undefined || draft.localRevision === expectedLocalRevision)
           ? {
-              ...draft,
               cloudId,
               cloudSyncedAt: now,
               cloudSyncError: undefined,
@@ -988,7 +989,7 @@ export const AutoSaveService = {
               cloudSyncAttempts: undefined,
               cloudSyncLastAttemptAt: undefined,
             }
-          : draft
+          : null
     );
   },
 
@@ -1006,12 +1007,12 @@ export const AutoSaveService = {
     } = {}
   ): Promise<void> {
     if (metadata.expectedOwnerId && OfflineCaptureStore.getOwnerId() !== metadata.expectedOwnerId) return;
-    await OfflineCaptureStore.updateDraft(id, (draft) =>
+    // Bookkeeping only, written without a new revision (see markDraftCloudSynced).
+    await OfflineCaptureStore.updateDraftSyncState(id, (draft) =>
       (metadata.expectedOwnerId && draft.ownerId !== metadata.expectedOwnerId) ||
       (metadata.expectedUpdatedAt && draft.updatedAt !== metadata.expectedUpdatedAt) ||
       (metadata.expectedLocalRevision !== undefined && draft.localRevision !== metadata.expectedLocalRevision)
-        ? draft : ({
-              ...draft,
+        ? null : ({
               cloudSyncError: message,
               cloudSyncErrorKind: metadata.kind,
               cloudSyncRetryAt: metadata.retryAt,

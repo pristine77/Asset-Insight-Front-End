@@ -12,6 +12,8 @@ type TransferState = {
   status: 'queued' | 'uploading' | 'paused' | 'waiting_network' | 'interrupted' | 'auth_required' | 'needs_attention' | 'accepted';
   completedFiles: number; totalFiles: number; percent: number; reportId?: string; message?: string; updatedAt: string;
   receipt?: Record<string, unknown>;
+  /** Set here, never by Android: the server accepted it but this phone could not record that. */
+  acceptedOnServer?: boolean;
 };
 type TransferGrant = { token: string; expiresAt: string; ownerId: string; sessionId: string; type: 'asset' | 'lotListing' };
 type NativeTransfer = {
@@ -69,7 +71,7 @@ function entry(state: TransferState): BackgroundUploadEntry {
   return { id: idOf(state), draftId: state.clientDraftId, type: state.type, title: state.title || 'Report upload',
     status, percent: state.percent, completedFiles: state.completedFiles, totalFiles: state.totalFiles,
     stage: state.status === 'uploading' ? state.canPause === false ? 'finalizing' : 'uploading' : undefined, pausing: false,
-    canPause: isRunning(state) && state.canPause !== false, message: state.message, durable: true };
+    canPause: isRunning(state) && state.canPause !== false, canResume: !state.acceptedOnServer, message: state.message, durable: true };
 }
 function publish() {
   const entries = states.filter(state => state.status !== 'accepted').map(entry);
@@ -79,7 +81,7 @@ function publish() {
       id: noticeId(state), kind: state.status === 'accepted' ? 'sent' : 'attention', jobId: idOf(state), draftId: state.clientDraftId,
       type: state.type, title: state.title || 'Report upload', heading: state.status === 'accepted' ? 'Upload accepted' : 'Upload needs attention',
       message: state.status === 'accepted' ? 'The server accepted this report. Processing continues on the server.'
-        : state.message || 'Your originals are kept. Review this upload before resuming.', reportId: state.reportId, autoDismiss: false,
+        : state.message || 'Your originals are kept. Review this upload before resuming.', reportId: state.reportId, autoDismiss: false, canResume: !state.acceptedOnServer,
     }));
   snapshot = { active, queued: entries.filter(item => item !== active && ['queued', 'uploading', 'waiting'].includes(item.status)),
     held: entries.filter(item => ['paused', 'attention'].includes(item.status)), notices };
@@ -115,6 +117,8 @@ async function reconcileAccepted(state: TransferState, expected: string, epoch: 
       else acceptedListeners.forEach(listener => listener({ draftId: state.clientDraftId, type: state.type, reportId: state.receipt!.reportId as string }));
     }
   } catch (error) {
+    // Android's record still says accepted; only this phone's view changes.
+    state.acceptedOnServer = true;
     state.status = 'needs_attention';
     state.message = error instanceof Error ? error.message : 'Local acceptance could not be recorded. Check Previews before resuming.';
   }
@@ -206,7 +210,8 @@ export const durableReportTransfer = {
     try { await hydration; } catch { await binding; await refresh(); }
     if (hydrating) throw new Error('Upload status is still being checked. Retry in a moment.');
   },
-  isBusy(draftId: string) { return hydrating || states.some(state => state.clientDraftId === draftId && state.status !== 'accepted'); },
+  // An upload the server accepted (even one this phone could not record) no longer holds its draft.
+  isBusy(draftId: string) { return hydrating || states.some(state => state.clientDraftId === draftId && state.status !== 'accepted' && !state.acceptedOnServer); },
   statusFor(draftId: string) { const state = states.find(row => row.clientDraftId === draftId && row.status !== 'accepted'); return state ? entry(state) : undefined; },
   async inspect(draftId: string): Promise<TransferState | undefined> {
     await this.ready();
@@ -247,6 +252,10 @@ export const durableReportTransfer = {
     if (continuation) throw new Error('This parent was queued with Continue. Use Pause or Resume for its upload, and open the independent next lot from Drafts.');
     const state = states.find(row => row.clientDraftId === draftId), expected = owner, epoch = generation;
     if (!state) return;
+    // The transfer is finished (accepted on the server) and its draft is kept:
+    // there is nothing to release, so Open just opens the draft. Asking Android
+    // to forget it showed a raw "ReportTransfer.forget has been rejected" error.
+    if (state.acceptedOnServer) return;
     if (resumeFlights.has(`${epoch}:${idOf(state)}`)) throw new Error('This upload is resuming. Wait for its status, then pause it before editing.');
     if (isRunning(state) || state.status === 'accepted' || !expected || !bridge()?.forget) throw new Error('Pause this upload before opening its saved draft.');
     await bridge()!.forget!(expected, draftId);

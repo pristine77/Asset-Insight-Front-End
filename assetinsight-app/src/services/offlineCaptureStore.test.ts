@@ -70,6 +70,34 @@ describe('owner-scoped offline capture metadata', () => {
     expect(await store.getProtectedMediaUris()).toHaveLength(2);
     expect((await store.getDraft(edited.id))?.reportId).toBe('report');
   });
+  test('cloud-copy bookkeeping after Submit keeps the revision, so the queued upload is accepted (phone test 2026-10-11)', async () => {
+    const { store } = fixtureStore();
+    const queued = await store.saveDraft(draft());
+    // The cloud copy finishes syncing after the upload was handed to Android.
+    const synced = await store.updateDraftSyncState(queued.id, () => ({ cloudId: 'cloud-1', cloudSyncedAt: '2026-10-11T21:24:50Z', title: 'ignored' } as any));
+    expect(synced).toMatchObject({ cloudId: 'cloud-1', localRevision: queued.localRevision, title: queued.title });
+    expect(await store.getDraft(queued.id)).toMatchObject({ cloudId: 'cloud-1', localRevision: queued.localRevision, title: '93530' });
+    await store.recordTransferAcceptance(queued.id, queued.localRevision!, queued.captureId!, queued.formData.clientSubmissionId!, 'report');
+    expect((await store.getDraft(queued.id))?.reportId).toBe('report');
+  });
+  test('a cloud-sync note never overwrites a save that landed first', async () => {
+    const { store } = fixtureStore();
+    const first = await store.saveDraft(draft());
+    const unchanged = await store.updateDraftSyncState(first.id, () => null);
+    expect(unchanged).toMatchObject({ localRevision: first.localRevision });
+    // A write that lands between the read and this update (another process or
+    // an older code path) moves the revision: the note is dropped, the edit stays.
+    const { store: other, database } = fixtureStore();
+    const base = await other.saveDraft(draft('raced'));
+    await other.updateDraftSyncState(base.id, (current) => {
+      database.prepare('UPDATE capture_drafts SET revision = revision + 1, data = ? WHERE id = ?')
+        .run(JSON.stringify({ ...current, title: 'Edited meanwhile', localRevision: current.localRevision! + 1 }), base.id);
+      return { cloudSyncError: 'stale note' };
+    });
+    const latest = await other.getDraft(base.id);
+    expect(latest).toMatchObject({ title: 'Edited meanwhile', localRevision: base.localRevision! + 1 });
+    expect(latest?.cloudSyncError).toBeUndefined();
+  });
   test('backup intent commits with the draft and stale native acknowledgements cannot discard a later save', async () => {
     const { store } = fixtureStore();
     const first = await store.saveDraft(draft('backup', 224));

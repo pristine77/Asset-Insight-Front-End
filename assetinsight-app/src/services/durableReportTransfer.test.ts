@@ -143,7 +143,24 @@ it('keeps an edited draft when the acceptance compare-and-set refuses it', async
   mockStore.recordTransferAcceptance.mockRejectedValueOnce(new Error('This draft changed after the upload was saved.'));
   await bind();
   expect(durable.getSnapshot().notices[0]).toMatchObject({ kind: 'attention', message: expect.stringContaining('draft changed') });
-  expect(durable.isBusy('draft')).toBe(true);
+  // The transfer is finished, so the kept draft can be opened for review (2026-10-11:
+  // holding it left the draft unopenable for good). A re-submit gets the server's
+  // "earlier report accepted" answer, which the forms already handle.
+  expect(durable.isBusy('draft')).toBe(false);
+});
+
+it('opens the kept draft of an accepted upload this phone could not record, without asking Android to forget it', async () => {
+  mockNative.list.mockResolvedValue([row({ status: 'accepted', completedFiles: 1, percent: 100,
+    receipt: { accepted: true, reportAvailable: true, ownerId: 'owner', type: 'asset', sessionId: 'session', reportId: 'report', jobId: 'submission' } })]);
+  mockStore.recordTransferAcceptance.mockRejectedValueOnce(new Error('This draft changed after the upload was saved.'));
+  await bind();
+  // Android's own record says accepted, so forget would be refused with a raw native error.
+  await expect(durable.releaseForEditing('draft')).resolves.toBeUndefined();
+  expect(mockNative.forget).not.toHaveBeenCalled();
+  // Nothing is left to send: the draft is not held, and Resume is not offered.
+  expect(durable.isBusy('draft')).toBe(false);
+  expect(durable.getSnapshot().notices[0]).toMatchObject({ kind: 'attention', canResume: false });
+  expect(durable.getSnapshot().held[0]).toMatchObject({ status: 'attention', canResume: false });
 });
 
 it('requires native stopped-upload release before it lets the editor reopen', async () => {
