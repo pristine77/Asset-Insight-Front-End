@@ -5,10 +5,10 @@ import android.app.job.JobScheduler
 import android.content.ComponentName
 import android.content.Context
 import android.net.NetworkCapabilities
-import android.net.NetworkRequest
 import android.net.Uri
 import android.os.Build
 import android.os.PersistableBundle
+import android.util.Log
 import androidx.work.BackoffPolicy
 import androidx.work.Constraints
 import androidx.work.Data
@@ -60,6 +60,25 @@ object TransferCoordinator {
                     }
                 }
                 scheduleEvents(context, job.getString("id"))
+            }
+        }
+        requeueNonVpnJobs(context, owner)
+    }
+    /**
+     * Jobs queued by builds before 2026-10-11 demanded a non-VPN network and never start
+     * while a VPN (NordVPN, a company VPN) is on. Re-queue those with the current rule.
+     * Called at configure and from list(), which the app polls every 2 s while open, so a
+     * refusal at start-up is retried. schedule() leaves a running job alone.
+     */
+    private fun requeueNonVpnJobs(context: Context, owner: String) {
+        if (Build.VERSION.SDK_INT < 34) return
+        val scheduler = context.getSystemService(Context.JOB_SCHEDULER_SERVICE) as JobScheduler
+        TransferStore.jobs(context).filter { it.getJSONObject("snapshot").optString("ownerId") == owner && !it.optBoolean("forgotten") &&
+            it.getString("status") in setOf("queued", "uploading", "interrupted", "waiting_network") }.forEach { job ->
+            val pending = scheduler.getPendingJob(job.getInt("schedulerId")) ?: return@forEach
+            if (pending.requiredNetwork?.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN) != true) return@forEach
+            try { schedule(context, job) } catch (error: Exception) {
+                Log.w("ReportTransfer", "Could not re-queue ${job.getString("id")} for VPN networks; Pause and Resume re-queues it", error)
             }
         }
     }
@@ -183,6 +202,7 @@ object TransferCoordinator {
     }
     fun list(context: Context, owner: String): List<Map<String, Any>> = synchronized(lock) {
         authority(context, owner)
+        requeueNonVpnJobs(context, owner)
         TransferStore.jobs(context).filter { !it.optBoolean("forgotten") && it.getJSONObject("snapshot").optString("ownerId") == owner }
             .sortedBy { it.getInt("schedulerId") }.map { TransferStore.summary(it) }
     }
@@ -208,11 +228,20 @@ object TransferCoordinator {
         val id = job.getString("id")
         if (Build.VERSION.SDK_INT >= 34) {
             val scheduler = context.getSystemService(Context.JOB_SCHEDULER_SERVICE) as JobScheduler
-            if (scheduler.getPendingJob(job.getInt("schedulerId")) != null) return
+            val schedulerId = job.getInt("schedulerId")
+            val pending = scheduler.getPendingJob(schedulerId)
+            // Jobs queued by earlier builds demanded a non-VPN network and never start while
+            // a VPN (NordVPN, a company VPN) is on. Re-queue those, unless one is running.
+            val waitsForNonVpn = pending?.requiredNetwork?.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN) == true
+            if (pending != null && (!waitsForNonVpn || scheduler.getPendingJobReason(schedulerId) == JobScheduler.PENDING_JOB_REASON_EXECUTING)) return
             val bytes = job.getJSONObject("snapshot").getJSONArray("files").let { files -> (0 until files.length()).sumOf { files.getJSONObject(it).getLong("size") } }
-            val info = JobInfo.Builder(job.getInt("schedulerId"), ComponentName(context, TransferJobService::class.java))
+            // NETWORK_TYPE_ANY is the platform's "any validated internet" rule and allows VPNs,
+            // as WorkManager's CONNECTED does below Android 14. A bare NetworkRequest.Builder()
+            // keeps NOT_VPN, so with a VPN as the default network the upload never started
+            // (phone test 2026-10-11, NordVPN: "Unsatisfied constraints: CONNECTIVITY").
+            val info = JobInfo.Builder(schedulerId, ComponentName(context, TransferJobService::class.java))
                 .setExtras(PersistableBundle().apply { putString("id", id) }).setPersisted(true).setUserInitiated(true)
-                .setRequiredNetwork(NetworkRequest.Builder().addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET).build())
+                .setRequiredNetworkType(JobInfo.NETWORK_TYPE_ANY)
                 .setEstimatedNetworkBytes(1024L * 1024, bytes).setBackoffCriteria(30_000, JobInfo.BACKOFF_POLICY_EXPONENTIAL).build()
             check(scheduler.schedule(info) == JobScheduler.RESULT_SUCCESS) { "Open the app and tap Resume to schedule this report upload" }
         } else {
