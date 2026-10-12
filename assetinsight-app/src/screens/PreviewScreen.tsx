@@ -3910,14 +3910,20 @@ const styles = StyleSheet.create({
     backgroundColor: "#FEE2E2",
     borderRadius: 8,
   },
-  // Lets a long lot number shrink beside the header actions on narrow phones.
+  // The lot number keeps its full width on one line; on a narrow phone the
+  // header actions (Re-Generate, badge or delete) wrap instead. Letting the
+  // title shrink squeezed "Lot 7301" to one character per line (phone test
+  // 2026-10-11).
   lotHeaderTitle: {
-    flexShrink: 1,
+    flexShrink: 0,
     marginRight: 8,
   },
   lotHeaderActions: {
     flexDirection: "row",
+    flexWrap: "wrap",
+    justifyContent: "flex-end",
     alignItems: "center",
+    flexShrink: 1,
     gap: 8,
   },
   regenerationBanner: {
