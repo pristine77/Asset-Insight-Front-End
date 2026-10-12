@@ -75,8 +75,11 @@ export default function UploadBar({ onOpenDraft }: Props) {
   // The list closes by itself once nothing waits.
   useEffect(() => { if (!queued.length) setShowQueue(false); }, [queued.length]);
 
+  // An upload the server accepted has nothing left to resume: once its notice is
+  // dismissed it leaves the bar (its draft stays in Drafts), instead of a row
+  // with no way to close it.
   const paused = held.filter((entry) => entry.status === 'paused' || (entry.durable && entry.status === 'attention' &&
-    !notices.some(notice => notice.draftId === entry.draftId)));
+    entry.canResume !== false && !notices.some(notice => notice.draftId === entry.draftId)));
   const actOnUpload = (action: () => unknown) => {
     void Promise.resolve().then(action).catch(error => Alert.alert('Upload needs attention',
       error instanceof Error ? error.message : 'The upload action could not be confirmed. Your draft and originals are kept.'));
@@ -106,23 +109,26 @@ export default function UploadBar({ onOpenDraft }: Props) {
             accessibilityLiveRegion="polite">
             {text}
           </Text>
-          {!sent ? (
-            <TouchableOpacity accessibilityRole="button" accessibilityLabel={`Open ${notice.title}`} style={styles.button}
-              onPress={() => openDraft(notice.draftId, notice.type, notice.id.startsWith('durable:'), notice.id)}>
-              <Text style={styles.buttonText}>Open</Text>
-            </TouchableOpacity>
-          ) : null}
-          {!sent && notice.id.startsWith('durable:') ? (
-            <TouchableOpacity accessibilityRole="button" accessibilityLabel={`Resume upload of ${notice.title}`} style={styles.button}
-              onPress={() => actOnUpload(() => backgroundUploadManager.resume(notice.jobId))}>
-              <Text style={styles.buttonText}>Resume</Text>
-            </TouchableOpacity>
-          ) : null}
           <TouchableOpacity accessibilityRole="button" accessibilityLabel={sent ? `Dismiss sent notice for ${notice.title}` : `Dismiss notice for ${notice.title}`}
             style={styles.iconButton} onPress={() => backgroundUploadManager.dismiss(notice.id)}>
             <Feather name="x" size={18} color={colors.textSecondary} />
           </TouchableOpacity>
         </View>
+        {/* Own row: beside the text, Open and Resume squeezed it to a few letters a line. */}
+        {!sent ? (
+          <View style={styles.actionsRow}>
+            <TouchableOpacity accessibilityRole="button" accessibilityLabel={`Open ${notice.title}`} style={styles.button}
+              onPress={() => openDraft(notice.draftId, notice.type, notice.id.startsWith('durable:'), notice.id)}>
+              <Text style={styles.buttonText}>Open</Text>
+            </TouchableOpacity>
+            {notice.id.startsWith('durable:') && notice.canResume !== false ? (
+              <TouchableOpacity accessibilityRole="button" accessibilityLabel={`Resume upload of ${notice.title}`} style={styles.button}
+                onPress={() => actOnUpload(() => backgroundUploadManager.resume(notice.jobId))}>
+                <Text style={styles.buttonText}>Resume</Text>
+              </TouchableOpacity>
+            ) : null}
+          </View>
+        ) : null}
       </View>
     );
   };
@@ -134,10 +140,14 @@ export default function UploadBar({ onOpenDraft }: Props) {
         <Text style={styles.text} numberOfLines={2}>
           {entry.status === 'attention' ? 'Needs attention' : 'Paused'}: {entry.title} · {entry.completedFiles} of {entry.totalFiles} sent
         </Text>
-        <TouchableOpacity accessibilityRole="button" accessibilityLabel={`Resume upload of ${entry.title}`} style={styles.button}
-          onPress={() => actOnUpload(() => backgroundUploadManager.resume(entry.id))}>
-          <Text style={styles.buttonText}>Resume</Text>
-        </TouchableOpacity>
+      </View>
+      <View style={styles.actionsRow}>
+        {entry.canResume !== false ? (
+          <TouchableOpacity accessibilityRole="button" accessibilityLabel={`Resume upload of ${entry.title}`} style={styles.button}
+            onPress={() => actOnUpload(() => backgroundUploadManager.resume(entry.id))}>
+            <Text style={styles.buttonText}>Resume</Text>
+          </TouchableOpacity>
+        ) : null}
         <TouchableOpacity accessibilityRole="button" accessibilityLabel={`Open ${entry.title}`} style={styles.button}
           onPress={() => openDraft(entry.draftId, entry.type, entry.durable)}>
           <Text style={styles.buttonText}>Open</Text>

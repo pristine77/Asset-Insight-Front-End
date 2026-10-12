@@ -36,11 +36,12 @@ const CrmEntryScreen = ({ onSelectListings, onSelectCrm }: CrmEntryScreenProps) 
   // A short screen with a large text size (e.g. 360 x 640 at 130%) can still
   // overflow. Measure, and only then drop the two helper lines, so the cards
   // stay on one page; every other phone keeps them. Re-checked when the window
-  // or text size changes.
+  // or text size changes, and when the visible area changes (the upload bar
+  // appearing or going away).
   const [viewportHeight, setViewportHeight] = useState(0);
   const [contentHeight, setContentHeight] = useState(0);
   const [condensed, setCondensed] = useState(false);
-  useEffect(() => setCondensed(false), [width, height, fontScale]);
+  useEffect(() => setCondensed(false), [width, height, fontScale, viewportHeight]);
   useEffect(() => {
     if (!condensed && viewportHeight > 0 && contentHeight > viewportHeight + 1) setCondensed(true);
   }, [condensed, contentHeight, viewportHeight]);

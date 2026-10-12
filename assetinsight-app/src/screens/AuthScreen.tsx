@@ -22,7 +22,9 @@ import { Feather } from '@expo/vector-icons';
 import { useAppTheme, type AppThemeColors } from '../context/ThemeContext';
 import AccountPrivacyLinks from '../components/AccountPrivacyLinks';
 
-const BrandIcon = require('../../assets/icon.png');
+// The app icon's wordmark cropped tight (862 x 294, transparent): the square
+// icon squeezed into this frame showed the words about 10 points tall.
+const BrandWordmark = require('../../assets/asset-insight-wordmark.png');
 const EquipmentArtwork = require('../../assets/auth-equipment-yard.png');
 
 type AuthView =
@@ -708,7 +710,7 @@ const AuthScreen: React.FC = () => {
             <ImageBackground source={EquipmentArtwork} style={st.headerArtwork} imageStyle={st.headerArtworkImage}>
               <View style={st.headerTopRow}>
                 <View style={st.logoFrame}>
-                  <Image source={BrandIcon} style={st.logoImg} resizeMode="contain" />
+                  <Image source={BrandWordmark} style={st.logoImg} resizeMode="contain" accessibilityLabel="Asset Insight" />
                 </View>
                 <TouchableOpacity onPress={toggleTheme} style={st.themeButton} activeOpacity={0.75}>
                   <Feather name={isDark ? 'sun' : 'moon'} size={18} color="#FFFFFF" />
@@ -780,12 +782,12 @@ const createStyles = (colors: AppThemeColors, isCompact: boolean) => StyleSheet.
   },
   brandPillText: { color: '#1D4ED8', fontSize: 11, fontWeight: '700', letterSpacing: 0.3 },
   logoFrame: {
-    width: 138,
-    height: 48,
-    borderRadius: 9,
+    paddingHorizontal: 11,
+    paddingVertical: 6,
+    borderRadius: 10,
     borderWidth: 1,
     borderColor: 'rgba(255,255,255,0.82)',
-    backgroundColor: 'rgba(255,255,255,0.94)',
+    backgroundColor: '#FFFFFF',
     justifyContent: 'center',
     alignItems: 'center',
     shadowColor: '#000000',
@@ -794,7 +796,8 @@ const createStyles = (colors: AppThemeColors, isCompact: boolean) => StyleSheet.
     shadowRadius: 14,
     elevation: 8,
   },
-  logoImg: { width: 122, height: 38 },
+  // 862 x 294 wordmark: 120 wide is 41 tall.
+  logoImg: { width: 120, height: 41 },
   title: {
     fontSize: 31,
     fontWeight: '800',

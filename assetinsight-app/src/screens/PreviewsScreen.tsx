@@ -80,8 +80,11 @@ const PreviewsScreen = ({
   initialMode = 'pending',
   onOpenDrafts,
 }: PreviewsScreenProps) => {
-  const { width } = useWindowDimensions();
+  const { width, fontScale } = useWindowDimensions();
   const isTablet = width >= 760;
+  // Narrow for its text size: each tab puts its count under the label, so a
+  // label like "Submitted" keeps its size instead of breaking or shrinking.
+  const stackTabs = !isTablet && width / Math.max(1, fontScale) < 400;
   const { isDark, colors, toggleTheme } = useAppTheme();
   const styles = useMemo(() => createStyles(colors, isTablet), [colors, isTablet]);
   const [loading, setLoading] = useState(true);
@@ -796,10 +799,10 @@ const PreviewsScreen = ({
 
       <View style={styles.segmentedControl}>
         <TouchableOpacity
-          style={[styles.segment, activeTab === 'pending' && styles.segmentActive]}
+          style={[styles.segment, stackTabs && styles.segmentStacked, activeTab === 'pending' && styles.segmentActive]}
           activeOpacity={0.8}
           onPress={() => setActiveTab('pending')}>
-          <Text style={[styles.segmentText, activeTab === 'pending' && styles.segmentTextActive]}>New</Text>
+          <Text numberOfLines={1} adjustsFontSizeToFit minimumFontScale={0.75} style={[styles.segmentText, activeTab === 'pending' && styles.segmentTextActive]}>New</Text>
           <View style={[styles.segmentCount, activeTab === 'pending' && styles.segmentCountActive]}>
             <Text style={[styles.segmentCountText, activeTab === 'pending' && styles.segmentCountTextActive]}>
               {loading || loadError ? (pendingItems.length ? `${pendingItems.length}*` : '—') : pendingItems.length}
@@ -807,10 +810,10 @@ const PreviewsScreen = ({
           </View>
         </TouchableOpacity>
         <TouchableOpacity
-          style={[styles.segment, activeTab === 'submitted' && styles.segmentActive]}
+          style={[styles.segment, stackTabs && styles.segmentStacked, activeTab === 'submitted' && styles.segmentActive]}
           activeOpacity={0.8}
           onPress={() => setActiveTab('submitted')}>
-          <Text style={[styles.segmentText, activeTab === 'submitted' && styles.segmentTextActive]}>Submitted</Text>
+          <Text numberOfLines={1} adjustsFontSizeToFit minimumFontScale={0.75} style={[styles.segmentText, activeTab === 'submitted' && styles.segmentTextActive]}>Submitted</Text>
           <View style={[styles.segmentCount, activeTab === 'submitted' && styles.segmentCountActive]}>
             <Text style={[styles.segmentCountText, activeTab === 'submitted' && styles.segmentCountTextActive]}>
               {loading || loadError ? (submittedItems.length ? `${submittedItems.length}*` : '—') : submittedItems.length}
@@ -818,10 +821,10 @@ const PreviewsScreen = ({
           </View>
         </TouchableOpacity>
         <TouchableOpacity
-          style={[styles.segment, activeTab === 'drafts' && styles.segmentActive]}
+          style={[styles.segment, stackTabs && styles.segmentStacked, activeTab === 'drafts' && styles.segmentActive]}
           activeOpacity={0.8}
           onPress={() => setActiveTab('drafts')}>
-          <Text style={[styles.segmentText, activeTab === 'drafts' && styles.segmentTextActive]}>Drafts</Text>
+          <Text numberOfLines={1} adjustsFontSizeToFit minimumFontScale={0.75} style={[styles.segmentText, activeTab === 'drafts' && styles.segmentTextActive]}>Drafts</Text>
           <View style={[styles.segmentCount, activeTab === 'drafts' && styles.segmentCountActive]}>
             <Text style={[styles.segmentCountText, activeTab === 'drafts' && styles.segmentCountTextActive]}>
               {loading || loadError ? (draftItems.length ? `${draftItems.length}*` : '—') : draftItems.length}
@@ -1019,16 +1022,18 @@ const createStyles = (colors: AppThemeColors, isTablet: boolean) =>
       borderColor: colors.border,
       marginBottom: 14,
     },
+    // One line per tab label: at large text sizes "Submitted" broke as "Submitte / d".
     segment: {
       flex: 1,
       minHeight: 42,
-      paddingHorizontal: 12,
+      paddingHorizontal: 8,
       flexDirection: 'row',
       alignItems: 'center',
       justifyContent: 'center',
-      gap: 8,
+      gap: 6,
       borderRadius: 7,
     },
+    segmentStacked: { flexDirection: 'column', gap: 2, minHeight: 52, paddingVertical: 4 },
     segmentActive: {
       backgroundColor: colors.surfaceRaised,
       shadowColor: colors.shadow,
@@ -1037,7 +1042,7 @@ const createStyles = (colors: AppThemeColors, isTablet: boolean) =>
       shadowRadius: 6,
       elevation: 3,
     },
-    segmentText: { color: colors.textMuted, fontSize: 13, fontWeight: '800' },
+    segmentText: { flexShrink: 1, color: colors.textMuted, fontSize: 13, fontWeight: '800' },
     segmentTextActive: { color: colors.text },
     segmentCount: {
       minWidth: 24,

@@ -38,6 +38,7 @@ import { API_ENDPOINTS } from "../config/api";
 import assetService from "../services/assetService";
 import lotListingService from "../services/lotListingService";
 import assignedApprovalService from "../services/assignedApprovalService";
+import { isNetworkTransportError } from "../services/connectivityService";
 import {
   LOT_REGENERATION_POLL_MS,
   type LotRegenerationState,
@@ -1143,6 +1144,15 @@ const PreviewScreen = ({
             } catch (error: any) {
               if (!isCurrent()) return;
               if (handleLotRegenerationConflict(error)) return;
+              // A dropped connection said only "Could not start Re-Generate."
+              // (phone test 2026-10-11); say why and that nothing was lost.
+              if (isNetworkTransportError(error)) {
+                Alert.alert(
+                  "No connection",
+                  "Re-Generate did not start because the server could not be reached. Your edits are still on screen. Check the signal and tap Re-Generate again."
+                );
+                return;
+              }
               Alert.alert("Error", error?.response?.data?.message || "Could not start Re-Generate.");
             } finally {
               if (isCurrent()) setStartingRegenerationKey(null);

@@ -41,7 +41,10 @@ jest.mock('../services/api', () => ({
 // The real Asset and Lot Listing services run, so the request URLs under
 // test are the ones the app sends; only their upload transport is stubbed.
 jest.mock('../services/directR2UploadService', () => ({ uploadReportFilesDirectToR2: jest.fn() }));
-jest.mock('../services/connectivityService', () => ({ isRetryableRequestError: () => false }));
+jest.mock('../services/connectivityService', () => ({
+  isRetryableRequestError: () => false,
+  isNetworkTransportError: jest.requireActual('../services/connectivityService').isNetworkTransportError,
+}));
 jest.mock('../services/assignedApprovalService', () => ({
   __esModule: true,
   default: { getPreview: jest.fn(), resubmit: jest.fn() },
@@ -379,4 +382,10 @@ it('reports a refused Re-Generate request and unlocks the report', async () => {
   jest.mocked(api.post).mockRejectedValueOnce(new Error('offline'));
   await confirmRegenerate('8');
   expect(Alert.alert).toHaveBeenLastCalledWith('Error', 'Could not start Re-Generate.');
+
+  // A dropped connection says why, and that the edits on screen are kept (phone test 2026-10-11).
+  jest.mocked(api.post).mockRejectedValueOnce(Object.assign(new Error('Network Error'), { request: {} }));
+  await confirmRegenerate('7');
+  expect(Alert.alert).toHaveBeenLastCalledWith('No connection', expect.stringContaining('Your edits are still on screen'));
+  expect(screen.getByRole('button', { name: 'Re-Generate lot 7' })).not.toBeDisabled();
 });
