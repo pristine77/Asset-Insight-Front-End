@@ -45,6 +45,16 @@ import type { CrmDashboardTaskFilter } from '../services/crmService';
 import { useAuth } from '../context/AuthContext';
 import api from '../services/api';
 import CrmModalFrame, { crmTouchTarget } from '../components/crm/CrmModalFrame';
+import CrmFollowUpPicker from '../components/crm/CrmFollowUpPicker';
+import {
+  deviceTimeZone,
+  followUpChange,
+  type FollowUpDraft,
+  followUpReminderText,
+  formatFollowUp,
+  initialFollowUpDraft,
+  isFollowUpPast,
+} from '../services/crmFollowUp';
 
 interface CrmTasksScreenProps {
   onOpenDrawer: () => void;
@@ -576,6 +586,7 @@ const CrmTasksScreen = ({
   const [updateModalVisible, setUpdateModalVisible] = useState(false);
   const [updateStatus, setUpdateStatus] = useState<CrmTaskStatus>('new_lead');
   const [updateLostReason, setUpdateLostReason] = useState<CrmLostReason | ''>('');
+  const [followUpDraft, setFollowUpDraft] = useState<FollowUpDraft>({ date: null, time: null });
   const [comment, setComment] = useState('');
   const [attachments, setAttachments] = useState<UploadableFile[]>([]);
   const [recording, setRecording] = useState<UploadableFile | null>(null);
@@ -1500,6 +1511,8 @@ const CrmTasksScreen = ({
     setSelectedTask(task);
     setUpdateStatus(task.status || 'new_lead');
     setUpdateLostReason(task.lostReason || '');
+    // The lead's upcoming follow-up, or empty when none (or already passed).
+    setFollowUpDraft(initialFollowUpDraft(task));
     setComment('');
     setAttachments([]);
     setRecording(null);
@@ -1519,10 +1532,18 @@ const CrmTasksScreen = ({
   }, [stopRecordingPlayback]);
 
   useEffect(() => {
-    if (!initialTaskId || loading || tasks.length === 0) return;
+    if (!initialTaskId || loading) return;
     const target = tasks.find((t) => t._id === initialTaskId);
     if (target) {
       openUpdateModal(target);
+    } else {
+      // Not in the loaded page (more than 100 open tasks, or a far-off
+      // follow-up opened from the CRM Calendar or a reminder): fetch that one
+      // lead and open it (2026-10-11).
+      const taskId = initialTaskId;
+      void crmTaskApi.getTask(taskId)
+        .then((task) => { if (task?._id === taskId) openUpdateModal(task); })
+        .catch(() => Alert.alert('Lead not found', 'This lead is no longer assigned to you, or it could not be loaded.'));
     }
     onClearInitialTask?.();
   }, [initialTaskId, loading, tasks, openUpdateModal, onClearInitialTask]);
@@ -1654,6 +1675,7 @@ const CrmTasksScreen = ({
     setSelectedTask(null);
     setComment('');
     setUpdateLostReason('');
+    setFollowUpDraft({ date: null, time: null });
     setAttachments([]);
     setRecording(null);
     setCommentRecording(null);
@@ -2073,6 +2095,8 @@ const CrmTasksScreen = ({
         lostReason: updateStatus === 'lost' && updateLostReason ? updateLostReason : undefined,
         attachments,
         recording,
+        // Only a changed follow-up is sent; leaving it alone keeps the lead's.
+        followUp: followUpChange(selectedTask, followUpDraft, updateStatus, deviceTimeZone()),
       });
       if (updatedTask?._id) {
         applyTaskMutationResult(updatedTask);
@@ -2455,6 +2479,21 @@ const CrmTasksScreen = ({
                       Start {formatDate(task.taskStartDate)} • Due {formatDate(task.dueDate)}
                     </Text>
                   </View>
+
+                  {task.followUpDate ? (
+                    <View style={[styles.taskInfoRow, isCompact && styles.taskInfoRowCompact]}>
+                      <Feather name="flag" size={14} color={isFollowUpPast(task) ? '#B91C1C' : '#0369A1'} />
+                      <Text
+                        style={[
+                          styles.taskInfoText,
+                          isCompact && styles.taskInfoTextCompact,
+                          { color: isFollowUpPast(task) ? '#B91C1C' : '#0369A1', fontWeight: '700' },
+                        ]}>
+                        {isFollowUpPast(task) ? 'Follow-up overdue: ' : 'Follow-up '}
+                        {formatFollowUp(task.followUpDate, task.followUpTime)}
+                      </Text>
+                    </View>
+                  ) : null}
 
                   {task.latestComment ? (
                     <Text style={styles.latestComment} numberOfLines={2}>
@@ -3049,10 +3088,17 @@ const CrmTasksScreen = ({
                   </>
                 ) : null}
 
+                {/* Follow-up date (owner decision 2026-10-11). Won and Lost end it. */}
+                {updateStatus !== 'won' && updateStatus !== 'lost' ? (
+                  <CrmFollowUpPicker value={followUpDraft} onChange={setFollowUpDraft} disabled={submitting} />
+                ) : null}
+
                 <View style={styles.autoReminderCard}>
                   <Feather name="clock" size={14} color="#0369A1" />
                   <Text style={styles.autoReminderText}>
-                    {autoReminderText(updateStatus, updateLostReason)}
+                    {followUpDraft.date && updateStatus !== 'won' && updateStatus !== 'lost'
+                      ? followUpReminderText(followUpDraft.date, followUpDraft.time)
+                      : autoReminderText(updateStatus, updateLostReason)}
                   </Text>
                 </View>
 

@@ -119,6 +119,15 @@ export interface CrmTaskItem {
   statusChangedAt?: string;
   taskStartDate?: string;
   dueDate?: string;
+  /** Follow-up date the agent picked (2026-10-11): "YYYY-MM-DD" in followUpTimeZone. */
+  followUpDate?: string;
+  /** "HH:mm", absent for a date-only follow-up. */
+  followUpTime?: string;
+  followUpTimeZone?: string;
+  /** The follow-up moment: its time, or 00:00 that day (ISO). */
+  followUpAt?: string;
+  /** When the reminder comes: 8 a.m. that day, or 1 hour before its time (ISO). */
+  followUpRemindAt?: string;
   latestComment?: string;
   latestAttachmentUrls?: string[];
   latestRecordingUrl?: string;
@@ -126,6 +135,18 @@ export interface CrmTaskItem {
   updates?: CrmTaskUpdateEntry[];
   createdAt: string;
   updatedAt: string;
+}
+
+/** GET /crm/tasks/follow-ups: the follow-up calendar for a date range. */
+export interface CrmFollowUpCalendar {
+  asOf: string;
+  from: string;
+  to: string;
+  timeZone: string;
+  /** Open leads with a follow-up in the range, by follow-up time. */
+  items: CrmTaskItem[];
+  /** Every follow-up that has already passed, oldest first. */
+  overdue: CrmTaskItem[];
 }
 
 export interface CrmTasksResponse {
@@ -212,6 +233,11 @@ interface SubmitTaskUpdatePayload {
   lostReason?: CrmLostReason;
   attachments?: UploadableFile[];
   recording?: UploadableFile | null;
+  /**
+   * Follow-up date (2026-10-11). Set: date "YYYY-MM-DD", optional time "HH:mm"
+   * and the phone's zone. Clear: removes it. Leave out to keep the current one.
+   */
+  followUp?: { date: string; time?: string; timeZone: string } | 'clear';
 }
 
 interface QuickAddLeadPayload {
@@ -275,6 +301,28 @@ class CrmService {
     };
   }
 
+  /** One assigned task (without its history), for opening a lead that is not in the loaded list. */
+  async getTask(taskId: string): Promise<CrmTaskItem> {
+    const { data } = await api.get(`${API_ENDPOINTS.CRM_TASKS}/${encodeURIComponent(taskId)}`);
+    return data?.item as CrmTaskItem;
+  }
+
+  /** Follow-ups from `from` to `to` ("YYYY-MM-DD", at most 62 days) in the phone's zone, plus every passed one. */
+  async getFollowUps(params: { from: string; to: string; timeZone: string }): Promise<CrmFollowUpCalendar> {
+    const query = (["from", "to", "timeZone"] as const)
+      .map((key) => `${key}=${encodeURIComponent(params[key])}`)
+      .join("&");
+    const { data } = await api.get(`${API_ENDPOINTS.CRM_FOLLOW_UPS}?${query}`);
+    return {
+      asOf: String(data?.asOf || ""),
+      from: String(data?.from || params.from),
+      to: String(data?.to || params.to),
+      timeZone: String(data?.timeZone || params.timeZone),
+      items: Array.isArray(data?.items) ? data.items : [],
+      overdue: Array.isArray(data?.overdue) ? data.overdue : [],
+    };
+  }
+
   async quickAddLead(payload: QuickAddLeadPayload): Promise<CrmTaskItem> {
     const { data } = await api.post(API_ENDPOINTS.CRM_TASKS_QUICK_ADD, payload);
     return data?.item as CrmTaskItem;
@@ -289,6 +337,13 @@ class CrmService {
       formData.append("status", payload.status);
     }
     if (payload.lostReason) formData.append("lostReason", payload.lostReason);
+    if (payload.followUp === "clear") {
+      formData.append("clearFollowUp", "true");
+    } else if (payload.followUp) {
+      formData.append("followUpDate", payload.followUp.date);
+      if (payload.followUp.time) formData.append("followUpTime", payload.followUp.time);
+      formData.append("followUpTimeZone", payload.followUp.timeZone);
+    }
 
     for (const file of payload.attachments || []) {
       formData.append(

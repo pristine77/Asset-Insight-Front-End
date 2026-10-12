@@ -29,6 +29,7 @@ export type ScreenName =
   | 'crmEntry'
   | 'crmDashboard'
   | 'crmTasks'
+  | 'crmCalendar'
   | 'crmOutlookCalendar';
 
 type CrmMode = 'listing' | 'crm';
@@ -106,6 +107,8 @@ const DrawerContent = ({
       const crmItems: NavigationItem[] = [
         { icon: 'pie-chart', label: 'CRM Dashboard', screen: 'crmDashboard' },
         { icon: 'check-square', label: 'CRM Tasks', screen: 'crmTasks' },
+        // Follow-up dates by day (2026-10-11).
+        { icon: 'flag', label: 'CRM Calendar', screen: 'crmCalendar' },
         { icon: 'calendar', label: 'Outlook Calendar', screen: 'crmOutlookCalendar' },
       ];
       return crmItems.map((item) => ({

@@ -1,7 +1,8 @@
 import type { WorkspaceNotification } from "@/services/notifications";
 
 const CRM_NOTIFICATION_TYPES = new Set([
-  "crm_new_task", "crm_message_from_admin", "crm_due", "crm_reminder",
+  // crm_follow_up: follow-up date reminders (2026-10-11).
+  "crm_new_task", "crm_message_from_admin", "crm_due", "crm_follow_up", "crm_reminder",
   "crm_transfer_request", "crm_transfer_response", "crm_agent_enabled",
   "lead_assigned", "task_reminder",
 ]);

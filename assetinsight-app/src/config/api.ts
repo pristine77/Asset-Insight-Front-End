@@ -74,6 +74,7 @@ export const API_ENDPOINTS = {
   GET_LOT_LISTING_PROGRESS: '/lot-listing/progress',
   // CRM endpoints
   CRM_MY_TASKS: '/crm/tasks/my',
+  CRM_FOLLOW_UPS: '/crm/tasks/follow-ups',
   CRM_TASKS_QUICK_ADD: '/crm/tasks/quick-add',
   CRM_TASKS: '/crm/tasks',
   CRM_TASK_COMMENT_TRANSCRIBE: '/crm/tasks/comment/transcribe',

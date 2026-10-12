@@ -30,6 +30,7 @@ import CrmEntryScreen from './src/screens/CrmEntryScreen';
 import CrmDashboardScreen from './src/screens/CrmDashboardScreen';
 import CrmTasksScreen from './src/screens/CrmTasksScreen';
 import CrmOutlookCalendarScreen from './src/screens/CrmOutlookCalendarScreen';
+import CrmCalendarScreen from './src/screens/CrmCalendarScreen';
 import AuctionManagementScreen from './src/screens/AuctionManagementScreen';
 import SupportScreen from './src/screens/SupportScreen';
 import DrawerContent, { ScreenName as DrawerScreenName } from './src/components/DrawerContent';
@@ -71,7 +72,7 @@ type CrmTaskOpenTarget =
       status?: CrmTaskStatus | null;
     };
 
-const CRM_SCREENS: ScreenName[] = ['crmEntry', 'crmDashboard', 'crmTasks', 'crmOutlookCalendar'];
+const CRM_SCREENS: ScreenName[] = ['crmEntry', 'crmDashboard', 'crmTasks', 'crmCalendar', 'crmOutlookCalendar'];
 const LISTING_SCREENS: ScreenName[] = ['dashboard', 'auctionManagement', 'savedInputs', 'offlineReports', 'reports', 'approvals', 'releases', 'preview'];
 
 function MainApp() {
@@ -416,6 +417,25 @@ function MainApp() {
         }
 
         return <CrmOutlookCalendarScreen onOpenDrawer={openDrawer} onBack={() => setActiveScreen('crmTasks')} />;
+      case 'crmCalendar':
+        // Follow-up dates by day (2026-10-11); same CRM-agent and CRM-mode gate as the other CRM screens.
+        if (!user?.isCrmAgent || crmMode !== 'crm') {
+          return (
+            <DashboardScreen
+              onOpenDrawer={openDrawer}
+              savedInputToLoad={savedInputToLoad}
+              onClearSavedInput={clearSavedInput}
+            />
+          );
+        }
+
+        return (
+          <CrmCalendarScreen
+            onOpenDrawer={openDrawer}
+            onBack={() => setActiveScreen('crmTasks')}
+            onOpenTask={(taskId) => openCrmTasksScreen({ taskId })}
+          />
+        );
       case 'dashboard':
         return (
           <DashboardScreen 
