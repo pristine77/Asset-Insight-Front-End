@@ -3,8 +3,10 @@
  * when a follow-up counts as passed, and the CRM Calendar's month grid.
  */
 import {
+  asSentence,
   buildMonthGrid,
   followUpChange,
+  followUpReminderSentFor,
   followUpReminderText,
   formatFollowUp,
   groupFollowUpsByDate,
@@ -31,6 +33,38 @@ describe('dates on the phone', () => {
     expect(formatFollowUp('2027-01-04', null, NOW)).toMatch(/2027/);
     expect(followUpReminderText('2026-10-20', null, NOW)).toMatch(/Reminder at 8 a\.m\. that day/);
     expect(followUpReminderText('2026-10-20', '15:00', NOW)).toMatch(/Reminder 1 hour before/);
+  });
+
+  it('ends a time like "2:00 p.m." with one period, not two', () => {
+    expect(asSentence('Follow-up Tue, Oct 20 · 2:00 p.m.')).toBe('Follow-up Tue, Oct 20 · 2:00 p.m.');
+    expect(asSentence('Follow-up Tue, Oct 20 · 2:00 PM')).toBe('Follow-up Tue, Oct 20 · 2:00 PM.');
+    expect(followUpReminderText('2026-10-20', '14:00', NOW)).not.toMatch(/\.\./);
+    expect(followUpReminderText('2026-10-20', null, NOW)).not.toMatch(/\.\./);
+  });
+
+  it('says the reminder comes within minutes once its moment has passed', () => {
+    // Today after 8 a.m.: the server's next sweep sends it.
+    expect(followUpReminderText('2026-10-11', null, NOW)).toMatch(/Reminder within a few minutes\./);
+    expect(followUpReminderText('2026-10-11', null, new Date(2026, 9, 11, 7, 0))).toMatch(/Reminder at 8 a\.m\. that day/);
+    // Less than an hour ahead.
+    expect(followUpReminderText('2026-10-11', '12:30', NOW)).toMatch(/Reminder within a few minutes\./);
+    expect(followUpReminderText('2026-10-11', '13:30', NOW)).toMatch(/Reminder 1 hour before/);
+  });
+
+  it('says "Reminder sent" for the saved follow-up once the server has sent it', () => {
+    const sent = task({ followUpDate: '2026-10-11', followUpReminderSentAt: '2026-10-11T14:00:00.000Z' });
+    expect(followUpReminderSentFor(sent, { date: '2026-10-11', time: null })).toBe(true);
+    // A different pick gets a new reminder.
+    expect(followUpReminderSentFor(sent, { date: '2026-10-12', time: null })).toBe(false);
+    expect(followUpReminderSentFor(sent, { date: '2026-10-11', time: '15:00' })).toBe(false);
+    expect(followUpReminderSentFor(task({ followUpDate: '2026-10-11' }), { date: '2026-10-11', time: null })).toBe(false);
+    expect(followUpReminderText('2026-10-11', null, NOW, true)).toMatch(/Follow-up .*Oct 11\. Reminder sent\. Automatic/);
+  });
+
+  it('asks for a later time when the picked time has passed (the server refuses it)', () => {
+    const text = followUpReminderText('2026-10-11', '11:00', NOW);
+    expect(text).toMatch(/That time has passed\. Pick a later time or remove the time\./);
+    expect(text).not.toMatch(/Automatic reminders/);
   });
 
   it('a date-only follow-up passes after its day; a timed one after its time', () => {

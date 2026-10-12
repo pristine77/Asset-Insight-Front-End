@@ -50,6 +50,7 @@ import {
   deviceTimeZone,
   followUpChange,
   type FollowUpDraft,
+  followUpReminderSentFor,
   followUpReminderText,
   formatFollowUp,
   initialFollowUpDraft,
@@ -3097,7 +3098,7 @@ const CrmTasksScreen = ({
                   <Feather name="clock" size={14} color="#0369A1" />
                   <Text style={styles.autoReminderText}>
                     {followUpDraft.date && updateStatus !== 'won' && updateStatus !== 'lost'
-                      ? followUpReminderText(followUpDraft.date, followUpDraft.time)
+                      ? followUpReminderText(followUpDraft.date, followUpDraft.time, new Date(), followUpReminderSentFor(selectedTask, followUpDraft))
                       : autoReminderText(updateStatus, updateLostReason)}
                   </Text>
                 </View>
@@ -5083,6 +5084,8 @@ const styles = StyleSheet.create({
     fontSize: 11,
     fontWeight: '700',
   },
+  // Two equal columns, in workflow order (New Lead | Contacted, ... Won | Lost),
+  // so the status buttons line up instead of wrapping one, two or three a row.
   statusGrid: {
     flexDirection: 'row',
     flexWrap: 'wrap',
@@ -5092,16 +5095,20 @@ const styles = StyleSheet.create({
     gap: 5,
   },
   statusOptionVeryCompact: {
-    paddingHorizontal: 8,
+    paddingHorizontal: 6,
     paddingVertical: 4,
   },
   statusOption: {
+    // Basis under half plus grow: exactly two per row, both the same width.
+    flexBasis: '40%',
+    flexGrow: 1,
     minHeight: 44,
+    alignItems: 'center',
     justifyContent: 'center',
     borderWidth: 1,
     borderColor: '#D1D5DB',
-    borderRadius: 999,
-    paddingHorizontal: 10,
+    borderRadius: 12,
+    paddingHorizontal: 8,
     paddingVertical: 6,
     shadowColor: '#000',
     shadowOffset: { width: 0, height: 1 },
@@ -5123,6 +5130,7 @@ const styles = StyleSheet.create({
     fontSize: 11,
     color: '#4B5563',
     fontWeight: '600',
+    textAlign: 'center',
   },
   statusOptionTextVeryCompact: {
     fontSize: 10,

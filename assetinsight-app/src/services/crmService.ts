@@ -128,6 +128,8 @@ export interface CrmTaskItem {
   followUpAt?: string;
   /** When the reminder comes: 8 a.m. that day, or 1 hour before its time (ISO). */
   followUpRemindAt?: string;
+  /** Set once the server has sent that reminder (ISO). */
+  followUpReminderSentAt?: string;
   latestComment?: string;
   latestAttachmentUrls?: string[];
   latestRecordingUrl?: string;

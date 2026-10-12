@@ -12,6 +12,7 @@ import { Feather } from '@expo/vector-icons';
 import { crmTouchTarget } from './CrmModalFrame';
 import {
   type FollowUpDraft,
+  asSentence,
   formatFollowUpDate,
   formatFollowUpTime,
   localDate,
@@ -50,7 +51,7 @@ export default function CrmFollowUpPicker({ value, onChange, disabled = false }:
         style={[styles.trigger, disabled && styles.triggerDisabled]}
         disabled={disabled}
         accessibilityRole="button"
-        accessibilityLabel={value.date ? `Follow-up date: ${formatFollowUpDate(value.date)}. Change` : 'Pick a follow-up date'}
+        accessibilityLabel={value.date ? `${asSentence(`Follow-up date: ${formatFollowUpDate(value.date)}`)} Change` : 'Pick a follow-up date'}
         accessibilityState={{ disabled, expanded: picking === 'date' }}
         onPress={() => setPicking('date')}
         activeOpacity={0.8}>
@@ -67,7 +68,7 @@ export default function CrmFollowUpPicker({ value, onChange, disabled = false }:
             style={styles.metaButton}
             disabled={disabled}
             accessibilityRole="button"
-            accessibilityLabel={value.time ? `Follow-up time: ${formatFollowUpTime(value.date, value.time)}. Change` : 'Add a follow-up time'}
+            accessibilityLabel={value.time ? `${asSentence(`Follow-up time: ${formatFollowUpTime(value.date, value.time)}`)} Change` : 'Add a follow-up time'}
             onPress={() => setPicking('time')}>
             <Feather name="clock" size={14} color="#0C4A6E" />
             <Text style={styles.metaButtonText}>

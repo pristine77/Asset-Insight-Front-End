@@ -82,12 +82,45 @@ export function isFollowUpPast(task: Pick<CrmTaskItem, 'followUpDate' | 'followU
 
 const isClosed = (status: CrmTaskStatus) => status === 'won' || status === 'lost';
 
-/** What the reminder card says once a follow-up is picked. */
-export function followUpReminderText(date: string, time?: string | null, now: Date = new Date()): string {
-  const when = formatFollowUp(date, time, now);
-  return time
-    ? `Follow-up ${when}. Reminder 1 hour before. Automatic reminders are paused until then.`
-    : `Follow-up ${when}. Reminder at 8 a.m. that day. Automatic reminders are paused until then.`;
+/**
+ * Ends text with exactly one period. Canadian English phones write times as
+ * "2:00 p.m.", so appending "." blindly gave "2:00 p.m.." on screen and in
+ * screen-reader labels.
+ */
+export function asSentence(text: string): string {
+  return text.endsWith('.') ? text : `${text}.`;
+}
+
+/** The server's reminder hour for a date-only follow-up (8 a.m. there). */
+const DATE_ONLY_REMINDER_TIME = '08:00';
+const TIMED_REMINDER_LEAD_MS = 60 * 60 * 1000;
+
+/**
+ * What the reminder card says once a follow-up is picked. When the reminder
+ * moment has already come (today after 8 a.m., or less than an hour ahead) the
+ * server's next sweep sends it, every 5 minutes, so the card says so instead
+ * of naming a time that has passed. A time that has passed is refused by the
+ * server, so the card asks for a later one before Submit. Once the server
+ * has sent the reminder for the saved follow-up the card says so.
+ */
+export function followUpReminderText(
+  date: string,
+  time?: string | null,
+  now: Date = new Date(),
+  reminderSent = false,
+): string {
+  const when = asSentence(`Follow-up ${formatFollowUp(date, time, now)}`);
+  if (reminderSent) return `${when} Reminder sent. Automatic reminders are paused until then.`;
+  if (time && localDate(date, time).getTime() < now.getTime()) {
+    return `${when} That time has passed. Pick a later time or remove the time.`;
+  }
+  const remindAt = time
+    ? localDate(date, time).getTime() - TIMED_REMINDER_LEAD_MS
+    : localDate(date, DATE_ONLY_REMINDER_TIME).getTime();
+  const reminder = remindAt <= now.getTime()
+    ? 'Reminder within a few minutes.'
+    : time ? 'Reminder 1 hour before.' : 'Reminder at 8 a.m. that day.';
+  return `${when} ${reminder} Automatic reminders are paused until then.`;
 }
 
 /**
@@ -141,4 +174,10 @@ export function followUpChange(
   if (!draft.date) return original.date ? 'clear' : undefined;
   if (original.date === draft.date && original.time === draft.time) return undefined;
   return { date: draft.date, ...(draft.time ? { time: draft.time } : {}), timeZone };
+}
+
+/** True when the draft is the lead's saved follow-up and the server has already sent its reminder. */
+export function followUpReminderSentFor(task: CrmTaskItem | null | undefined, draft: FollowUpDraft): boolean {
+  if (!task?.followUpReminderSentAt || !task.followUpDate || !draft.date) return false;
+  return task.followUpDate === draft.date && (task.followUpTime || null) === draft.time;
 }
