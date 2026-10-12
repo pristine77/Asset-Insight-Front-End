@@ -13,7 +13,9 @@ import { Feather } from '@expo/vector-icons';
 import { useAuth } from '../context/AuthContext';
 import { useAppTheme, type AppThemeColors } from '../context/ThemeContext';
 
-const BrandIcon = require('../../assets/assetInsightLogo.png');
+// The wordmark cropped tight with a transparent background (862 x 294). The old
+// square logo on black showed as a small black box with unreadable text.
+const BrandWordmark = require('../../assets/asset-insight-wordmark.png');
 
 export type ScreenName =
   | 'dashboard'
@@ -157,7 +159,10 @@ const DrawerContent = ({
   return (
     <SafeAreaView style={styles.container} edges={['left', 'right', 'bottom']}>
       <View style={[styles.brandBar, { paddingTop: Math.max(insets.top, 10) + 4 }]}>
-        <Image source={BrandIcon} style={styles.logo} resizeMode="contain" />
+        {/* Dark theme: a white plate keeps the black "ASSET" readable without recolouring the logo. */}
+        <View style={isDark ? styles.logoPlateDark : null}>
+          <Image source={BrandWordmark} style={styles.logo} resizeMode="contain" accessibilityLabel="Asset Insight" />
+        </View>
         <TouchableOpacity onPress={onClose} style={styles.closeButton} activeOpacity={0.72}>
           <Feather name="x" size={18} color={colors.textSecondary} />
         </TouchableOpacity>
@@ -261,7 +266,9 @@ const createStyles = (colors: AppThemeColors) =>
       borderBottomWidth: 1,
       borderBottomColor: colors.border,
     },
-    logo: { width: 132, height: 46 },
+    // 862 x 294 wordmark: 132 wide is 45 tall.
+    logo: { width: 132, height: 45 },
+    logoPlateDark: { backgroundColor: '#FFFFFF', borderRadius: 8, paddingHorizontal: 8, paddingVertical: 4 },
     closeButton: {
       width: 36,
       height: 36,
