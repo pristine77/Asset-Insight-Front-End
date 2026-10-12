@@ -103,12 +103,27 @@ export function isRecoverableDraftCloudError(draft: OfflineReportDraft): boolean
   );
 }
 
+/**
+ * Whether a cloud copy of this draft is worth making (2026-10-11 phone test).
+ * A draft with no photos or video -- a form closed after typing a contract
+ * number -- was copied to the cloud as an empty second draft of that contract.
+ * It is copied once it has a photo or video. A draft already copied keeps its
+ * cloud copy current whatever it holds.
+ */
+export function hasCloudDraftContent(draft: Pick<OfflineReportDraft, 'lots' | 'cloudId' | 'cloudSyncedAt'>): boolean {
+  if (draft.cloudId || draft.cloudSyncedAt) return true;
+  return (draft.lots || []).some((lot) =>
+    (lot.mainImages?.length || 0) + (lot.extraImages?.length || 0) + (lot.videoFiles?.length || 0) > 0);
+}
+
 export function canAttemptDraftCloudSync(
   draft: OfflineReportDraft,
   options: { force?: boolean; now?: number } = {}
 ): boolean {
   // Explicit offline capture never permits photo/cloud draft sync, including Force sync.
   if (!allowsCloudDraft(draft)) return false;
+  // Nothing captured yet, including Force sync: no empty cloud copies.
+  if (!hasCloudDraftContent(draft)) return false;
   if (options.force) return true;
   if (!draft.cloudSyncError) return true;
   if (!isRecoverableDraftCloudError(draft)) return false;

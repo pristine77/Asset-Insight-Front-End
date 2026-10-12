@@ -13,6 +13,7 @@ jest.mock('./localMediaStore', () => ({ LocalMediaStore: {
 jest.mock('./offlineCaptureStore', () => ({ __esModule: true, default: {
   setOwner: jest.fn(), getOwnerId: jest.fn(), initialize: jest.fn(), getDraft: jest.fn(),
   saveDraft: jest.fn(), createCloudDraft: jest.fn(), updateDraft: jest.fn(), listDrafts: jest.fn(),
+  listSummaries: jest.fn(), setSubmissionState: jest.fn(),
 } }));
 
 let saved: Map<string, OfflineReportDraft>;
@@ -30,6 +31,24 @@ beforeEach(() => {
     const next = change(saved.get(id)!); saved.set(id, next); return next;
   });
   jest.mocked(OfflineCaptureStore.listDrafts).mockImplementation(async () => [...saved.values()]);
+  // The store's visible summaries, as offlineCaptureStore.ts builds them.
+  jest.mocked(OfflineCaptureStore.listSummaries).mockImplementation(async (type) => [...saved.values()]
+    .filter((draft) => (!type || draft.type === type) && !['accepted', 'submitted', 'discarded'].includes(draft.submissionState || ''))
+    .map((draft) => ({
+      id: draft.id, type: draft.type, title: draft.title, contractNo: draft.contractNo, createdAt: draft.createdAt, updatedAt: draft.updatedAt,
+      ownerId: draft.ownerId, captureMode: draft.captureMode || 'online', localRevision: draft.localRevision || 0,
+      submissionState: draft.submissionState || 'local', manualSubmissionRequired: draft.manualSubmissionRequired,
+      counts: {
+        lots: draft.lots.length, mainImages: 0, extraImages: 0, missingImages: 0, perLot: [],
+        images: draft.lots.reduce((sum, lot) => sum + lot.mainImages.length + lot.extraImages.length, 0),
+        videos: draft.lots.reduce((sum, lot) => sum + (lot.videoFiles?.length || 0), 0),
+      },
+    })));
+  jest.mocked(OfflineCaptureStore.setSubmissionState).mockImplementation(async (id, state) => {
+    const draft = saved.get(id);
+    if (draft) saved.set(id, { ...draft, submissionState: state });
+    return saved.get(id) as any;
+  });
   jest.mocked(LocalMediaStore.getFileInfo).mockResolvedValue({ exists: true, size: 50 });
   jest.mocked(LocalMediaStore.importMedia).mockImplementation(async (args) => ({ mediaId: args.mediaId || `stable-${args.sourceUri}`, uri: args.sourceUri, ownership: 'camera', name: args.name!, type: args.type!, sourceUri: args.sourceUri, createdAt: '2026-09-17T10:00:00Z' }));
 });
@@ -148,4 +167,79 @@ it('uses owner-bound create-only storage for cloud restoration and never overwri
   jest.mocked(OfflineCaptureStore.getOwnerId).mockReturnValue('other');
   await expect(AutoSaveService.saveCloudDraftSnapshot(args)).rejects.toThrow('account changed');
   expect(OfflineCaptureStore.createCloudDraft).toHaveBeenCalledTimes(1);
+});
+
+/*
+ * Empty duplicate drafts (owner, 2026-10-11 phone test): a form closed after
+ * typing a contract number leaves a draft with no photos; opening the form
+ * again starts another. When the new draft gets its first photo, the older
+ * empty one of the same contract is discarded -- and only such a draft.
+ */
+describe('empty drafts of the same contract', () => {
+  const emptyDraft = (id: string, values: Partial<OfflineReportDraft> = {}): OfflineReportDraft => ({
+    id, ownerId: 'owner', type: 'lotListing', title: '93530', contractNo: '93530', normalizedContractNo: '93530',
+    captureMode: 'online', submissionState: 'local', localRevision: 1,
+    formData: { contractNo: '93530', clientSubmissionId: `submit-${id}` }, lots: [], activeLotIdx: 0,
+    createdAt: '2026-10-11T21:39:00.000Z', updatedAt: '2026-10-11T21:39:00.000Z',
+    ...values,
+  } as OfflineReportDraft);
+  const lotListing = (id: string, files: ReturnType<typeof photo>[], contractNo = '93530') => ({
+    id, type: 'lotListing' as const, captureMode: 'online' as const, activeLotIdx: 0,
+    formData: { contractNo, captureMode: 'online' as const, clientSubmissionId: `submit-${id}` },
+    lots: [{ id: 'lot', mode: 'single_lot' as const, files, extraFiles: [], coverIndex: 0 }],
+  });
+  const state = (id: string) => saved.get(id)?.submissionState;
+
+  it('discards the older empty draft when the new draft gets its first photo', async () => {
+    saved.set('empty', emptyDraft('empty'));
+    await AutoSaveService.saveDraft(lotListing('new', [photo(1)], ' 93530 '));
+    expect(state('empty')).toBe('discarded');
+    expect(state('new')).not.toBe('discarded');
+  });
+
+  it('waits for the first photo: a draft that has none yet discards nothing', async () => {
+    saved.set('empty', emptyDraft('empty'));
+    await AutoSaveService.saveDraft(lotListing('new', []));
+    expect(state('empty')).toBe('local');
+    expect(OfflineCaptureStore.listSummaries).not.toHaveBeenCalled();
+  });
+
+  it('checks once per draft, not on every later autosave', async () => {
+    await AutoSaveService.saveDraft(lotListing('new', [photo(1)]));
+    await AutoSaveService.saveDraft(lotListing('new', [photo(1), photo(2)]));
+    expect(OfflineCaptureStore.listSummaries).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps every draft that holds something or belongs elsewhere', async () => {
+    const kept = {
+      withPhoto: emptyDraft('withPhoto', { lots: [{ id: 'l', mode: 'single_lot', mainImages: [photo(9)], extraImages: [], videoFiles: [], coverIndex: 0 }] as any }),
+      withVideo: emptyDraft('withVideo', { lots: [{ id: 'l', mode: 'single_lot', mainImages: [], extraImages: [], videoFiles: [{ uri: 'file:///clip.mp4' }], coverIndex: 0 }] as any }),
+      beingSent: emptyDraft('beingSent', { submissionState: 'paused' }),
+      inCloud: emptyDraft('inCloud', { cloudId: 'cloud-1' }),
+      offline: emptyDraft('offline', { captureMode: 'offline' }),
+      manual: emptyDraft('manual', { manualSubmissionRequired: true }),
+      incoming: emptyDraft('incoming', { formData: { contractNo: '93530', auctioneerWorkItemId: 'work-1' } as any }),
+      otherContract: emptyDraft('otherContract', { contractNo: '93531', normalizedContractNo: '93531', formData: { contractNo: '93531' } as any }),
+      otherType: emptyDraft('otherType', { type: 'asset' }),
+      otherOwner: emptyDraft('otherOwner', { ownerId: 'someone-else' }),
+      newer: emptyDraft('newer', { createdAt: '2999-01-01T00:00:00.000Z' }),
+    };
+    for (const draft of Object.values(kept)) saved.set(draft.id, draft);
+    await AutoSaveService.saveDraft(lotListing('new', [photo(1)]));
+    for (const id of Object.keys(kept)) expect([id, state(id)]).toEqual([id, kept[id as keyof typeof kept].submissionState]);
+  });
+
+  it('never fails the save when the check cannot run', async () => {
+    saved.set('empty', emptyDraft('empty'));
+    jest.mocked(OfflineCaptureStore.listSummaries).mockRejectedValueOnce(new Error('database busy'));
+    await expect(AutoSaveService.saveDraft(lotListing('new', [photo(1)]))).resolves.toMatchObject({ id: 'new' });
+    expect(state('empty')).toBe('local');
+  });
+
+  it('leaves an Offline capture alone, whatever it holds', async () => {
+    saved.set('empty', emptyDraft('empty'));
+    const offline = { ...lotListing('new', [photo(1)]), captureMode: 'offline' as const };
+    await AutoSaveService.saveDraft(offline);
+    expect(state('empty')).toBe('local');
+  });
 });

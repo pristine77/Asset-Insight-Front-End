@@ -29,8 +29,13 @@ import backgroundUploadManager, {
   ALREADY_UPLOADING_MESSAGE,
   ALREADY_UPLOADING_TITLE,
   BACKGROUND_UPLOAD_BUSY_MESSAGE,
+  WAITING_FOR_SIGNAL_MESSAGE,
+  WAITING_FOR_SIGNAL_TITLE,
 } from '../../services/backgroundUploadManager';
 import { CAMERA_NOT_OPENED_TITLE, cameraOpenFailureButtons, describeCameraOpenFailure } from '../../utils/cameraOpenFailure';
+import { UPLOAD_WAITING_FOR_CONNECTION } from '../../services/uploadResumePolicy';
+import { useUploadAutoResume } from './useUploadAutoResume';
+import UploadWaitingForSignal from './UploadWaitingForSignal';
 import { needsExplicitUploadResume, setDraftCaptureMode } from '../../services/offlineDraftPolicy';
 import CameraScreen from '../camera/NativeAuctionCameraScreen';
 import { MixedLot, createNewLot } from '../camera/types';
@@ -79,6 +84,8 @@ const isoDate = (d: Date) =>
 
 type ValuationMethod = 'FML' | 'TKV' | 'OLV' | 'FLV';
 const LOT_LISTING_VALUATION_METHODS: ValuationMethod[] = ['FML'];
+/** The header controls are drawn smaller (2026-10-11); this keeps each touch area at 44 points or more. */
+const HEADER_HIT_SLOP = { top: 4, bottom: 4, left: 4, right: 4 };
 
 const LotListingFormSheet = ({
   visible,
@@ -178,7 +185,13 @@ const LotListingFormSheet = ({
     // this operation as well.
     pauseUploadOperation(activeOperationRef.current);
   };
-  // Interrupted uploads always require an explicit Resume, including after reconnect.
+  // An upload the app stopped by itself (no connection at Submit, lost signal,
+  // stalled transfer) continues once the connection is steady, while this
+  // listing stays open (useUploadAutoResume; owner decision 2026-10-11,
+  // restoring 2026-10-02). handleSubmitRef gives that later resume the handler
+  // from the latest render.
+  const autoResume = useUploadAutoResume(visible, async () => (await OfflineQueueService.getConnectivityStatus()).status === 'online');
+  const handleSubmitRef = useRef<(destination?: AuctionManagementDestination, options?: { nextLot?: boolean; automaticResume?: boolean }) => Promise<void>>(async () => undefined);
   const autoSaveTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const loadedDraftIdRef = useRef<string | null>(null);
   const awaitingDraft = Boolean(draftIdToLoad && loadedDraftIdRef.current !== draftIdToLoad);
@@ -859,7 +872,7 @@ const LotListingFormSheet = ({
 
   const handleSubmit = async (
     destination: AuctionManagementDestination = 'LottingBoard',
-    options: { forceNew?: boolean; nextLot?: boolean; replaceSubmissionId?: string; replacementSourceId?: string; newSubmissionFromId?: string } = {}
+    options: { forceNew?: boolean; nextLot?: boolean; replaceSubmissionId?: string; replacementSourceId?: string; newSubmissionFromId?: string; automaticResume?: boolean } = {}
   ) => {
     if (submissionLockRef.current || saveLock.current || awaitingDraft || submitting || uploadAcceptedRef.current || auctioneerControl?.accepted) return;
     if (options.nextLot && captureMode === 'offline') return;
@@ -885,6 +898,10 @@ const LotListingFormSheet = ({
     // prompts can appear; this attempt uses up that mark. Supported Android
     // device-file submissions use the durable scheduler below. Continue reserves
     // its independent next form after that durable handoff.
+    // No connection (2026-10-11): an ordinary Submit that the line may take
+    // waits there for signal on every build -- on durable builds too, where the
+    // line then hands it to Android -- so the form can close. Everything else
+    // waits in this open form (autoResume) and shows "Waiting for signal".
     const plannedDraftId = currentDraftId || draftIdentityRef.current;
     // Never save over, or send a second time, a draft the line is sending.
     if (backgroundUploadManager.isBusy(plannedDraftId)) {
@@ -894,12 +911,15 @@ const LotListingFormSheet = ({
     const durable = durableReportTransfer.available() && lots.every(lot =>
       [...lot.files, ...(lot.extraFiles || [])].every(file => /^(file|content):\/\//.test(getPhotoUploadUri(file))) &&
       (!lot.videoFile || /^(file|content):\/\//.test(lot.videoFile.uri)));
-    let background = !durable && backgroundUploads && !auctioneer && !isAuctionManagementMode && !options.nextLot && !options.forceNew
-      && !options.replaceSubmissionId && !options.newSubmissionFromId;
+    let lineEligible = backgroundUploads && !auctioneer && !isAuctionManagementMode && !options.nextLot && !options.forceNew
+      && !options.replaceSubmissionId && !options.newSubmissionFromId && !options.automaticResume;
     if (backgroundUploads && backgroundUploadManager.prefersForeground(plannedDraftId)) {
-      background = false;
+      lineEligible = false;
       backgroundUploadManager.consumeForegroundMark(plannedDraftId);
     }
+    const background = !durable && lineEligible;
+    // A person's Submit or Resume starts a fresh count of automatic tries.
+    autoResume.beginAttempt(options.automaticResume === true);
     // Bind the user's explicit action across local preparation and transport.
     const operation = createUploadOperation();
     activeOperationRef.current = operation;
@@ -950,7 +970,17 @@ const LotListingFormSheet = ({
       draftSaved = true;
       attemptDraftId = localDraft.id;
       operation.assertActive();
-      await prepareOfflineSubmission(localDraft);
+      // Set when the phone reports no connection at all: an ordinary Submit then
+      // goes to the upload line to wait for signal.
+      let noConnection = false;
+      try {
+        await prepareOfflineSubmission(localDraft);
+      } catch (error: any) {
+        // The upload line waits for a connection by itself and re-runs every
+        // other check on each attempt. Any other refusal stops here, as before.
+        if (!lineEligible || error?.code !== UPLOAD_WAITING_FOR_CONNECTION) throw error;
+        noConnection = true;
+      }
       operation.assertActive();
       await OfflineCaptureStore.setSubmissionState(localDraft.id, 'ready');
       operation.assertActive();
@@ -1035,41 +1065,65 @@ const LotListingFormSheet = ({
         coverIndex: lot.coverIndex,
       }));
 
-      if (background) {
+      // The same details and photos this form would send, frozen now.
+      const queuedDetails = details;
+      const queuedLots = serviceLots;
+      const queueTitle = contractNo.trim() || 'Lot listing';
+      /**
+       * Hands this report to the upload line and closes the form. With
+       * withDurableHandoff (Android durable builds), each attempt of the line
+       * reserves the upload on the server and hands it to Android, which
+       * continues it; the line then lets go (backgroundUploadManager.ts).
+       */
+      const handToLine = async (withDurableHandoff: boolean) => {
         if (!attemptOwner) throw new Error('Sign in to the account that owns this draft.');
-        // The same details and photos this form would send, frozen now.
-        const queuedDetails = details;
-        const queuedLots = serviceLots;
         const handedOff = backgroundUploadManager.enqueue({
           draftId: localDraft.id,
           type: 'lotListing',
           ownerId: attemptOwner,
-          title: contractNo.trim() || 'Lot listing',
+          title: queueTitle,
           totalFiles: submissionFileCount,
           draft: localDraft,
           upload: (onProgress, uploadOperation) =>
-            lotListingService.createLotListing(queuedDetails, queuedLots, onProgress, { operation: uploadOperation }),
+            lotListingService.createLotListing(queuedDetails, queuedLots, onProgress, {
+              operation: uploadOperation,
+              ...(withDurableHandoff ? { handoff: durableReportTransfer.handoff(localDraft, queueTitle) } : {}),
+            }),
         });
         setSubmitting(false);
         if (!handedOff) {
           Alert.alert(ALREADY_UPLOADING_TITLE, ALREADY_UPLOADING_MESSAGE);
           return;
         }
-        // No alert: the upload bar shows progress and the outcome from here.
         await resetForm();
         onClose();
+        // With a connection there is no alert: the upload bar shows progress
+        // and the outcome. Without one, say that it waits and sends by itself.
+        if (noConnection) Alert.alert(WAITING_FOR_SIGNAL_TITLE, WAITING_FOR_SIGNAL_MESSAGE);
+      };
+
+      if (background) {
+        await handToLine(false);
         return;
       }
 
-      const connectivity = await OfflineQueueService.getConnectivityStatus();
+      const offline = noConnection || (await OfflineQueueService.getConnectivityStatus()).status === 'offline';
       operation.assertActive();
-      if (options.nextLot && connectivity.status === 'offline') {
+      if (options.nextLot && offline) {
         setSubmitting(false);
         Alert.alert('Connection required', durable ? 'Keep this lot open and retry when online. The saved upload and its next lot need a short server reservation.' : 'Keep this lot open and retry when online. A new lot starts only after the server accepts this report.');
         return;
       }
-      if (connectivity.status === 'offline') {
-        throw new Error('Saved on this device. Connect and tap Resume upload. Nothing will submit automatically.');
+      if (offline && lineEligible) {
+        // Durable build, ordinary Submit: wait in the line, then hand to Android.
+        noConnection = true;
+        await handToLine(true);
+        return;
+      }
+      if (offline) {
+        // While this listing stays open it waits for the connection and starts
+        // by itself (autoResume); this message shows only when it stops waiting.
+        throw Object.assign(new Error('Saved on this device. Connect and tap Resume upload.'), { code: UPLOAD_WAITING_FOR_CONNECTION });
       }
 
       const modernDraft = auctioneer ? await saveCurrentDraftNow() : null;
@@ -1078,6 +1132,7 @@ const LotListingFormSheet = ({
         if (!operation.isActive() || recoveryScopeRef.current !== attemptRecoveryScope || OfflineCaptureStore.getOwnerId() !== attemptOwner) return;
         setUploadProgress(progress);
         if (detail) setUploadStatus(detail);
+        autoResume.noteProgress(detail?.completedFiles);
       }, { operation, ...(durable ? { handoff: options.nextLot && auctioneer
         ? durableContinuationService.handoff(localDraft, contractNo.trim() || 'Lot listing', auctioneer)
         : durableReportTransfer.handoff(localDraft, contractNo.trim() || 'Lot listing') } : {}) });
@@ -1172,6 +1227,12 @@ const LotListingFormSheet = ({
           if (canAct()) void handleSubmit(destination, { newSubmissionFromId: conflictedSubmissionId });
         },
       } : undefined)) return;
+      // The app stopped this upload by itself: wait for a steady connection and
+      // continue while this listing stays open. A Pause the person tapped stays.
+      if (!pauseRequestedRef.current && autoResume.scheduleAfterFailure(e, {
+        resume: (automatic) => { void handleSubmitRef.current(destination, { nextLot: options.nextLot, automaticResume: automatic }); },
+        stillCurrent: () => OfflineCaptureStore.getOwnerId() === attemptOwner && recoveryScopeRef.current === attemptRecoveryScope,
+      })) return;
       const feedback = OfflineQueueService.getSubmissionError(e);
       Alert.alert(feedback.title, feedback.message);
     } finally {
@@ -1180,6 +1241,7 @@ const LotListingFormSheet = ({
       setPausingUpload(false);
     }
   };
+  handleSubmitRef.current = handleSubmit;
 
   const resetForm = async () => {
     uploadAcceptedRef.current = false;
@@ -1269,8 +1331,8 @@ const LotListingFormSheet = ({
           onPress={() => void handleSubmit('LottingBoard', { nextLot: true })} /> : null}
         {/* Header */}
         <View style={[styles.header, auctioneer && styles.importedHeader]}>
-          <TouchableOpacity onPress={handleClose} style={styles.closeBtn} accessibilityRole="button" accessibilityLabel="Close lot listing">
-            <Feather name="x" size={24} color="#374151" />
+          <TouchableOpacity onPress={handleClose} style={styles.closeBtn} hitSlop={HEADER_HIT_SLOP} accessibilityRole="button" accessibilityLabel="Close lot listing">
+            <Feather name="x" size={22} color="#374151" />
           </TouchableOpacity>
           <Text style={styles.headerTitle}>{isAuctionManagementMode ? 'Auction Management' : 'Lot Listing'}</Text>
           <View style={[styles.headerActions, auctioneer && styles.importedHeaderActions]}>
@@ -1286,11 +1348,12 @@ const LotListingFormSheet = ({
                     (!canSaveDraftPreview || submitting || savingDraftPreview) && styles.submitBtnDisabled,
                   ]}
                   onPress={() => void handleSaveDraftPreview()}
+                  hitSlop={HEADER_HIT_SLOP}
                   disabled={Boolean(auctioneer) || !canSaveDraftPreview || submitting || savingDraftPreview}>
                   {savingDraftPreview ? (
                     <ActivityIndicator size="small" color="#6D28D9" />
                   ) : (
-                    <Feather name="cloud" size={15} color="#6D28D9" />
+                    <Feather name="cloud" size={14} color="#6D28D9" />
                   )}
                   <Text style={styles.headerDraftBtnText}>Draft</Text>
                 </TouchableOpacity> : null}
@@ -1299,11 +1362,15 @@ const LotListingFormSheet = ({
                   accessibilityLabel={saveOnly ? 'Save offline lot listing' : uploadPaused ? 'Resume upload' : auctioneer ? 'Create Lot & Close' : 'Submit lot listing'}
                   style={[styles.submitBtn, auctioneer && styles.importedSubmitBtn, ((!saveOnly && !canSubmit) || savingDraftPreview) && styles.submitBtnDisabled]}
                   onPress={() => void handleSubmit()}
+                  hitSlop={HEADER_HIT_SLOP}
                   disabled={(!saveOnly && !canSubmit) || submitting || savingDraftPreview}>
                   {submitting ? (
                     <ActivityIndicator size="small" color="#fff" />
                   ) : (
-                    <Text style={styles.submitBtnText}>{saveOnly ? 'Save' : uploadPaused ? 'Resume upload' : auctioneer ? 'Create Lot & Close' : 'Submit'}</Text>
+                    // "Resume upload" on two lines keeps this button as narrow as
+                    // "Submit": one line squeezed the title to one letter per line
+                    // (2026-10-11 phone test). Incoming's full-width button keeps one line.
+                    <Text style={styles.submitBtnText}>{saveOnly ? 'Save' : uploadPaused ? (auctioneer ? 'Resume upload' : 'Resume\nupload') : auctioneer ? 'Create Lot & Close' : 'Submit'}</Text>
                   )}
                 </TouchableOpacity>
               </>
@@ -1354,6 +1421,9 @@ const LotListingFormSheet = ({
             </View>
           </View>
         </Modal>
+        <UploadWaitingForSignal testID="lot-upload-waiting" visible={visible && autoResume.waiting}
+          completedFiles={uploadStatus?.completedFiles} totalFiles={uploadStatus?.totalFiles}
+          onResumeNow={autoResume.resumeNow} onPause={autoResume.stop} />
 
         {/* Restore Draft Modal */}
         <Modal
@@ -1684,16 +1754,18 @@ const styles = StyleSheet.create({
     borderBottomWidth: 1,
     borderBottomColor: '#E5E7EB',
   },
+  // Header controls a little smaller (owner, 2026-10-11 phone test). Each keeps
+  // a 44-point touch area through hitSlop (HEADER_HIT_SLOP).
   closeBtn: {
-    width: 44,
-    height: 44,
+    width: 40,
+    height: 40,
     borderRadius: 20,
     backgroundColor: '#F3F4F6',
     justifyContent: 'center',
     alignItems: 'center',
   },
   headerTitle: {
-    fontSize: 18,
+    fontSize: 16,
     fontWeight: '700',
     color: '#1F2937',
     flex: 1,
@@ -1713,17 +1785,17 @@ const styles = StyleSheet.create({
     width: 80,
   },
   headerDraftBtn: {
-    minWidth: 70,
-    minHeight: 44,
-    paddingHorizontal: 10,
-    borderRadius: 12,
+    minWidth: 62,
+    minHeight: 38,
+    paddingHorizontal: 8,
+    borderRadius: 10,
     borderWidth: 1,
     borderColor: '#DDD6FE',
     backgroundColor: '#F5F3FF',
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
-    gap: 5,
+    gap: 4,
   },
   headerDraftBtnText: {
     color: '#6D28D9',
@@ -1731,13 +1803,14 @@ const styles = StyleSheet.create({
     fontWeight: '800',
   },
   submitBtn: {
-    minHeight: 44,
+    minHeight: 38,
     backgroundColor: '#8B5CF6',
-    paddingHorizontal: 16,
-    paddingVertical: 10,
-    borderRadius: 12,
-    minWidth: 80,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 10,
+    minWidth: 72,
     alignItems: 'center',
+    justifyContent: 'center',
   },
   submitBtnDisabled: {
     backgroundColor: '#D1D5DB',
@@ -1745,7 +1818,7 @@ const styles = StyleSheet.create({
   submitBtnText: {
     color: '#fff',
     fontWeight: '700',
-    fontSize: 14,
+    fontSize: 13,
     textAlign: 'center',
   },
   progressOverlay: {

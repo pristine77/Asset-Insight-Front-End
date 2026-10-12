@@ -10,9 +10,11 @@ jest.mock('./offlineCaptureStore', () => ({ __esModule: true, default: { getOwne
 jest.mock('./auctioneerService', () => ({ __esModule: true, default: { getSetup: jest.fn() } }));
 const draft = { id: 'draft', ownerId: 'owner', type: 'lotListing', formData: { clientSubmissionId: 'same-id' }, lots: [], submissionState: 'local' } as unknown as OfflineReportDraft;
 beforeEach(() => { jest.clearAllMocks(); jest.mocked(store.getOwnerId).mockReturnValue('owner'); jest.mocked(NetInfo.fetch).mockResolvedValue({ isConnected: true } as any); jest.mocked(autoSave.getDraft).mockResolvedValue(draft); });
-test('offline Submit preserves the draft and requires another explicit action', async () => {
+// 2026-10-11: the upload line and an open form now wait for signal on this
+// code; the message is only the fallback where nothing waits.
+test('offline Submit preserves the draft and tells the person how to resume', async () => {
   jest.mocked(NetInfo.fetch).mockResolvedValue({ isConnected: false } as any);
-  await expect(prepareOfflineSubmission(draft)).rejects.toThrow('Nothing will upload automatically');
+  await expect(prepareOfflineSubmission(draft)).rejects.toThrow('Saved on this device. Connect to the internet, then tap Resume upload.');
   expect(autoSave.getDraft).not.toHaveBeenCalled();
 });
 test('no connection is marked so an open report can wait for one', async () => {

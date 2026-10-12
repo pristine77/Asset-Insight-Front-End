@@ -29,6 +29,7 @@ import OfflineQueueService from './offlineQueueService';
 import AutoSaveService, { type OfflineReportDraft } from './autoSaveService';
 import { prepareOfflineSubmission } from './offlineSubmissionService';
 import type { DirectUploadProgressCallback, DirectUploadProgressStage } from './directR2UploadService';
+import { waitForStableConnection } from './uploadAutoResume';
 
 let mockOwner: string | null = 'owner';
 jest.mock('@react-native-community/netinfo', () => ({ __esModule: true, default: {
@@ -44,6 +45,11 @@ jest.mock('./offlineQueueService', () => ({ __esModule: true, default: {
   getSubmissionError: jest.fn((error: unknown) => jest.requireActual('./connectivityService').getSubmissionError(error)),
 } }));
 jest.mock('./autoSaveService', () => ({ __esModule: true, default: { cleanupOrphanedMedia: jest.fn(async () => 0) } }));
+// The wait for a steady signal is the test's to end (signalWaits below).
+jest.mock('./uploadAutoResume', () => ({
+  ...jest.requireActual('./uploadAutoResume'),
+  waitForStableConnection: jest.fn(),
+}));
 
 const setSubmissionState = jest.mocked(OfflineCaptureStore.setSubmissionState);
 
@@ -98,6 +104,12 @@ function job(name: string) {
   return { draftId, request, ...fake };
 }
 
+/** Each wait for a steady connection ends when the test says the signal is back. */
+function signalWaits() {
+  const waits: { signal: AbortSignal; ready: (value: boolean) => void }[] = [];
+  jest.mocked(waitForStableConnection).mockImplementation(({ signal }) => new Promise<boolean>((resolve) => { waits.push({ signal, ready: resolve }); }));
+  return waits;
+}
 
 const networkError = () => Object.assign(new Error('Network Error'), { code: 'ERR_NETWORK' });
 const activeReport = () => ({ response: { status: 409, data: { code: 'ACTIVE_REPORT_EXISTS' } }, message: 'Request failed with status code 409' });
@@ -112,6 +124,8 @@ beforeEach(() => {
   setUploadOwner('owner');
   setSubmissionState.mockReset().mockResolvedValue(undefined as any);
   jest.mocked(OfflineQueueService.getConnectivityStatus).mockResolvedValue({ status: 'online' } as any);
+  // By default the signal never comes back during a test.
+  jest.mocked(waitForStableConnection).mockReset().mockImplementation(() => new Promise<boolean>(() => {}));
   manager = createBackgroundUploadManager();
 });
 afterEach(() => { manager.resetForTests(); });
@@ -167,7 +181,8 @@ describe('the line', () => {
     expect(manager.enqueue(b.request)).toBe(true);
     expect(manager.enqueue(b.request)).toBe(false);
     await flush();
-    a.last().fail(networkError());
+    // The bar's Pause (a network error now waits for signal instead, still busy).
+    expect(manager.pause(activeId())).toBe(true);
     await flush();
     expect(snapshot().held).toEqual([expect.objectContaining({ draftId: a.draftId, status: 'paused' })]);
     expect(manager.isBusy(a.draftId)).toBe(false);
@@ -433,41 +448,212 @@ describe('outcomes that need the person', () => {
   });
 });
 
-describe('manual-only recovery', () => {
-  it('holds a lost connection and every queued report until explicit Resume', async () => {
+// Owner decision 2026-10-11: an upload the app stopped by itself continues once
+// the signal is steady (restoring 2026-10-02). These replace the 6 October
+// "manual-only recovery" tests that required Resume after every interruption.
+describe('waiting for signal', () => {
+  it('waits after a lost connection, keeps its turn, and continues the same upload', async () => {
+    const waits = signalWaits();
     const [a, b] = ['a', 'b'].map(job);
-    manager.enqueue(a.request); manager.enqueue(b.request);
+    manager.enqueue(a.request);
+    manager.enqueue(b.request);
     await flush();
     a.last().progress(64);
+    // The automatic pause on a lost connection (offlineQueueService.ts).
     pauseActiveUploads('connection');
     await flush();
-    expect(snapshot().active).toBeNull();
-    expect(snapshot().queued).toEqual([]);
-    expect(snapshot().held).toEqual(expect.arrayContaining([
-      expect.objectContaining({ draftId: a.draftId, status: 'paused', completedFiles: 64 }),
-      expect.objectContaining({ draftId: b.draftId, status: 'paused' }),
-    ]));
-    await flush();
-    expect(a.upload).toHaveBeenCalledTimes(1);
+    expect(snapshot().active).toMatchObject({ draftId: a.draftId, status: 'waiting', completedFiles: 64, canPause: true });
+    expect(describeBackgroundUpload(snapshot().active!)).toBe('Waiting for signal');
+    // Recorded as paused meanwhile, so a killed app reopens it as Resume upload.
+    expect(setSubmissionState).toHaveBeenLastCalledWith(a.draftId, 'paused', undefined, expect.any(String));
+    // The rest of the line keeps its place behind it; nothing is held.
+    expect(snapshot().queued).toEqual([expect.objectContaining({ draftId: b.draftId, status: 'queued' })]);
     expect(b.upload).not.toHaveBeenCalled();
-    expect(manager.resume(snapshot().held.find(row => row.draftId === a.draftId)!.id)).toBe(true);
+    expect(waits).toHaveLength(1);
+    waits[0].ready(true);
     await flush();
     expect(a.upload).toHaveBeenCalledTimes(2);
+    expect(a.upload.mock.calls[1][1]).not.toBe(a.upload.mock.calls[0][1]);
+    expect(setSubmissionState).toHaveBeenLastCalledWith(a.draftId, 'ready');
+    expect(snapshot().active).toMatchObject({ draftId: a.draftId, status: 'uploading' });
     expect(b.upload).not.toHaveBeenCalled();
   });
 
-  it('keeps an offline submission paused without a watcher or future upload', async () => {
+  it('waits when there is no connection at all, without starting the transfer', async () => {
+    const waits = signalWaits();
     jest.mocked(OfflineQueueService.getConnectivityStatus).mockResolvedValueOnce({ status: 'offline' } as any);
-    const a = job('a'); manager.enqueue(a.request);
+    const a = job('a');
+    manager.enqueue(a.request);
     await flush();
     expect(a.upload).not.toHaveBeenCalled();
-    expect(snapshot().active).toBeNull();
-    expect(snapshot().held).toEqual([expect.objectContaining({ draftId: a.draftId, status: 'paused' })]);
-    await flush();
-    expect(a.upload).not.toHaveBeenCalled();
-    expect(manager.resume(snapshot().held[0].id)).toBe(true);
+    expect(snapshot().active).toMatchObject({ draftId: a.draftId, status: 'waiting' });
+    expect(snapshot().held).toEqual([]);
+    expect(manager.isBusy(a.draftId)).toBe(true);
+    waits[0].ready(true);
     await flush();
     expect(a.upload).toHaveBeenCalledTimes(1);
+  });
+
+  it('waits when the pre-upload check finds the phone disconnected', async () => {
+    const waits = signalWaits();
+    jest.mocked(prepareOfflineSubmission).mockRejectedValueOnce(
+      Object.assign(new Error('Saved on this device. Connect to the internet, then tap Resume upload.'), { code: 'UPLOAD_WAITING_FOR_CONNECTION' }));
+    const a = job('a');
+    manager.enqueue(a.request);
+    await flush();
+    expect(snapshot().active).toMatchObject({ status: 'waiting' });
+    waits[0].ready(true);
+    await flush();
+    expect(a.upload).toHaveBeenCalledTimes(1);
+  });
+
+  it('continues after a transient network error once the signal is steady', async () => {
+    const waits = signalWaits();
+    const a = job('a');
+    manager.enqueue(a.request);
+    await flush();
+    a.last().fail(networkError());
+    await flush();
+    expect(snapshot().active).toMatchObject({ status: 'waiting' });
+    expect(snapshot().notices).toEqual([]);
+    waits[0].ready(true);
+    await flush();
+    expect(a.upload).toHaveBeenCalledTimes(2);
+  });
+
+  it('Resume now tries at once and stops waiting', async () => {
+    const waits = signalWaits();
+    const a = job('a');
+    manager.enqueue(a.request);
+    await flush();
+    a.last().fail(networkError());
+    await flush();
+    expect(manager.resumeNow()).toBe(true);
+    expect(waits[0].signal.aborted).toBe(true);
+    await flush();
+    expect(a.upload).toHaveBeenCalledTimes(2);
+    expect(snapshot().active).toMatchObject({ status: 'uploading' });
+  });
+
+  it('Pause while waiting keeps it paused, and the signal coming back later starts nothing', async () => {
+    const waits = signalWaits();
+    const [a, b] = ['a', 'b'].map(job);
+    manager.enqueue(a.request);
+    manager.enqueue(b.request);
+    await flush();
+    a.last().fail(networkError());
+    await flush();
+    expect(manager.pause(activeId())).toBe(true);
+    expect(waits[0].signal.aborted).toBe(true);
+    expect(snapshot().held).toEqual([expect.objectContaining({ draftId: a.draftId, status: 'paused' })]);
+    waits[0].ready(true);
+    await flush();
+    expect(a.upload).toHaveBeenCalledTimes(1);
+    expect(b.upload).toHaveBeenCalledTimes(1);
+  });
+
+  it('hands back to the person after three automatic tries that send no new file', async () => {
+    const waits = signalWaits();
+    const [a, b] = ['a', 'b'].map(job);
+    manager.enqueue(a.request);
+    manager.enqueue(b.request);
+    await flush();
+    for (let round = 0; round < 3; round += 1) {
+      a.last().fail(networkError());
+      await flush();
+      expect(waits).toHaveLength(round + 1);
+      waits[round].ready(true);
+      await flush();
+      expect(a.upload).toHaveBeenCalledTimes(round + 2);
+    }
+    a.last().fail(networkError());
+    await flush();
+    expect(waits).toHaveLength(3);
+    expect(snapshot().held).toEqual([expect.objectContaining({ draftId: a.draftId, status: 'paused', message: CONNECTION_KEPT_DROPPING_MESSAGE })]);
+    expect(snapshot().notices).toEqual([expect.objectContaining({ kind: 'attention', message: CONNECTION_KEPT_DROPPING_MESSAGE })]);
+    expect(b.upload).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps going while each try sends more files', async () => {
+    const waits = signalWaits();
+    const a = job('a');
+    manager.enqueue(a.request);
+    await flush();
+    for (let round = 0; round < 5; round += 1) {
+      a.last().progress(20 * (round + 1));
+      a.last().fail(networkError());
+      await flush();
+      expect(waits).toHaveLength(round + 1);
+      waits[round].ready(true);
+      await flush();
+    }
+    expect(a.upload).toHaveBeenCalledTimes(6);
+    expect(snapshot().notices).toEqual([]);
+    expect(snapshot().active).toMatchObject({ draftId: a.draftId, status: 'uploading' });
+  });
+
+  it('a person\'s Resume after the tries ran out starts a fresh count', async () => {
+    const waits = signalWaits();
+    const a = job('a');
+    manager.enqueue(a.request);
+    await flush();
+    for (let round = 0; round < 3; round += 1) {
+      a.last().fail(networkError());
+      await flush();
+      waits[round].ready(true);
+      await flush();
+    }
+    a.last().fail(networkError());
+    await flush();
+    expect(snapshot().held).toEqual([expect.objectContaining({ status: 'paused' })]);
+    expect(manager.resume(snapshot().held[0].id)).toBe(true);
+    await flush();
+    a.last().fail(networkError());
+    await flush();
+    expect(snapshot().active).toMatchObject({ draftId: a.draftId, status: 'waiting' });
+    expect(waits).toHaveLength(4);
+  });
+
+  it('lets go once Android takes the upload over, without recording an acceptance', async () => {
+    const [a, b] = ['a', 'b'].map(job);
+    manager.enqueue(a.request);
+    manager.enqueue(b.request);
+    await flush();
+    // A durable build's upload function hands the reserved upload to Android.
+    a.last().accept({ accepted: undefined, reportId: undefined, backgroundStaged: true, message: 'Upload saved on this device and scheduled.' });
+    await flush();
+    expect(manager.isBusy(a.draftId)).toBe(false);
+    expect(snapshot().notices).toEqual([]);
+    expect(snapshot().held).toEqual([]);
+    expect(setSubmissionState.mock.calls.some(([id, state]) => id === a.draftId && state === 'accepted')).toBe(false);
+    expect(b.upload).toHaveBeenCalledTimes(1);
+    expect(snapshot().active).toMatchObject({ draftId: b.draftId, status: 'uploading' });
+  });
+});
+
+describe('explicit holds', () => {
+  it('Offline chosen on another report holds an upload waiting for signal and the line behind it', async () => {
+    const waits = signalWaits();
+    const [a, b] = ['a', 'b'].map(job);
+    manager.enqueue(a.request);
+    manager.enqueue(b.request);
+    await flush();
+    a.last().fail(networkError());
+    await flush();
+    expect(snapshot().active).toMatchObject({ draftId: a.draftId, status: 'waiting' });
+    setDraftCaptureMode('new-report', 'offline');
+    await flush();
+    expect(waits[0].signal.aborted).toBe(true);
+    expect(snapshot().active).toBeNull();
+    expect(snapshot().queued).toEqual([]);
+    expect(snapshot().held).toEqual(expect.arrayContaining([
+      expect.objectContaining({ draftId: a.draftId, status: 'paused' }),
+      expect.objectContaining({ draftId: b.draftId, status: 'paused' }),
+    ]));
+    waits[0].ready(true);
+    await flush();
+    expect(a.upload).toHaveBeenCalledTimes(1);
+    expect(b.upload).not.toHaveBeenCalled();
   });
 
   it('never bypasses an explicit Offline choice on another report', async () => {
@@ -537,18 +723,6 @@ describe('manual-only recovery', () => {
     expect(b.upload).not.toHaveBeenCalled();
   });
 
-  it('requires explicit Resume for transient errors even after network recovery', async () => {
-    const a = job('a'); manager.enqueue(a.request);
-    await flush();
-    a.last().fail(networkError());
-    await flush();
-    expect(snapshot().held).toEqual([expect.objectContaining({ status: 'paused' })]);
-    await flush();
-    expect(a.upload).toHaveBeenCalledTimes(1);
-    expect(manager.resume(snapshot().held[0].id)).toBe(true);
-    await flush();
-    expect(a.upload).toHaveBeenCalledTimes(2);
-  });
 });
 
 describe('a change of account', () => {

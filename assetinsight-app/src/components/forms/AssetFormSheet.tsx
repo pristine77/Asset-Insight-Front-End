@@ -31,8 +31,13 @@ import backgroundUploadManager, {
   ALREADY_UPLOADING_MESSAGE,
   ALREADY_UPLOADING_TITLE,
   BACKGROUND_UPLOAD_BUSY_MESSAGE,
+  WAITING_FOR_SIGNAL_MESSAGE,
+  WAITING_FOR_SIGNAL_TITLE,
 } from '../../services/backgroundUploadManager';
 import { CAMERA_NOT_OPENED_TITLE, cameraOpenFailureButtons, describeCameraOpenFailure } from '../../utils/cameraOpenFailure';
+import { UPLOAD_WAITING_FOR_CONNECTION } from '../../services/uploadResumePolicy';
+import { useUploadAutoResume } from './useUploadAutoResume';
+import UploadWaitingForSignal from './UploadWaitingForSignal';
 import { needsExplicitUploadResume, setDraftCaptureMode } from '../../services/offlineDraftPolicy';
 import * as Localization from 'expo-localization';
 import DateTimePicker, { DateTimePickerEvent } from '@react-native-community/datetimepicker';
@@ -240,7 +245,13 @@ const AssetFormSheet = ({
     // this operation as well.
     pauseUploadOperation(activeOperationRef.current);
   };
-  // Interrupted uploads always require an explicit Resume, including after reconnect.
+  // An upload the app stopped by itself (no connection at Submit, lost signal,
+  // stalled transfer) continues once the connection is steady, while this
+  // report stays open (useUploadAutoResume; owner decision 2026-10-11,
+  // restoring 2026-10-02). handleSubmitRef gives that later resume the handler
+  // from the latest render.
+  const autoResume = useUploadAutoResume(visible, async () => (await OfflineQueueService.getConnectivityStatus()).status === 'online');
+  const handleSubmitRef = useRef<(options?: { nextLot?: boolean; automaticResume?: boolean }) => Promise<void>>(async () => undefined);
   const autoSaveTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const loadedDraftIdRef = useRef<string | null>(null);
   const awaitingDraft = Boolean(draftIdToLoad && loadedDraftIdRef.current !== draftIdToLoad);
@@ -1096,7 +1107,7 @@ const AssetFormSheet = ({
     });
   };
 
-  const handleSubmit = async (options: { forceNew?: boolean; nextLot?: boolean; replaceSubmissionId?: string; replacementSourceId?: string; newSubmissionFromId?: string } = {}) => {
+  const handleSubmit = async (options: { forceNew?: boolean; nextLot?: boolean; replaceSubmissionId?: string; replacementSourceId?: string; newSubmissionFromId?: string; automaticResume?: boolean } = {}) => {
     if (submissionLockRef.current || saveLock.current || awaitingDraft || submitting || uploadAcceptedRef.current || auctioneerControl?.accepted) return;
     if (options.nextLot && captureMode === 'offline') return;
     if (saveOnly) { await handleSaveOfflineAndClose(); return; }
@@ -1142,6 +1153,10 @@ const AssetFormSheet = ({
     // prompts can appear; this attempt uses up that mark. Supported Android
     // device-file submissions use the durable scheduler below. Continue reserves
     // its independent next form after that durable handoff.
+    // No connection (2026-10-11): an ordinary Submit that the line may take
+    // waits there for signal on every build -- on durable builds too, where the
+    // line then hands it to Android -- so the form can close. Everything else
+    // waits in this open form (autoResume) and shows "Waiting for signal".
     const plannedDraftId = currentDraftId || draftIdentityRef.current;
     // Never save over, or send a second time, a draft the line is sending.
     if (backgroundUploadManager.isBusy(plannedDraftId)) {
@@ -1151,12 +1166,15 @@ const AssetFormSheet = ({
     const durable = durableReportTransfer.available() && lots.every(lot =>
       [...lot.files, ...lot.extraFiles].every(file => /^(file|content):\/\//.test(getPhotoUploadUri(file))) &&
       (!lot.videoFile || /^(file|content):\/\//.test(lot.videoFile.uri)));
-    let background = !durable && backgroundUploads && !auctioneer && !options.nextLot && !options.forceNew
-      && !options.replaceSubmissionId && !options.newSubmissionFromId;
+    let lineEligible = backgroundUploads && !auctioneer && !options.nextLot && !options.forceNew
+      && !options.replaceSubmissionId && !options.newSubmissionFromId && !options.automaticResume;
     if (backgroundUploads && backgroundUploadManager.prefersForeground(plannedDraftId)) {
-      background = false;
+      lineEligible = false;
       backgroundUploadManager.consumeForegroundMark(plannedDraftId);
     }
+    const background = !durable && lineEligible;
+    // A person's Submit or Resume starts a fresh count of automatic tries.
+    autoResume.beginAttempt(options.automaticResume === true);
     // The fence begins before local preparation, not only inside the transport.
     // A closed/paused account's asynchronous handler must never start a new upload.
     const operation = createUploadOperation();
@@ -1213,7 +1231,17 @@ const AssetFormSheet = ({
       draftSaved = true;
       attemptDraftId = localDraft.id;
       operation.assertActive();
-      await prepareOfflineSubmission(localDraft);
+      // Set when the phone reports no connection at all: an ordinary Submit then
+      // goes to the upload line to wait for signal.
+      let noConnection = false;
+      try {
+        await prepareOfflineSubmission(localDraft);
+      } catch (error: any) {
+        // The upload line waits for a connection by itself and re-runs every
+        // other check on each attempt. Any other refusal stops here, as before.
+        if (!lineEligible || error?.code !== UPLOAD_WAITING_FOR_CONNECTION) throw error;
+        noConnection = true;
+      }
       operation.assertActive();
       // Persist intent before transport, so a killed process reopens as Resume.
       await OfflineCaptureStore.setSubmissionState(localDraft.id, 'ready');
@@ -1338,20 +1366,30 @@ const AssetFormSheet = ({
         mode: lot.mode,
       }));
 
-      if (background) {
+      // The same details and photos this form would send, frozen now.
+      const queuedDetails = details;
+      const queuedLots = serviceLots;
+      const queueTitle = contractNo.trim() || clientName.trim() || 'Asset report';
+      /**
+       * Hands this report to the upload line and closes the form. With
+       * withDurableHandoff (Android durable builds), each attempt of the line
+       * reserves the upload on the server and hands it to Android, which
+       * continues it; the line then lets go (backgroundUploadManager.ts).
+       */
+      const handToLine = (withDurableHandoff: boolean) => {
         if (!attemptOwner) throw new Error('Sign in to the account that owns this draft.');
-        // The same details and photos this form would send, frozen now.
-        const queuedDetails = details;
-        const queuedLots = serviceLots;
         const handedOff = backgroundUploadManager.enqueue({
           draftId: localDraft.id,
           type: 'asset',
           ownerId: attemptOwner,
-          title: contractNo.trim() || clientName.trim() || 'Asset report',
+          title: queueTitle,
           totalFiles: submissionFileCount,
           draft: localDraft,
           upload: (onProgress, uploadOperation) =>
-            assetService.createAssetReport(queuedDetails, queuedLots, onProgress, { operation: uploadOperation }),
+            assetService.createAssetReport(queuedDetails, queuedLots, onProgress, {
+              operation: uploadOperation,
+              ...(withDurableHandoff ? { handoff: durableReportTransfer.handoff(localDraft, queueTitle) } : {}),
+            }),
         });
         setSubmitting(false);
         setProgressPhase('idle');
@@ -1359,22 +1397,36 @@ const AssetFormSheet = ({
           Alert.alert(ALREADY_UPLOADING_TITLE, ALREADY_UPLOADING_MESSAGE);
           return;
         }
-        // No alert: the upload bar shows progress and the outcome from here.
         resetForm();
         onClose();
+        // With a connection there is no alert: the upload bar shows progress
+        // and the outcome. Without one, say that it waits and sends by itself.
+        if (noConnection) Alert.alert(WAITING_FOR_SIGNAL_TITLE, WAITING_FOR_SIGNAL_MESSAGE);
+      };
+
+      if (background) {
+        handToLine(false);
         return;
       }
 
-      const connectivity = await OfflineQueueService.getConnectivityStatus();
+      const offline = noConnection || (await OfflineQueueService.getConnectivityStatus()).status === 'offline';
       operation.assertActive();
-      if (options.nextLot && connectivity.status === 'offline') {
+      if (options.nextLot && offline) {
         setSubmitting(false);
         setProgressPhase('idle');
         Alert.alert('Connection required', durable ? 'Keep this lot open and retry when online. The saved upload and its next lot need a short server reservation.' : 'Keep this lot open and retry when online. A new lot starts only after the server accepts this report.');
         return;
       }
-      if (connectivity.status === 'offline') {
-        throw new Error('Saved on this device. Connect and tap Resume upload. Nothing will submit automatically.');
+      if (offline && lineEligible) {
+        // Durable build, ordinary Submit: wait in the line, then hand to Android.
+        noConnection = true;
+        handToLine(true);
+        return;
+      }
+      if (offline) {
+        // While this report stays open it waits for the connection and starts
+        // by itself (autoResume); this message shows only when it stops waiting.
+        throw Object.assign(new Error('Saved on this device. Connect and tap Resume upload.'), { code: UPLOAD_WAITING_FOR_CONNECTION });
       }
 
       // Submit to API
@@ -1384,6 +1436,7 @@ const AssetFormSheet = ({
         if (!operation.isActive() || recoveryScopeRef.current !== attemptRecoveryScope || OfflineCaptureStore.getOwnerId() !== attemptOwner) return;
         setUploadProgress(progress);
         if (detail) setUploadStatus(detail);
+        autoResume.noteProgress(detail?.completedFiles);
       }, { operation, ...(durable ? { handoff: options.nextLot && auctioneer
         ? durableContinuationService.handoff(localDraft, contractNo.trim() || clientName.trim() || 'Asset report', auctioneer)
         : durableReportTransfer.handoff(localDraft, contractNo.trim() || clientName.trim() || 'Asset report') } : {}) });
@@ -1494,6 +1547,12 @@ const AssetFormSheet = ({
           if (canAct()) void handleSubmit({ newSubmissionFromId: conflictedSubmissionId });
         },
       } : undefined)) return;
+      // The app stopped this upload by itself: wait for a steady connection and
+      // continue while this report stays open. A Pause the person tapped stays.
+      if (!pauseRequestedRef.current && autoResume.scheduleAfterFailure(e, {
+        resume: (automatic) => { void handleSubmitRef.current({ nextLot: options.nextLot, automaticResume: automatic }); },
+        stillCurrent: () => OfflineCaptureStore.getOwnerId() === attemptOwner && recoveryScopeRef.current === attemptRecoveryScope,
+      })) return;
       const feedback = OfflineQueueService.getSubmissionError(e);
       Alert.alert(feedback.title, feedback.message);
     } finally {
@@ -1502,6 +1561,7 @@ const AssetFormSheet = ({
       setPausingUpload(false);
     }
   };
+  handleSubmitRef.current = handleSubmit;
 
   const resetForm = () => {
     uploadAcceptedRef.current = false;
@@ -2367,6 +2427,9 @@ const AssetFormSheet = ({
           </View>
         </Modal>
         {renderUploadProgress()}
+        <UploadWaitingForSignal testID="asset-upload-waiting" visible={visible && autoResume.waiting}
+          completedFiles={uploadStatus?.completedFiles} totalFiles={uploadStatus?.totalFiles}
+          onResumeNow={autoResume.resumeNow} onPause={autoResume.stop} />
 
         {/* 3D Tab Navigation */}
         <View style={styles.tabContainer}>

@@ -116,6 +116,19 @@ export async function shouldQueueAfterError(error: any): Promise<boolean> {
 }
 
 export function getSubmissionError(error: any, retryAction = 'Resume upload'): { title: string; message: string } {
+  // No connection at Submit: nothing failed, the report is saved and only waits
+  // for signal. It used to read "Submission Failed", which alarmed staff
+  // (owner, 2026-10-11 phone test). The code is uploadResumePolicy's
+  // UPLOAD_WAITING_FOR_CONNECTION, spelt out here because that module imports
+  // this one.
+  if (error?.code === 'UPLOAD_WAITING_FOR_CONNECTION') {
+    return {
+      title: 'Saved on this device',
+      message: typeof error?.message === 'string' && error.message
+        ? error.message
+        : `Your report is saved on this device. Connect, then tap ${retryAction}.`,
+    };
+  }
   const status = getErrorStatus(error);
   const serverMessage = actionableErrorMessage(error);
   const code = error?.response?.data?.code;

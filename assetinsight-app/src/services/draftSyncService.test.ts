@@ -10,9 +10,11 @@ jest.mock('./offlineCaptureStore', () => ({ __esModule: true, default: { getOwne
 jest.mock('./reportDraftService', () => ({ __esModule: true, default: { upsertFromLocalDraft: jest.fn() } }));
 jest.mock('./offlineQueueService', () => ({ __esModule: true, default: { isOnline: jest.fn() } }));
 
+// One photo: since 2026-10-11 a draft with no photos or video is not copied.
 const draftFor = (ownerId = 'owner-a'): OfflineReportDraft => ({
   id: 'same-local-id', ownerId, captureMode: 'online', localRevision: 4,
-  type: 'lotListing', title: 'Saved', formData: { contractNo: '00000' }, lots: [], activeLotIdx: 0,
+  type: 'lotListing', title: 'Saved', formData: { contractNo: '00000' }, activeLotIdx: 0,
+  lots: [{ id: 'lot-1', mode: 'single_lot', mainImages: [{ uri: 'file:///photo-1.jpg', name: 'photo-1.jpg' }], extraImages: [], videoFiles: [], coverIndex: 0 }] as any,
   createdAt: '2026-10-06T09:00:00.000Z', updatedAt: '2026-10-06T10:00:00.000Z',
 });
 const cloudFor = (ownerId = 'owner-a'): ReportDraft => ({
@@ -95,4 +97,12 @@ it('never syncs offline/manual captures even with Force sync', async () => {
   expect((await DraftSyncService.syncDraft({ ...draftFor(), captureMode: 'offline' }, { force: true })).status).toBe('skipped');
   expect((await DraftSyncService.syncDraft({ ...draftFor(), manualSubmissionRequired: true }, { force: true })).status).toBe('skipped');
   expect(reportDraftService.upsertFromLocalDraft).not.toHaveBeenCalled();
+});
+
+// 2026-10-11 phone test: a contract-number-only draft became an empty cloud draft.
+it('never sends a draft with no photos or video to the cloud', async () => {
+  expect((await DraftSyncService.syncDraft({ ...draftFor(), lots: [] })).status).toBe('skipped');
+  expect((await DraftSyncService.syncDraft({ ...draftFor(), lots: [] }, { force: true })).status).toBe('skipped');
+  expect(reportDraftService.upsertFromLocalDraft).not.toHaveBeenCalled();
+  expect(AutoSaveService.markDraftCloudSyncError).not.toHaveBeenCalled();
 });

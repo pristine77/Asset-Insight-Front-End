@@ -1,5 +1,66 @@
 # Offline capture — Asset and Lot Listing
 
+## Waiting for signal after Submit — 2026-10-11 (owner decision; release pending)
+
+Found on a phone in airplane mode (2026-10-11): an employee who pressed Submit
+with no signal got "Submission Failed", and nothing went up when the signal came
+back unless someone reopened the report and tapped Resume upload. The owner
+decided that a submitted report sends itself once the signal is steady. This
+restores the 2026-10-02 behaviour that the 6 October sync removed
+("Interrupted uploads require explicit Resume"), and extends it to Android
+durable builds.
+
+What now happens on Submit with no connection (Online capture mode):
+
+- **Ordinary Dashboard Submit** (not Incoming, Auction Management, Continue or
+  the separate/replace choices): the report is saved, handed to the upload line
+  (`services/backgroundUploadManager.ts`) and the form closes with
+  "Waiting for signal — … sends by itself once the signal is steady". The bar
+  shows "Waiting for signal" with **Resume now** and **Pause**. On Android
+  durable builds the line's attempt reserves the upload and hands it to Android
+  (`response.backgroundStaged`), and the line lets go; Android continues it as
+  before. On other builds the line uploads it itself.
+- **Work that must stay in the form** (Incoming, Auction Management, explicit
+  separate/replace) and **a connection lost mid-upload** in the form: the open
+  form shows "Waiting for signal" (`useUploadAutoResume`,
+  `UploadWaitingForSignal`) and continues by itself while it stays open.
+  Continue ("next lot") still says **Connection required**.
+- "Steady" means connected for 15 s and our own server answering
+  (`uploadAutoResume.ts`). After three automatic tries in a row that send no
+  new file, the upload is paused and the person decides.
+
+Unchanged and still explicit: a Pause the person tapped; the **Offline**
+capture mode (it holds every upload, now including one waiting for signal);
+sign-out and account changes; anything that needs a decision (a report already
+processing, changed photos, an earlier acceptance); a stalled write of upload
+status on the phone; and every upload after the app is closed or restarted —
+the upload line is in memory, so the saved draft shows **Resume upload**.
+Offline-mode captures remain manual-submit.
+
+Also from the same phone test:
+
+- A Submit that found no connection is titled **Saved on this device**, not
+  "Submission Failed" (`getSubmissionError`, code `UPLOAD_WAITING_FOR_CONNECTION`).
+- The Lot Listing header no longer squeezes its title to one letter per line
+  when the button reads "Resume upload": the title keeps its width and the
+  button label wraps.
+- **Empty duplicate drafts.** Typing a contract number saves a draft after 2 s,
+  so a form closed before any photo left a draft with only typed details, and
+  opening the form again started another. Now a draft with no photos or video
+  that was never copied is not sent to the cloud (`hasCloudDraftContent`), and
+  when a draft gets its first photo, older empty drafts of the same report type
+  and contract number are discarded (hidden, as Discard does). Kept: anything
+  submitted or being submitted, already in the cloud, Offline captures, and
+  Incoming/Auction Management work. Several reports per contract stay possible.
+
+Tests: `backgroundUploadManager.test.ts` (waiting for signal, Android
+hand-off, explicit holds), `backgroundUploadHandoff.test.tsx` (offline Submit
+on standard and durable builds), `AuctioneerForms.test.tsx` (in-form waiting,
+restored), `UploadBar.test.tsx`, `draftCloudSyncState.test.ts`,
+`draftSyncService.test.ts`, `autoSaveService.offline.test.ts` (empty drafts),
+`connectivityService.test.ts`, `offlineSubmissionService.test.ts`. A new
+binary is needed; the backend is unchanged.
+
 ## Explicit durable Android Submit — 2026-10-08 (local; release pending)
 
 An offline capture is still saved locally and never submits merely because

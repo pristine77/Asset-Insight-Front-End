@@ -23,8 +23,11 @@ import backgroundUploadManager, {
   ALREADY_UPLOADING_MESSAGE,
   ALREADY_UPLOADING_TITLE,
   BACKGROUND_UPLOAD_BUSY_MESSAGE,
+  WAITING_FOR_SIGNAL_MESSAGE,
+  WAITING_FOR_SIGNAL_TITLE,
   type BackgroundUploadRequest,
 } from '../../services/backgroundUploadManager';
+import { waitForStableConnection } from '../../services/uploadAutoResume';
 import type { AuctionManagementTaskPayload } from '../../services/auctionManagementService';
 import durableReportTransfer from '../../services/durableReportTransfer';
 
@@ -37,6 +40,11 @@ jest.mock('expo-crypto', () => ({ randomUUID: () => require('node:crypto').rando
 jest.mock('@react-native-community/netinfo', () => ({ __esModule: true, default: { fetch: jest.fn(async () => ({ isConnected: true, isInternetReachable: true })) } }));
 jest.mock('../../services/offlineCaptureStore', () => ({ __esModule: true, default: { getOwnerId: () => mockOwner, setSubmissionState: jest.fn(async () => undefined), recordDraftOpened: jest.fn(async () => undefined) } }));
 jest.mock('../../services/offlineSubmissionService', () => ({ prepareOfflineSubmission: jest.fn(async draft => draft) }));
+// The wait for a steady connection is the test's to end (signalWaits below).
+jest.mock('../../services/uploadAutoResume', () => ({
+  ...jest.requireActual('../../services/uploadAutoResume'),
+  waitForStableConnection: jest.fn(),
+}));
 jest.mock('@expo/vector-icons', () => ({ Feather: () => null }));
 jest.mock('react-native-safe-area-context', () => ({ SafeAreaView: require('react-native').View }));
 jest.mock('../../context/AuthContext', () => ({ useAuth: () => ({ user: { username: 'Inspector', companyName: 'QA' } }) }));
@@ -139,7 +147,16 @@ beforeEach(() => {
   jest.mocked(assetService.createAssetReport).mockReset().mockResolvedValue({ jobId: 'job-parent', reportId: 'report-parent', message: 'Queued', accepted: true } as any);
   jest.mocked(lotListingService.createLotListing).mockReset().mockResolvedValue({ jobId: 'job-parent', reportId: 'report-parent', message: 'Queued', phase: 'processing' });
   // By default the signal never comes back during a test.
+  jest.mocked(waitForStableConnection).mockReset().mockImplementation(() => new Promise<boolean>(() => {}));
 });
+
+/** Each wait for a steady connection ends when the test says the signal is back. */
+function signalWaits() {
+  const waits: { signal: AbortSignal; ready: (value: boolean) => void }[] = [];
+  jest.mocked(waitForStableConnection).mockImplementation(({ signal }) => new Promise<boolean>((resolve) => { waits.push({ signal, ready: resolve }); }));
+  return waits;
+}
+const noConnection = () => Object.assign(new Error('Saved on this device. Connect to the internet, then tap Resume upload.'), { code: UPLOAD_WAITING_FOR_CONNECTION });
 
 afterEach(async () => {
   await cleanup();
@@ -253,16 +270,72 @@ describe.each(['asset', 'lotListing'] as const)('%s Submit on the Dashboard', (t
     expect(snapshot().active).toBeNull();
   });
 
-  it('keeps an offline submission in the form and never schedules future transport', async () => {
-    jest.mocked(prepareOfflineSubmission).mockRejectedValueOnce(Object.assign(new Error('Saved on this device. Connect to the internet, then tap Submit or Resume upload.'), { code: UPLOAD_WAITING_FOR_CONNECTION }));
+  // Owner decision 2026-10-11: a Submit with no connection waits for signal and
+  // sends by itself. These replace the 6 October test that kept it in the form.
+  it('hands a Submit with no connection to the line, closes the form and says it sends by itself', async () => {
+    const waits = signalWaits();
+    jest.mocked(prepareOfflineSubmission).mockRejectedValueOnce(noConnection());
     jest.mocked(OfflineQueueService.getConnectivityStatus).mockResolvedValue({ status: 'offline' } as any);
     const { closed } = await mount();
     await fireEvent.press(screen.getByRole('button', { name: submitLabel }));
-    await waitFor(() => expect(Alert.alert).toHaveBeenCalled());
+    await waitFor(() => expect(closed).toHaveBeenCalledTimes(1));
+    expect(Alert.alert).toHaveBeenCalledWith(WAITING_FOR_SIGNAL_TITLE, WAITING_FOR_SIGNAL_MESSAGE);
+    await waitFor(() => expect(snapshot().active).toMatchObject({ draftId: 'local-parent', status: 'waiting' }));
+    expect(upload).not.toHaveBeenCalled();
+    // The signal comes back: the same frozen upload starts by itself.
+    jest.mocked(OfflineQueueService.getConnectivityStatus).mockResolvedValue({ status: 'online' } as any);
+    await act(async () => { waits[0].ready(true); });
+    await waitFor(() => expect(upload).toHaveBeenCalledTimes(1));
+    expect(jest.mocked(upload).mock.calls[0][0].client_submission_id).toBe('submission-parent');
+    expect(jest.mocked(upload).mock.calls[0][3]?.handoff).toBeUndefined();
+  });
+
+  it('on Android durable builds waits in the line too, then hands the upload to Android', async () => {
+    const waits = signalWaits();
+    jest.spyOn(durableReportTransfer, 'available').mockReturnValue(true);
+    const handoff = jest.fn(async () => undefined);
+    jest.spyOn(durableReportTransfer, 'handoff').mockReturnValue(handoff);
+    jest.mocked(prepareOfflineSubmission).mockRejectedValueOnce(noConnection());
+    jest.mocked(OfflineQueueService.getConnectivityStatus).mockResolvedValue({ status: 'offline' } as any);
+    const { closed } = await mount();
+    await fireEvent.press(screen.getByRole('button', { name: submitLabel }));
+    await waitFor(() => expect(closed).toHaveBeenCalledTimes(1));
+    expect(Alert.alert).toHaveBeenCalledWith(WAITING_FOR_SIGNAL_TITLE, WAITING_FOR_SIGNAL_MESSAGE);
+    await waitFor(() => expect(snapshot().active).toMatchObject({ draftId: 'local-parent', status: 'waiting' }));
+    expect(upload).not.toHaveBeenCalled();
+    jest.mocked(upload).mockResolvedValueOnce({ backgroundStaged: true, jobId: 'submission-parent', message: 'Saved upload' } as any);
+    jest.mocked(OfflineQueueService.getConnectivityStatus).mockResolvedValue({ status: 'online' } as any);
+    await act(async () => { waits[0].ready(true); });
+    await waitFor(() => expect(upload).toHaveBeenCalledTimes(1));
+    expect(jest.mocked(upload).mock.calls[0][3]?.handoff).toBe(handoff);
+    // Android has it now: the line lets go and nothing is recorded as accepted here.
+    await waitFor(() => expect(snapshot().active).toBeNull());
+    expect(jest.mocked(OfflineCaptureStore.setSubmissionState).mock.calls.some(([, state]) => state === 'accepted')).toBe(false);
+  });
+
+  it('on Android durable builds sends a connected Submit itself, as before', async () => {
+    jest.spyOn(durableReportTransfer, 'available').mockReturnValue(true);
+    jest.spyOn(durableReportTransfer, 'handoff').mockReturnValue(jest.fn(async () => undefined));
+    jest.mocked(upload).mockReturnValueOnce(new Promise(() => undefined));
+    await mount();
+    await fireEvent.press(screen.getByRole('button', { name: submitLabel }));
+    await waitFor(() => expect(upload).toHaveBeenCalledTimes(1));
+    expect(snapshot().active).toBeNull();
+    expect(Alert.alert).not.toHaveBeenCalledWith(WAITING_FOR_SIGNAL_TITLE, expect.anything());
+  });
+
+  it('waits in the open form when the line may not take it (background uploads off)', async () => {
+    const waits = signalWaits();
+    jest.mocked(OfflineQueueService.getConnectivityStatus).mockResolvedValueOnce({ status: 'offline' } as any);
+    const { closed } = await mount(false);
+    await fireEvent.press(screen.getByRole('button', { name: submitLabel }));
+    await waitFor(() => expect(screen.getByText('Waiting for signal')).toBeTruthy());
     expect(closed).not.toHaveBeenCalled();
     expect(snapshot().active).toBeNull();
-    expect(snapshot().queued).toEqual([]);
     expect(upload).not.toHaveBeenCalled();
+    jest.mocked(upload).mockReturnValueOnce(new Promise(() => undefined));
+    await act(async () => { waits[0].ready(true); });
+    await waitFor(() => expect(upload).toHaveBeenCalledTimes(1));
   });
 
   it('keeps any other refusal of the check in the form, as before', async () => {

@@ -179,19 +179,31 @@ export default function UploadBar({ onOpenDraft }: Props) {
             {waiting ? <Text style={styles.secondary} numberOfLines={1}>{entry.title}</Text> : null}
             <Text style={styles.secondary}>{entry.durable ? 'Saved upload · Android continues the transfer' : 'Keep the app open while this upload runs'}</Text>
           </View>
-          {waiting && !entry.durable ? (
-            <TouchableOpacity accessibilityRole="button" accessibilityLabel="Resume upload now" style={styles.button}
-              onPress={() => backgroundUploadManager.resumeNow()}>
-              <Text style={styles.buttonText}>Resume now</Text>
-            </TouchableOpacity>
-          ) : null}
-          {entry.canPause ? (
+          {!waiting && entry.canPause ? (
             <TouchableOpacity accessibilityRole="button" accessibilityLabel={`Pause upload of ${entry.title}`} style={styles.button}
               onPress={() => actOnUpload(() => backgroundUploadManager.pause(entry.id))}>
               <Text style={styles.buttonText}>Pause</Text>
             </TouchableOpacity>
           ) : null}
         </View>
+        {/* Waiting for signal: its two buttons get their own row. Beside the
+            text they left it a sliver ("Waitin / g for …", 2026-10-11 phone test). */}
+        {waiting ? (
+          <View style={styles.actionsRow}>
+            {!entry.durable ? (
+              <TouchableOpacity accessibilityRole="button" accessibilityLabel="Resume upload now" style={styles.button}
+                onPress={() => backgroundUploadManager.resumeNow()}>
+                <Text style={styles.buttonText}>Resume now</Text>
+              </TouchableOpacity>
+            ) : null}
+            {entry.canPause ? (
+              <TouchableOpacity accessibilityRole="button" accessibilityLabel={`Pause upload of ${entry.title}`} style={styles.button}
+                onPress={() => actOnUpload(() => backgroundUploadManager.pause(entry.id))}>
+                <Text style={styles.buttonText}>Pause</Text>
+              </TouchableOpacity>
+            ) : null}
+          </View>
+        ) : null}
         {!waiting ? (
           <View style={styles.track} accessible accessibilityRole="progressbar" accessibilityLabel={`Upload of ${entry.title}`}
             accessibilityValue={{ min: 0, max: entry.totalFiles || 100, now: entry.totalFiles ? entry.completedFiles : percent }}>
@@ -256,6 +268,7 @@ const createStyles = (colors: AppThemeColors) => StyleSheet.create({
     paddingRight: 4,
   },
   row: { flexDirection: 'row', alignItems: 'center', gap: 8, minHeight: 44 },
+  actionsRow: { flexDirection: 'row', justifyContent: 'flex-end', alignItems: 'center', gap: 8 },
   textBlock: { flex: 1, paddingVertical: 4 },
   text: { flex: 1, color: colors.text, fontSize: 14, paddingVertical: 6 },
   textLine: { color: colors.text, fontSize: 14, fontWeight: '600' },

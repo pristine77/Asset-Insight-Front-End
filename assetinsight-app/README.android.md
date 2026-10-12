@@ -311,8 +311,10 @@ discard. Incoming/auction tasks and explicit replacement/separate-report choices
 stay in the form. Original media references, submission identities, ordered lots
 and acceptance rules are unchanged. Upload counts say files, including videos.
 
-The upstream automatic-resume behavior was deliberately not imported. Offline,
-connection interruptions, restart and reopened drafts require explicit Resume.
+Superseded 2026-10-11 by the owner: connection interruptions and a Submit with
+no connection now wait for a steady signal and continue by themselves (see
+README.offline-capture.md, "Waiting for signal after Submit"). The Offline
+capture mode, restart and reopened drafts still require explicit Resume.
 Offline also holds queued uploads; it cannot immediately restart them. Account
 switches clear in-memory work, including deferred owner-bound local writes.
 The queue receives global pauses synchronously even while an accepted receipt is
@@ -459,7 +461,9 @@ off-thread stream cleanup. One failed report cancels its sibling transfers, not
 unrelated reports. A stalled attempt stops before working through all queued
 photos; the local draft, submission ID and upload session remain for explicit
 Resume. Resumed sessions verify stored objects before PUT, then use the original
-completion receipt. Reconnection does not start a report automatically.
+completion receipt. Since 2026-10-11 (owner decision) a submitted report that
+the app stopped by itself continues once the signal is steady; a person's Pause,
+the Offline capture mode and a restarted app still wait for explicit Resume.
 
 Both forms show blocking, accessible upload progress with Pause/Pausing/Resume
 states; Asset progress remains available from Details or Images. A confirmed

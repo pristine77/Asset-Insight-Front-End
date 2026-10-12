@@ -5,18 +5,23 @@ import auctioneerService from './auctioneerService';
 import { hasValidAuctioneerLotStructure } from '../components/forms/auctioneerFormPolicy';
 import { UPLOAD_WAITING_FOR_CONNECTION } from './uploadResumePolicy';
 
-/** Called only by a user's Submit/Resume action. Nothing here schedules future work. */
+/**
+ * Checks a saved draft before each upload attempt. Nothing here waits or
+ * schedules: the upload line and the open forms wait for signal themselves
+ * (uploadAutoResume.ts, backgroundUploadManager.ts).
+ */
 export async function prepareOfflineSubmission(draft: OfflineReportDraft) {
   const owner = OfflineCaptureStore.getOwnerId();
   if (!owner || draft.ownerId !== owner) throw new Error('Sign in to the account that owns this draft.');
   // Only a reported disconnect refuses here (2026-10-02). NetInfo's
   // isInternetReachable is its own probe of a public URL and reads false on weak
   // but working signal, which refused uploads that would have gone through; the
-  // forms check our own server right after this. Connection changes never
-  // resubmit: the person must explicitly tap Submit or Resume again.
+  // forms check our own server right after this. The code lets the upload line
+  // and an open form wait for signal and continue by themselves (2026-10-11);
+  // the message shows only where nothing is waiting.
   const network = await NetInfo.fetch();
   if (network.isConnected === false) {
-    throw Object.assign(new Error('Saved on this device. Connect to the internet, then tap Submit or Resume upload. Nothing will upload automatically.'), { code: UPLOAD_WAITING_FOR_CONNECTION });
+    throw Object.assign(new Error('Saved on this device. Connect to the internet, then tap Resume upload.'), { code: UPLOAD_WAITING_FOR_CONNECTION });
   }
   const current = await AutoSaveService.getDraft(draft.id);
   if (!current) throw new Error('This draft is unavailable. Reopen Drafts before submitting.');

@@ -1,8 +1,27 @@
 /**
- * Shared status for the Android durable transfer scheduler and the older
- * in-app FIFO. The FIFO still requires explicit Resume after interruption or
- * restart. Android owns temporary system/network recovery for its explicitly
- * submitted immutable jobs. Offline/user/account pauses stop both paths.
+ * Shared status for the Android durable transfer scheduler and the in-app
+ * upload line. Android owns temporary system/network recovery for its
+ * explicitly submitted immutable jobs.
+ *
+ * Waiting for signal (owner decision 2026-10-11, restoring the 2026-10-02
+ * behaviour that the 6 October sync had removed): a report the person
+ * submitted, which the app stopped by itself -- no connection at Submit, a lost
+ * connection, a stalled transfer, a transient network or server error -- keeps
+ * its turn and continues by itself once the signal has been steady for
+ * AUTO_RESUME_STABLE_SIGNAL_MS and our own server answers (uploadAutoResume.ts).
+ * "Resume now" in the bar tries at once. After
+ * AUTO_RESUME_MAX_TRIES_WITHOUT_PROGRESS automatic tries in a row that store no
+ * new file, the upload is paused and a notice says so.
+ *
+ * On Android builds with the durable scheduler, an ordinary Submit that finds no
+ * connection waits here too (the forms decide; see handleSubmit there): its
+ * upload function reserves the upload and hands it to Android, and the line
+ * lets go once Android has it (response.backgroundStaged).
+ *
+ * Still explicit: a Pause the person tapped, the Offline capture mode (it holds
+ * every upload, including one waiting for signal), an account change, anything
+ * that needs a decision, and every upload after the app restarts -- the line is
+ * in memory, so a restarted app shows Resume upload on the saved draft.
  */
 import type { OfflineDraftType, OfflineReportDraft } from './autoSaveService';
 import { assertReportUploadAccepted, isExistingReportUploadReceipt } from './reportUploadReceipt';
@@ -10,10 +29,12 @@ import type { DirectUploadProgressCallback, DirectUploadProgressStage } from './
 import {
   cancellableUploadTask,
   createUploadOperation,
+  isUploadStalled,
   onUploadOwnerChange,
   onUploadsPaused,
   pauseUploadOperation,
   type UploadOperation,
+  type UploadPauseReason,
 } from './uploadCancellation';
 import { isUploadManifestConflict } from '../components/forms/uploadManifestRecovery';
 import durableReportTransfer from './durableReportTransfer';
@@ -31,6 +52,7 @@ const queueService = (): typeof import('./offlineQueueService').default => requi
 const autoSave = (): typeof import('./autoSaveService').default => require('./autoSaveService').default;
 const submission = (): typeof import('./offlineSubmissionService') => require('./offlineSubmissionService');
 const resumePolicy = (): typeof import('./uploadResumePolicy') => require('./uploadResumePolicy');
+const autoResume = (): typeof import('./uploadAutoResume') => require('./uploadAutoResume');
 /* eslint-enable @typescript-eslint/no-require-imports */
 
 /** Shown where a busy draft cannot be opened (the forms' draft loading). */
@@ -53,7 +75,11 @@ export const KEPT_INTERRUPTED_MESSAGE =
 export const SENT_MESSAGE = 'Processing continues on the server. You will receive an email when the files are ready.';
 export const PAUSED_MESSAGE =
   'Upload paused. Your draft is saved. Resume this same upload to check whether the server already accepted it.';
-const NO_CONNECTION_MESSAGE = 'No connection. Your draft is saved. Connect and tap Resume upload.';
+const NO_CONNECTION_MESSAGE = 'No connection. Your draft is saved, and the upload continues by itself once the signal is back.';
+/** The forms' note when Submit found no connection and handed the report to this line to wait. */
+export const WAITING_FOR_SIGNAL_TITLE = 'Waiting for signal';
+export const WAITING_FOR_SIGNAL_MESSAGE =
+  'No signal right now. Your report is saved on this phone and sends by itself once the signal is steady. The upload bar shows it. If Asset Insight is closed before then, open Drafts and tap Resume upload.';
 /** Notices kept for the bar; older ones fall off. */
 const MAX_NOTICES = 10;
 const LOCAL_STATE_TIMEOUT_MS = 30_000;
@@ -132,6 +158,10 @@ type Job = BackgroundUploadRequest & {
   pauseRequested: boolean;
   operation?: UploadOperation;
   watcher?: AbortController;
+  // The no-progress streak, counted exactly like useUploadAutoResume.
+  triesWithoutProgress: number;
+  bestConfirmed: number;
+  attemptConfirmed: number;
 };
 
 const errorMessage = (error: unknown): string | undefined => {
@@ -242,6 +272,25 @@ export function createBackgroundUploadManager() {
     if (pending.length) notify();
   }
 
+  /**
+   * Every upload of this account was paused (uploadCancellation.ts). A lost
+   * connection ('connection') only stops the running transfer: it then waits
+   * for signal and the rest of the line keeps its place. Any other reason --
+   * the Offline capture mode, sign-out -- holds the whole line, including an
+   * upload waiting for signal, until the person resumes it.
+   */
+  function onGlobalPause(reason?: UploadPauseReason) {
+    if (reason === 'connection') return;
+    const waiting = active && active.status === 'waiting' ? active : null;
+    // The line first: hold() below starts the next upload in line, and there
+    // must be none left to start.
+    holdQueuedUploads();
+    if (waiting) {
+      hold(waiting, 'paused', PAUSED_MESSAGE);
+      void recordPaused(waiting, PAUSED_MESSAGE);
+    }
+  }
+
   /** Starts the next upload in line when none is running, then tells the views. */
   function startNext() {
     if (!active) {
@@ -249,7 +298,7 @@ export function createBackgroundUploadManager() {
       if (next) {
         active = next;
         // Its first synchronous step publishes the snapshot.
-        void runAttempt(next);
+        void runAttempt(next, false);
         return;
       }
     }
@@ -290,7 +339,48 @@ export function createBackgroundUploadManager() {
     startNext();
   }
 
-  async function runAttempt(job: Job): Promise<void> {
+  /**
+   * Android's durable scheduler took the upload (backgroundStaged): it leaves
+   * this line, and the scheduler's own entry in the bar shows it from here.
+   * Nothing is recorded as accepted yet -- durableReportTransfer.ts records the
+   * acceptance when Android reports it.
+   */
+  function finishHandedOff(job: Job) {
+    if (active === job) active = null;
+    startNext();
+  }
+
+  /** Same count as useUploadAutoResume: false once the streak without a new file is used up. */
+  function takeAutomaticTry(job: Job): boolean {
+    if (job.attemptConfirmed > job.bestConfirmed) {
+      job.bestConfirmed = job.attemptConfirmed;
+      job.triesWithoutProgress = 0;
+    }
+    if (job.triesWithoutProgress >= autoResume().AUTO_RESUME_MAX_TRIES_WITHOUT_PROGRESS) return false;
+    job.triesWithoutProgress += 1;
+    return true;
+  }
+
+  /** Waits for a steady connection, keeping this upload's turn, then tries again. */
+  function waitForSignal(job: Job, current: () => boolean) {
+    const watcher = new AbortController();
+    Object.assign(job, { status: 'waiting', operation: undefined, watcher });
+    notify();
+    void Promise.resolve()
+      .then(() => autoResume().waitForStableConnection({
+        signal: watcher.signal,
+        checkServer: async () => (await queueService().getConnectivityStatus()).status === 'online',
+      }))
+      .catch(() => false)
+      .then((ready) => {
+        if (job.watcher !== watcher || watcher.signal.aborted || !current()) return;
+        job.watcher = undefined;
+        if (ready) void runAttempt(job, true);
+        else hold(job, 'paused', PAUSED_MESSAGE);
+      });
+  }
+
+  async function runAttempt(job: Job, automatic: boolean): Promise<void> {
     const attemptGeneration = generation;
     const current = () => generation === attemptGeneration && active === job;
     // Signed out or switched account since this was queued: never upload or write for it.
@@ -301,8 +391,13 @@ export function createBackgroundUploadManager() {
       hold(job, 'paused', PAUSED_MESSAGE);
       return;
     }
+    if (!automatic) {
+      // A person's Submit, Resume or Resume now starts a fresh count.
+      job.triesWithoutProgress = 0;
+      job.bestConfirmed = -1;
+    }
     const operation = createUploadOperation();
-    Object.assign(job, { status: 'uploading', stage: 'preparing', message: undefined, operation });
+    Object.assign(job, { status: 'uploading', stage: 'preparing', message: undefined, attemptConfirmed: 0, operation });
     notify();
     // Every step of the attempt stops waiting as soon as this upload is paused
     // or the account changes. The services already stop their transfers then;
@@ -313,6 +408,11 @@ export function createBackgroundUploadManager() {
     const localWrite = <T>(work: () => Promise<T>) => cancellableUploadTask(operation, () => work(), () => undefined, {
       idleTimeoutMs: LOCAL_STATE_TIMEOUT_MS,
       message: 'Saving upload status on this device took too long. Your originals are kept. Review the draft before resuming.',
+    }).catch((error: unknown) => {
+      // A stalled write on this phone is not a signal problem: the person
+      // reviews the draft before resuming, so it never waits for signal.
+      if (isUploadStalled(error)) Object.assign(error as object, { localStateStalled: true });
+      throw error;
     });
     let acceptedReportId: string | undefined;
     let accepted = false;
@@ -334,9 +434,17 @@ export function createBackgroundUploadManager() {
           job.stage = detail.stage;
           job.completedFiles = detail.completedFiles;
           if (detail.totalFiles) job.totalFiles = detail.totalFiles;
+          // A resumed attempt counts the files it finds already stored, so only
+          // new files raise this above the best so far.
+          if (detail.completedFiles > job.attemptConfirmed) job.attemptConfirmed = detail.completedFiles;
         }
         notify();
       }, operation));
+      if (response?.backgroundStaged === true) {
+        // Reserved on the server and handed to Android, which continues it.
+        if (current()) finishHandedOff(job);
+        return;
+      }
       assertReportUploadAccepted(response);
       accepted = true;
       acceptedReportId = typeof response.reportId === 'string' ? response.reportId : undefined;
@@ -390,10 +498,27 @@ export function createBackgroundUploadManager() {
     }
     // Decisions belong to the person, even when the status code looks transient.
     const conflict = isUploadManifestConflict(error) || isActiveReportConflict(error);
+    const localStateStalled = Boolean((error as { localStateStalled?: boolean } | null)?.localStateStalled);
+    if (!conflict && !localStateStalled && autoResume().isAutoResumableUploadFailure(error)) {
+      // The app stopped it by itself (no connection, lost connection, stall,
+      // transient network or server error): wait for signal, keeping its turn.
+      // The draft is recorded as paused meanwhile, so a killed app reopens it
+      // as Resume upload.
+      void recordPaused(job, errorMessage(error));
+      if (!current()) return;
+      if (!takeAutomaticTry(job)) {
+        addNotice(job, 'attention', 'Upload paused', CONNECTION_KEPT_DROPPING_MESSAGE);
+        hold(job, 'paused', CONNECTION_KEPT_DROPPING_MESSAGE);
+        return;
+      }
+      waitForSignal(job, current);
+      return;
+    }
     if (!conflict && (resumePolicy().isInterruptedUpload(error) || isPausedError(error))) {
       void recordPaused(job, errorMessage(error));
       if (!current()) return;
-      // A global pause (Offline/connection loss) must not start queued jobs.
+      // Any other global pause (the Offline capture mode, sign-out) must not
+      // start queued jobs; onGlobalPause has usually held them already.
       if (isPausedError(error)) {
         holdQueuedUploads();
       }
@@ -451,7 +576,7 @@ export function createBackgroundUploadManager() {
       if (manager.isBusy(request.draftId)) return false;
       // Subscribed on first use, so importing this module has no side effects.
       if (!unwatchOwner) unwatchOwner = onUploadOwnerChange(() => clear());
-      if (!unwatchPause) unwatchPause = onUploadsPaused(holdQueuedUploads);
+      if (!unwatchPause) unwatchPause = onUploadsPaused(onGlobalPause);
       held = held.filter((job) => job.draftId !== request.draftId);
       notices = notices.filter((notice) => !(notice.kind === 'attention' && notice.draftId === request.draftId));
       const job: Job = {
@@ -461,6 +586,9 @@ export function createBackgroundUploadManager() {
         percent: 0,
         completedFiles: 0,
         pauseRequested: false,
+        triesWithoutProgress: 0,
+        bestConfirmed: -1,
+        attemptConfirmed: 0,
       };
       queue = [...queue, job];
       startNext();
@@ -502,8 +630,15 @@ export function createBackgroundUploadManager() {
       startNext();
       return true;
     },
-    /** Waiting is not scheduled; callers use explicit Resume on a held job. */
-    resumeNow(): boolean { return false; },
+    /** "Resume now" while waiting for signal: tries at once, as the person's own action. */
+    resumeNow(): boolean {
+      const job = active;
+      if (!job || job.status !== 'waiting') return false;
+      job.watcher?.abort();
+      job.watcher = undefined;
+      void runAttempt(job, false);
+      return true;
+    },
     dismiss(noticeId: string) {
       if (noticeId.startsWith('durable:')) { durableReportTransfer.dismiss(noticeId); return; }
       const before = notices.length;

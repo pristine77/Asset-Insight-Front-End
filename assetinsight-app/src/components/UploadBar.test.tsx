@@ -32,6 +32,11 @@ jest.mock('../services/offlineQueueService', () => ({ __esModule: true, default:
   getSubmissionError: jest.fn((error: unknown) => jest.requireActual('../services/connectivityService').getSubmissionError(error)),
 } }));
 jest.mock('../services/autoSaveService', () => ({ __esModule: true, default: { cleanupOrphanedMedia: jest.fn(async () => 0) } }));
+// The signal never comes back during these tests; Resume now is the way on.
+jest.mock('../services/uploadAutoResume', () => ({
+  ...jest.requireActual('../services/uploadAutoResume'),
+  waitForStableConnection: jest.fn(() => new Promise(() => {})),
+}));
 
 type Transfer = {
   operation: UploadOperation;
@@ -169,15 +174,18 @@ it('hides Pause while the submission is being finalized', async () => {
   expect(screen.queryByRole('button', { name: 'Pause upload of QA-157' })).toBeNull();
 });
 
-it('requires explicit Resume after a connection failure', async () => {
+// Owner decision 2026-10-11 (restoring 2026-10-02): after a connection failure
+// the upload waits for signal and continues by itself; Resume now tries at once.
+it('waits for signal with Resume now and Pause', async () => {
   await showBar();
   const a = report('157');
   await run(() => { backgroundUploadManager.enqueue(a.request); });
   await run(() => a.last().progress(45));
   await run(() => a.last().fail(Object.assign(new Error('Network Error'), { code: 'ERR_NETWORK' })));
-  expect(screen.getByText('Paused: QA-157 · 45 of 160 sent')).toBeTruthy();
+  expect(screen.getByText('Waiting for signal · 45 of 160 sent')).toBeTruthy();
+  expect(screen.getByRole('button', { name: 'Pause upload of QA-157' })).toBeTruthy();
   expect(a.upload).toHaveBeenCalledTimes(1);
-  await fireEvent.press(screen.getByRole('button', { name: 'Resume upload of QA-157' }));
+  await fireEvent.press(screen.getByRole('button', { name: 'Resume upload now' }));
   await settle();
   expect(a.upload).toHaveBeenCalledTimes(2);
   expect(screen.queryByText(/^Waiting for signal/)).toBeNull();

@@ -31,8 +31,9 @@ export function onUploadOwnerChange(listener: (ownerId: string | null) => void):
 /**
  * Why uploads were paused, when no person asked for it. Only the automatic
  * pause on a lost connection gives one; the Pause button, Offline mode and an
- * account change give none. This reason is operational feedback, never
- * permission to upload automatically after reconnection.
+ * account change give none. A 'connection' pause lets the upload wait for a
+ * steady signal and continue by itself (uploadAutoResume.ts, 2026-10-11); the
+ * others hold uploads until the person resumes them.
  */
 export type UploadPauseReason = 'connection';
 // The reason for each pause, by the generation that pause started. The pause

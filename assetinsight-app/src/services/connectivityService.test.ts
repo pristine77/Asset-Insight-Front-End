@@ -35,3 +35,12 @@ it.each(['409', 'Request failed with status code 409', 'The photo upload failed 
 it('does not claim unsaved work was saved on an arbitrary failure', () => {
   expect(getSubmissionError(new Error('Storage full')).message).not.toMatch(/remains saved|are saved/);
 });
+
+// 2026-10-11 phone test: a report saved with no connection read "Submission
+// Failed", which alarmed staff although nothing had failed.
+it('titles a Submit that found no connection as saved, not failed', () => {
+  const saved = getSubmissionError(Object.assign(new Error('Saved on this device. Connect and tap Resume upload.'), { code: 'UPLOAD_WAITING_FOR_CONNECTION' }));
+  expect(saved).toEqual({ title: 'Saved on this device', message: 'Saved on this device. Connect and tap Resume upload.' });
+  expect(getSubmissionError({ code: 'UPLOAD_WAITING_FOR_CONNECTION' }).message).toBe('Your report is saved on this device. Connect, then tap Resume upload.');
+  expect(getSubmissionError(new Error('Storage full')).title).toBe('Submission Failed');
+});
