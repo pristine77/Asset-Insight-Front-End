@@ -1235,11 +1235,11 @@ test("asset preview cover and bulk required selections stay responsive in both t
     preview.getByRole("checkbox", { name: "Select lot 9, row 9" })
   ).toBeChecked();
   await expect(
-    preview.getByText("Showing 1–20 of 45 lots")
+    preview.getByRole("navigation", { name: "Asset lots pagination", exact: true }).getByText("Showing 1–20 of 45 lots")
   ).toBeVisible();
-  await preview.getByRole("button", { name: "Next lots page" }).click();
+  await preview.getByRole("navigation", { name: "Asset lots pagination", exact: true }).getByRole("button", { name: "Next lots page" }).click();
   await expect(
-    preview.getByText("Showing 21–40 of 45 lots")
+    preview.getByRole("navigation", { name: "Asset lots pagination", exact: true }).getByText("Showing 21–40 of 45 lots")
   ).toBeVisible();
   await expect(
     preview.getByRole("checkbox", { name: "Select lot 21, row 21" })
@@ -1355,7 +1355,7 @@ for (const theme of ["light", "dark"] as const) {
     await apply("Completeness", "Missing Parts", 100);
     await apply("Legal", "N/A", 100);
     await field("Legal", 4).selectOption("No Title");
-    await preview.getByRole("button", { name: "Next lots page", exact: true }).click();
+    await preview.getByRole("navigation", { name: "Asset lots pagination", exact: true }).getByRole("button", { name: "Next lots page", exact: true }).click();
     await expect(preview.getByRole("checkbox", { name: "Select lot 21, row 21", exact: true })).toBeChecked();
     await expect(field("Running Condition", 21)).toHaveValue("Starts and Runs with Boost");
     await expect(field("Completeness", 21)).toHaveValue("Missing Parts");

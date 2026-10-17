@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { onUploadOwnerChange, onUploadsPaused } from '../../services/uploadCancellation';
 import {
   AUTO_RESUME_MAX_TRIES_WITHOUT_PROGRESS,
   isAutoResumableUploadFailure,
@@ -9,7 +10,7 @@ type PendingResume = {
   /** Repeats the interrupted Submit or Resume; automatic is false for "Resume now". */
   resume: (automatic: boolean) => void;
   /** False once the account or this form changed; nothing then resumes. */
-  stillCurrent: () => boolean;
+  stillCurrent: () => boolean | Promise<boolean>;
 };
 
 /**
@@ -25,6 +26,7 @@ export function useUploadAutoResume(visible: boolean, checkServer: () => Promise
   const [waiting, setWaiting] = useState(false);
   const watcherRef = useRef<AbortController | null>(null);
   const pendingRef = useRef<PendingResume | null>(null);
+  const intentActiveRef = useRef(false);
   // Automatic tries since files last moved forward or the person last acted.
   const triesWithoutProgressRef = useRef(0);
   // Most files confirmed by any attempt since the person last acted.
@@ -36,15 +38,29 @@ export function useUploadAutoResume(visible: boolean, checkServer: () => Promise
   checkServerRef.current = checkServer;
 
   const stop = useCallback(() => {
+    intentActiveRef.current = false;
     watcherRef.current?.abort();
     watcherRef.current = null;
     pendingRef.current = null;
     setWaiting(false);
   }, []);
 
+  // Check persisted draft authority before a retry, and keep the same waiter
+  // alive across that asynchronous read so Pause/logout can still revoke it.
+  const resumeIfCurrent = useCallback(async (pending: PendingResume, watcher: AbortController, automatic: boolean) => {
+    let current = false;
+    try { current = await pending.stillCurrent(); } catch { /* A failed read needs an explicit retry. */ }
+    if (watcherRef.current !== watcher || watcher.signal.aborted) return;
+    watcherRef.current = null;
+    pendingRef.current = null;
+    setWaiting(false);
+    if (current) pending.resume(automatic);
+  }, []);
+
   /** Call as each attempt starts. A person's Submit or Resume starts a fresh count. */
   const beginAttempt = useCallback((automatic: boolean) => {
     stop();
+    intentActiveRef.current = true;
     attemptConfirmedRef.current = 0;
     if (!automatic) {
       triesWithoutProgressRef.current = 0;
@@ -64,7 +80,7 @@ export function useUploadAutoResume(visible: boolean, checkServer: () => Promise
    * the form shows its usual message and the Resume upload button.
    */
   const scheduleAfterFailure = useCallback((error: unknown, pending: PendingResume): boolean => {
-    if (!isAutoResumableUploadFailure(error)) return false;
+    if (!intentActiveRef.current || !isAutoResumableUploadFailure(error)) return false;
     if (attemptConfirmedRef.current > bestConfirmedRef.current) {
       bestConfirmedRef.current = attemptConfirmedRef.current;
       triesWithoutProgressRef.current = 0;
@@ -81,24 +97,32 @@ export function useUploadAutoResume(visible: boolean, checkServer: () => Promise
       .catch(() => false)
       .then((ready) => {
         if (watcherRef.current !== watcher || watcher.signal.aborted) return;
-        watcherRef.current = null;
-        pendingRef.current = null;
-        setWaiting(false);
-        if (ready && pending.stillCurrent()) pending.resume(true);
+        if (ready) void resumeIfCurrent(pending, watcher, true);
+        else stop();
       });
     return true;
-  }, []);
+  }, [resumeIfCurrent, stop]);
 
   /** "Resume now": stop waiting and repeat the attempt at once, as the person's own action. */
   const resumeNow = useCallback(() => {
     const pending = pendingRef.current;
     stop();
-    if (pending?.stillCurrent()) pending.resume(false);
-  }, [stop]);
+    if (pending) {
+      intentActiveRef.current = true;
+      const watcher = new AbortController();
+      watcherRef.current = watcher;
+      pendingRef.current = pending;
+      void resumeIfCurrent(pending, watcher, false);
+    }
+  }, [resumeIfCurrent, stop]);
+
+  useEffect(() => onUploadsPaused(reason => { if (reason !== 'connection') stop(); }), [stop]);
+  useEffect(() => onUploadOwnerChange(() => stop()), [stop]);
 
   // A closed form never resumes; reopening it shows Resume upload as before.
   useEffect(() => { if (!visible) stop(); }, [visible, stop]);
   useEffect(() => () => {
+    intentActiveRef.current = false;
     watcherRef.current?.abort();
     watcherRef.current = null;
     pendingRef.current = null;

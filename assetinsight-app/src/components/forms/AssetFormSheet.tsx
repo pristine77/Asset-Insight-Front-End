@@ -37,6 +37,7 @@ import backgroundUploadManager, {
 import { CAMERA_NOT_OPENED_TITLE, cameraOpenFailureButtons, describeCameraOpenFailure } from '../../utils/cameraOpenFailure';
 import { UPLOAD_WAITING_FOR_CONNECTION } from '../../services/uploadResumePolicy';
 import { useUploadAutoResume } from './useUploadAutoResume';
+import { canResumeDraftSnapshot, uploadResumeDraftKey } from '../../services/uploadResumeDraft';
 import UploadWaitingForSignal from './UploadWaitingForSignal';
 import { needsExplicitUploadResume, setDraftCaptureMode } from '../../services/offlineDraftPolicy';
 import * as Localization from 'expo-localization';
@@ -1201,6 +1202,7 @@ const AssetFormSheet = ({
     let details: AssetCreateDetails | null = null;
     let serviceLots: ServiceMixedLot[] | null = null;
     let attemptDraftId = currentDraftId || draftIdentityRef.current;
+    let attemptDraftContent: string | undefined;
     let uploadAccepted = false;
     let draftSaved = false;
     const previousSubmissionId = submissionIdRef.current;
@@ -1230,6 +1232,7 @@ const AssetFormSheet = ({
       // (2026-10-02).
       draftSaved = true;
       attemptDraftId = localDraft.id;
+      attemptDraftContent = uploadResumeDraftKey(localDraft);
       operation.assertActive();
       // Set when the phone reports no connection at all: an ordinary Submit then
       // goes to the upload line to wait for signal.
@@ -1431,6 +1434,7 @@ const AssetFormSheet = ({
 
       // Submit to API
       const modernDraft = auctioneer ? await saveCurrentDraftNow() : null;
+      if (modernDraft) attemptDraftContent = uploadResumeDraftKey(modernDraft);
       operation.assertActive();
       const acceptedResponse = await assetService.createAssetReport(details, serviceLots, (progress, detail) => {
         if (!operation.isActive() || recoveryScopeRef.current !== attemptRecoveryScope || OfflineCaptureStore.getOwnerId() !== attemptOwner) return;
@@ -1551,7 +1555,11 @@ const AssetFormSheet = ({
       // continue while this report stays open. A Pause the person tapped stays.
       if (!pauseRequestedRef.current && autoResume.scheduleAfterFailure(e, {
         resume: (automatic) => { void handleSubmitRef.current({ nextLot: options.nextLot, automaticResume: automatic }); },
-        stillCurrent: () => OfflineCaptureStore.getOwnerId() === attemptOwner && recoveryScopeRef.current === attemptRecoveryScope,
+        stillCurrent: async () => {
+          const draft = await OfflineCaptureStore.getDraft(attemptDraftId);
+          return Boolean(canResumeDraftSnapshot(draft, attemptDraftContent)
+            && OfflineCaptureStore.getOwnerId() === attemptOwner && recoveryScopeRef.current === attemptRecoveryScope);
+        },
       })) return;
       const feedback = OfflineQueueService.getSubmissionError(e);
       Alert.alert(feedback.title, feedback.message);

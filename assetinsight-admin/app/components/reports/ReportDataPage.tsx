@@ -1,6 +1,6 @@
 "use client";
 
-import { type ReactNode, useCallback, useEffect, useMemo, useState } from "react";
+import { type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ArrowLeft, Braces, FileText } from "lucide-react";
 import { useRouter } from "next/navigation";
 import {
@@ -15,6 +15,8 @@ import {
   Typography,
 } from "@mui/material";
 import AssetScheduleSheet from "@/app/components/reports/AssetScheduleSheet";
+import ReportLotNavigationControls from "@/app/components/reports/ReportLotNavigationControls";
+import { lotPreviewDisplay, usesLotTitleDescription } from "@/lib/lotPreviewDisplay";
 import SalvageReportEnrichment from "@/app/components/reports/SalvageReportEnrichment";
 import { isSalvageReportEnrichment } from "@/lib/salvageReportEnrichment";
 import { ADMIN_MOBILE_TITLEBAR_HEIGHT } from "@/app/components/common/adminLayout.constants";
@@ -337,6 +339,14 @@ function ReportDataPanel({
   selectedLot,
   onSelectLot,
 }: ReportDataPanelProps) {
+  const lotDetailsTop = useRef<HTMLDivElement>(null);
+  const selectLot = (index: number) => {
+    onSelectLot(index);
+    requestAnimationFrame(() => {
+      lotDetailsTop.current?.focus({ preventScroll: true });
+      lotDetailsTop.current?.scrollIntoView({ block: "start" });
+    });
+  };
   const activeLotIndex = selectedLot >= 0 && lots.length
     ? Math.min(selectedLot, lots.length - 1)
     : -1;
@@ -364,14 +374,17 @@ function ReportDataPanel({
           bgcolor: "action.hover",
         }}
       >
-        <LotNavigation lots={lots} selectedLot={navigationSelection} onSelect={onSelectLot} />
+        <LotNavigation lots={lots} selectedLot={navigationSelection} onSelect={selectLot} />
       </Box>
 
       <Box sx={{ display: { xs: "block", md: "none" }, borderBottom: "1px solid", borderColor: "divider" }}>
-        <LotNavigation mobile lots={lots} selectedLot={navigationSelection} onSelect={onSelectLot} />
+        <LotNavigation mobile lots={lots} selectedLot={navigationSelection} onSelect={selectLot} />
       </Box>
 
       <Box sx={{ minWidth: 0, px: { xs: 2, sm: 3, lg: 4 }, py: { xs: 2.5, sm: 3, lg: 4 } }}>
+        <Box ref={lotDetailsTop} tabIndex={-1} sx={{ scrollMarginTop: 12 }}>
+          <ReportLotNavigationControls lots={lots} selectedIndex={navigationSelection} onSelect={selectLot} placement="top" includeSummary />
+        </Box>
         {selectedLot < 0 || !activeLot ? (
           <Box component="section" aria-labelledby="report-summary-heading">
             <Typography
@@ -456,9 +469,11 @@ function ReportDataPanel({
                 {lotTitle(activeLot)}
               </Typography>
             </Box>
-            <DataValue value={activeLot} name="lot" />
+            {usesLotTitleDescription(preview.meta) ? <Typography sx={{ mb: 1.5, color: "text.secondary", fontSize: 12 }}>Title is used as Description in generated files. Structured condition details are shown below.</Typography> : null}
+            <DataValue value={usesLotTitleDescription(preview.meta) ? lotPreviewDisplay(activeLot) : activeLot} name="lot" />
           </Box>
         )}
+        <ReportLotNavigationControls lots={lots} selectedIndex={navigationSelection} onSelect={selectLot} placement="bottom" includeSummary />
       </Box>
     </Box>
   );

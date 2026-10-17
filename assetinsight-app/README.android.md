@@ -1,5 +1,15 @@
 # Android local development
 
+## Non-camera workflow synchronization — 2026-10-17
+
+Source `087184c` workflows include the current Auctioneer Incoming queue, safe
+connection errors, Title-only previews, complete-lot navigation, durable upload
+recovery and guarded Outlook operations. Per-lot AI Re-Generate is removed;
+ordinary Save still regenerates files. Existing camera source, UI, capture
+quality and 720p settings in this distribution are unchanged, including its
+earlier downstream capture optimizations. No camera-only source rollback is
+included. See the repository SYNC.md for scope and verification limitations.
+
 ## Pristine source export — 2026-10-09
 
 Integrated source `dc73c68` as content-only changes. Explicit durable Android

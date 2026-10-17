@@ -3,7 +3,7 @@ import test from 'node:test';
 import { readFileSync } from 'node:fs';
 import { parseYouTubeStatus, parseYouTubeAuthorization, parseYouTubeCallback, youtubeConnectBody, youtubeCompleteBody, youtubeDisconnectBody, youtubeEraseBody, finishYouTubeConnection, youtubeConnectionFailure } from '../lib/youtube.ts';
 import { readPreviewMutationJson } from '../lib/previewResubmitRequest.ts';
-import { parseYouTubeVideoPage, youtubeVideoQuery, youtubeVideoRetryBody, youtubeVideoReviewBody } from '../lib/youtubeVideos.ts';
+import { parseYouTubeVideoPage, youtubeVideoQuery, youtubeVideoRetryBody, youtubeVideoReviewBody, youtubeVideoFailure } from '../lib/youtubeVideos.ts';
 
 const state = 'a'.repeat(64);
 const status = { configured: true, configurationIssue: null, connected: true, needsReconnect: false, revision: 1, channel: { id: 'UC' + 'a'.repeat(22), title: 'Example channel', url: 'https://malicious.example' }, connectedAt: '2026-09-28T12:00:00Z', privacyStatus: 'public', accessToken: 'never-browser' };
@@ -159,6 +159,16 @@ test('YouTube guidance retains the original Excel layout without regeneration ad
     assert.doesNotMatch(text, /regenerate[^.]*Excel links|regenerate[^.]*YouTube links in Excel|link may appear in report Excel exports/i);
   }
 });
+test('publication guidance does not infer a private-only restriction from project verification', () => {
+  const source = path => readFileSync(new URL(path, import.meta.url), 'utf8');
+  const settings = source('../app/components/youtube/YouTubeSettings.tsx');
+  assert.match(settings, /YouTube confirms publication/);
+  assert.match(settings, /channel authorization, video processing and a confirmed visibility response/);
+  assert.match(settings, /https:\/\/developers\.google\.com\/youtube\/v3\/docs\/videos\/insert/);
+  for (const file of ['YouTubeSettings', 'YouTubeVideos']) {
+    assert.doesNotMatch(source(`../app/components/youtube/${file}.tsx`), /unverified API projects|API compliance audit|Google eligibility/);
+  }
+});
 test('route and UI boundaries preserve roles, single attempts and credential stripping', () => {
   const source = path => readFileSync(new URL(path, import.meta.url), 'utf8');
   assert.match(source('../lib/requireOperationalAdminPage.ts'), /\["admin", "superadmin"\]/);
@@ -182,4 +192,49 @@ test('video inventory is bounded, scoped and public links require a confirmed pu
   for (const query of ['page=0', 'page=1&page=2', 'limit=100', 'reportId=abc']) assert.throws(() => youtubeVideoQuery(new URLSearchParams(query)));
   assert.deepEqual(youtubeVideoRetryBody({ updatedAt: video.updatedAt }), { updatedAt: video.updatedAt });
   assert.throws(() => youtubeVideoRetryBody({ updatedAt: video.updatedAt, privacyStatus: 'public' }));
+});
+test('upload retry and automatic retry timing are explicit server capabilities', () => {
+  const video = { id: 'a'.repeat(64), reportId: 'b'.repeat(24), reportType: 'lotListing', lotNumber: '20', status: 'needs_attention', url: null, lastError: 'Saved upload stopped.', updatedAt: '2026-10-10T20:04:04.000Z', retryEligible: true, retryKind: 'upload', nextAttemptAt: null, reviewRequired: false };
+  const parse = row => parseYouTubeVideoPage({ items: [row], page: 1, total: 1, totalPages: 1 }).items[0];
+  assert.equal(parse(video).retryKind, 'upload');
+  assert.equal(parse(video).nextAttemptAt, null);
+  const scheduled = parse({ ...video, status: 'uploading', nextAttemptAt: '2026-10-10T20:30:00.000Z' });
+  assert.equal(scheduled.status, 'uploading');
+  assert.equal(scheduled.nextAttemptAt, '2026-10-10T20:30:00.000Z');
+  for (const patch of [{ retryKind: 'new_upload' }, { retryKind: null }, { nextAttemptAt: 'later' }, { nextAttemptAt: '2026-10-10T20:30:00.000Z' }]) assert.throws(() => parse({ ...video, ...patch }));
+  assert.equal(parse({ ...video, retryKind: undefined }).retryKind, 'publication');
+  assert.equal(parse({ ...video, retryKind: undefined, retryEligible: false }).retryKind, null);
+  const removed = parse({ ...video, status: 'data_removed', sessionCipher: 'secret', nextAttemptAt: '2026-10-10T20:30:00.000Z' });
+  assert.equal(removed.retryKind, null); assert.equal(removed.nextAttemptAt, null); assert.equal(removed.retryEligible, false);
+  assert.doesNotMatch(JSON.stringify(removed), /secret/);
+});
+test('video action failures explain known causes without provider bodies or raw status codes', () => {
+  for (const code of ['YOUTUBE_REVIEW_INVALID', 'YOUTUBE_REVIEW_UNAVAILABLE', 'YOUTUBE_REVIEW_CHANGED', 'YOUTUBE_RETRY_INVALID', 'YOUTUBE_VIDEO_NOT_FOUND', 'YOUTUBE_RETRY_UNAVAILABLE', 'YOUTUBE_RETRY_CHANGED', 'YOUTUBE_RECONCILIATION_REQUIRED', 'YOUTUBE_RETRY_UNCONFIRMED']) {
+    const issue = youtubeVideoFailure({ code, message: 'secret provider URL', access_token: 'secret token' }, 409);
+    assert.equal(issue.code, code); assert.doesNotMatch(issue.message, /secret|HTTP|409/);
+  }
+  assert.match(youtubeVideoFailure({}, 401).message, /session expired/);
+  assert.match(youtubeVideoFailure({}, 403).message, /denied/);
+  assert.match(youtubeVideoFailure({}, 404).message, /no longer available/);
+  assert.match(youtubeVideoFailure({}, 409).message, /changed/);
+  for (const code of ['unknown', 'constructor', 'toString', '__proto__']) {
+    const issue = youtubeVideoFailure({ code, message: 'secret provider URL' }, 500);
+    assert.equal(issue.code, undefined); assert.doesNotMatch(issue.message, /secret|HTTP|500/);
+  }
+});
+test('video review and retry BFF and UI use safe errors without replaying requests', () => {
+  const source = path => readFileSync(new URL(path, import.meta.url), 'utf8');
+  for (const action of ['review', 'retry-publication']) {
+    const route = source(`../app/api/admin/youtube/videos/[id]/${action}/route.ts`);
+    assert.match(route, /youtubeVideoFailure/); assert.match(route, /replayAfterRefresh: false/);
+    assert.doesNotMatch(route, /message: (?:payload|body|result)\.message/);
+  }
+  const ui = source('../app/components/youtube/YouTubeVideos.tsx');
+  assert.match(ui, /Resume reviewed upload/); assert.match(ui, /Waiting to resume/);
+  assert.match(ui, /An automatic attempt is scheduled/); assert.match(ui, /youtubeVideoFailure\(result, response.status\)/);
+  assert.match(ui, /JSON\.stringify\(\{ updatedAt: video.updatedAt \}\)/);
+  assert.match(ui, /Refresh retrieves saved worker status/);
+  assert.match(ui, /md: "minmax\(0,1fr\) max-content minmax\(0,1\.6fr\) auto"/);
+  assert.doesNotMatch(ui, /110px minmax/);
+  assert.doesNotMatch(ui, /result\.message|setInterval/);
 });

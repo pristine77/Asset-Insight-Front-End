@@ -120,8 +120,8 @@ export type SubmissionFileMatch =
 /**
  * Confirms rehydrated draft media is the same set, in the same order, that the
  * session was created with. Name, size and lastModified are exactly the fields
- * the manifest carries, so an equal comparison here means the replayed manifest
- * will be byte-identical.
+ * the manifest carries. This is an identity/order check, not a content hash;
+ * resume must use the original immutable blobs, never a newer editable draft.
  *
  * This fails closed on purpose: a mismatch means the draft changed after the
  * upload began, and resuming would silently submit different media under an

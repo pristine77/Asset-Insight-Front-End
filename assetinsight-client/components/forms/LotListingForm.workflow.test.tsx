@@ -10,9 +10,10 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { AuctioneerWorkItemSetup } from "@/services/auctioneer";
 import type { ReportDraftRecord } from "@/services/reportDrafts";
 import LotListingForm from "./LotListingForm";
-import { backgroundUploads } from "@/services/backgroundUploadManager";
 import { StrictMode } from "react";
 import type { MixedLot } from "./mixed/types";
+import type { BackgroundUploadRequest } from "@/services/backgroundUploadManager";
+import { advanceAuthSession } from "@/lib/auth-storage";
 
 const mocks = vi.hoisted(() => ({
   userId: "user-1" as string | null,
@@ -31,6 +32,18 @@ const mocks = vi.hoisted(() => ({
   toastWarning: vi.fn(),
   upsertWithMedia: vi.fn(),
   uploadReportFilesDirectToR2: vi.fn(),
+  enqueue: vi.fn(),
+  isForegroundRequired: vi.fn(),
+  createDraftId: vi.fn(),
+  toastSuccess: vi.fn(),
+}));
+
+vi.mock("@/services/backgroundUploadManager", () => ({
+  backgroundUploads: {
+    enqueue: mocks.enqueue,
+    isForegroundRequired: mocks.isForegroundRequired,
+    clearForegroundRequirement: vi.fn(),
+  },
 }));
 
 vi.mock("next/navigation", () => ({
@@ -122,7 +135,7 @@ vi.mock("@/components/ui/toast", () => ({
   toast: {
     error: vi.fn(),
     info: vi.fn(),
-    success: vi.fn(),
+    success: mocks.toastSuccess,
     warning: mocks.toastWarning,
   },
 }));
@@ -149,7 +162,7 @@ vi.mock("@/services/reportDrafts", () => ({
     get: mocks.getDraft,
     upsertWithMedia: mocks.upsertWithMedia,
   },
-  createReportDraftClientId: () => "lot-listing-draft-1",
+  createReportDraftClientId: mocks.createDraftId,
   getDuplicateLotWarning: () => null,
   getReportDraftDeviceId: () => "device-1",
 }));
@@ -274,6 +287,10 @@ function makeLotResumeDraft(): ReportDraftRecord {
 describe("LotListingForm explicit save and upload workflow", () => {
   beforeEach(() => {
     mocks.userId = "user-1";
+    mocks.enqueue.mockReset();
+    mocks.isForegroundRequired.mockReset().mockReturnValue(false);
+    mocks.createDraftId.mockReset().mockReturnValue("lot-listing-draft-1");
+    mocks.toastSuccess.mockReset();
     vi.useRealTimers();
     mocks.apiPost.mockReset();
     mocks.deleteByClientId.mockReset().mockResolvedValue(undefined);
@@ -306,73 +323,106 @@ describe("LotListingForm explicit save and upload workflow", () => {
     window.localStorage.clear();
   });
 
-  /*
-     Submit hands the upload to the background line and closes the form, so a
-     refusal no longer surfaces in a form that is still on screen. The data is
-     still safe -- the saved draft is untouched, the line holds the upload for
-     attention, and a draft needing a decision is marked foreground so reopening
-     it from Drafts submits inline, where its dialog can be answered. These
-     tests assert that chain, as AssetForm.workflow.test.tsx does.
-  */
-  const heldForAttention = async () => {
-    await waitFor(() => expect(backgroundUploads.getSnapshot().held).toHaveLength(1));
-    return backgroundUploads.getSnapshot().held[0];
-  };
+  it("closes only after durable handoff and protects the next listing from late upload cleanup", async () => {
+    const persistence = deferred<string>();
+    const upload = deferred<Record<string, unknown>>();
+    const onSuccess = vi.fn();
+    mocks.enqueue.mockReturnValueOnce(persistence.promise);
+    mocks.uploadReportFilesDirectToR2.mockReturnValueOnce(upload.promise);
+    let sequence = 0;
+    mocks.createDraftId.mockImplementation(() => `independent-listing-${++sequence}`);
+    const view = render(<LotListingForm onSuccess={onSuccess} />);
+    await waitForResolvedLotLocation(); addValidListing();
+    fireEvent.click(screen.getByRole("button", { name: "Create Lot Listing" }));
+    await waitFor(() => expect(mocks.enqueue).toHaveBeenCalledOnce());
+    const request = mocks.enqueue.mock.calls[0][0] as BackgroundUploadRequest;
+    expect(request).toMatchObject({ ownerId: "user-1", kind: "lot-listing", totalFiles: 1, scopeId: "independent-listing-1" });
+    expect(request.files[0]).toMatchObject({ name: "lot-photo.jpg", size: request.media[0].size, lastModified: 123 });
+    expect(request.draftSnapshot).toMatchObject({ data: { contractNo: "LOT-TEST-1", clientSubmissionId: request.clientSubmissionId, lots: [{ files: [request.media[0]] }] } });
+    expect(onSuccess).not.toHaveBeenCalled();
+    expect(mocks.uploadReportFilesDirectToR2).not.toHaveBeenCalled();
+    await act(async () => persistence.resolve("background-job"));
+    await waitFor(() => expect(onSuccess).toHaveBeenCalledOnce());
+    expect(onSuccess).toHaveBeenCalledWith(expect.stringContaining("while this tab stays open"));
+    expect(screen.getByRole("textbox", { name: /contract number/i })).toHaveValue("");
+    expect(screen.getByTestId("selected-listing-media")).toHaveTextContent("No media selected");
+    expect(request.signal?.aborted).toBe(false);
+    addValidListing();
+    fireEvent.change(screen.getByRole("textbox", { name: /contract number/i }), { target: { value: "NEXT-REPORT" } });
+    const lateResult = request.upload(vi.fn(), new AbortController().signal);
+    await act(async () => upload.resolve({ reportId: "accepted-old", jobId: "job-old", status: "processing" }));
+    await lateResult;
+    expect(screen.getByRole("textbox", { name: /contract number/i })).toHaveValue("NEXT-REPORT");
+    expect(screen.getByTestId("selected-listing-media")).toHaveTextContent("lot-photo.jpg");
+    expect(mocks.deleteByClientId).not.toHaveBeenCalled();
+    expect(mocks.deleteScopedDraft).not.toHaveBeenCalled();
+    const nextPersistence = deferred<string>();
+    mocks.enqueue.mockReturnValueOnce(nextPersistence.promise);
+    fireEvent.click(screen.getByRole("button", { name: "Create Lot Listing" }));
+    await waitFor(() => expect(mocks.enqueue).toHaveBeenCalledTimes(2));
+    const next = mocks.enqueue.mock.calls[1][0] as BackgroundUploadRequest;
+    expect(next.scopeId).not.toBe(request.scopeId);
+    expect(next.clientSubmissionId).not.toBe(request.clientSubmissionId);
+    expect(next.details.contract_no).toBe("NEXT-REPORT");
+    await act(async () => nextPersistence.reject(new Error("Storage unavailable. Retry this same report.")));
+    view.unmount();
+    expect(request.signal?.aborted).toBe(false);
+  });
 
-  it.each([{}, { reportId: "placeholder", jobId: "j", phase: "upload", status: "uploading" }])("keeps the draft and leaves an unproven receipt retryable from the bar %j", async (receipt) => {
+  it("keeps an ordinary listing and media when durable handoff fails", async () => {
+    const onSuccess = vi.fn();
+    mocks.enqueue.mockRejectedValueOnce(new Error("Browser storage is full. Free space and retry this same report."));
+    render(<LotListingForm onSuccess={onSuccess} />);
+    await waitForResolvedLotLocation(); addValidListing();
+    fireEvent.click(screen.getByRole("button", { name: "Create Lot Listing" }));
+    await screen.findByText(/Browser storage is full/);
+    expect(onSuccess).not.toHaveBeenCalled();
+    expect(mocks.uploadReportFilesDirectToR2).not.toHaveBeenCalled();
+    expect(screen.getByRole("textbox", { name: /contract number/i })).toHaveValue("LOT-TEST-1");
+    expect(screen.getByTestId("selected-listing-media")).toHaveTextContent("lot-photo.jpg");
+    expect(mocks.deleteScopedDraft).not.toHaveBeenCalled();
+    expect(mocks.deleteByClientId).not.toHaveBeenCalled();
+  });
+
+  it.each(["cancel", "session", "unmount"] as const)("ignores a late listing handoff after %s", async (interruption) => {
+    const persistence = deferred<string>();
+    const onSuccess = vi.fn();
+    mocks.enqueue.mockReturnValueOnce(persistence.promise);
+    const view = render(<LotListingForm onSuccess={onSuccess} />);
+    await waitForResolvedLotLocation(); addValidListing();
+    fireEvent.click(screen.getByRole("button", { name: "Create Lot Listing" }));
+    await waitFor(() => expect(mocks.enqueue).toHaveBeenCalledOnce());
+    const request = mocks.enqueue.mock.calls[0][0] as BackgroundUploadRequest;
+    if (interruption === "cancel") fireEvent.click(screen.getByRole("button", { name: "Stop upload" }));
+    else if (interruption === "session") advanceAuthSession();
+    else view.unmount();
+    await act(async () => persistence.resolve("late-job"));
+    if (interruption !== "session") expect(request.signal?.aborted).toBe(true);
+    expect(onSuccess).not.toHaveBeenCalled();
+    expect(mocks.toastSuccess).not.toHaveBeenCalled();
+    expect(mocks.deleteScopedDraft).not.toHaveBeenCalled();
+    expect(mocks.deleteByClientId).not.toHaveBeenCalled();
+  });
+
+  it.each([{}, { reportId: "placeholder", jobId: "j", phase: "upload", status: "uploading" }, { reportId: "old-report", jobId: "old-job", status: "processed", reusedAcceptance: true }])("keeps current data for an unproven or historical receipt %j", async (receipt) => {
     const onSuccess = vi.fn();
     mocks.uploadReportFilesDirectToR2.mockResolvedValue(receipt);
-    render(<LotListingForm onSuccess={onSuccess} resumeLocalDraftScopeId="scope-receipt" />);
+    render(<LotListingForm resumeLocalDraftScopeId="upload-review:lot-listing-inline" onSuccess={onSuccess} />);
     await waitForResolvedLotLocation(); addValidListing();
     fireEvent.click(screen.getByRole("button", { name: "Create Lot Listing" }));
-    await waitFor(() => expect(mocks.uploadReportFilesDirectToR2).toHaveBeenCalledOnce());
-
-    const held = await heldForAttention();
-    expect(held).toMatchObject({ status: "attention", kind: "lot-listing" });
-    /*
-       An unconfirmed receipt is retryable as the same upload -- the server may
-       still have accepted it, so recreating the report is the one thing that
-       must not happen. It stays resumable from the bar rather than demanding a
-       decision in the form.
-    */
-    expect(held.message).toMatch(/Retry this same upload; do not recreate the report/);
-    expect(held.needsForm).toBe(false);
-    expect(backgroundUploads.isForegroundRequired("lot-listing", "scope-receipt")).toBe(false);
-    // An unproven receipt must never be treated as a completed submission.
-    expect(mocks.deleteByClientId).not.toHaveBeenCalled(); expect(mocks.deleteScopedDraft).not.toHaveBeenCalled();
+    await screen.findByText(/did not confirm report acceptance|earlier submission was already accepted/);
+    expect(onSuccess).not.toHaveBeenCalled(); expect(mocks.deleteByClientId).not.toHaveBeenCalled(); expect(mocks.deleteScopedDraft).not.toHaveBeenCalled();
+    expect(screen.getByTestId("selected-listing-media")).toHaveTextContent("lot-photo.jpg");
   });
 
-  it("keeps the draft and returns it to the form when an earlier accepted report is found", async () => {
-    mocks.uploadReportFilesDirectToR2.mockResolvedValue({ reportId: "old-report", jobId: "old-job", status: "processed", reusedAcceptance: true });
-    render(<LotListingForm resumeLocalDraftScopeId="scope-earlier" />);
-    await waitForResolvedLotLocation(); addValidListing();
-    fireEvent.click(screen.getByRole("button", { name: "Create Lot Listing" }));
-
-    const held = await heldForAttention();
-    expect(held.message).toMatch(/earlier submission was already accepted/);
-    expect(backgroundUploads.isForegroundRequired("lot-listing", "scope-earlier")).toBe(true);
-    expect(mocks.deleteByClientId).not.toHaveBeenCalled(); expect(mocks.deleteScopedDraft).not.toHaveBeenCalled();
-  });
-
-  it.each([true, false])("sends an unusable old submission back to the form, offering separate recovery only for authoritative eligibility %s", async (canCreateSeparate) => {
+  it.each([true, false])("offers separate saved recovery only for authoritative eligibility %s", async (canCreateSeparate) => {
     mocks.uploadReportFilesDirectToR2.mockRejectedValue({ response: { status: 409, data: { code: "UPLOAD_SESSION_REPORT_UNAVAILABLE", data: { sessionId: "old-session", accepted: true, reportAvailable: false, canCreateSeparate } } } });
-    const first = render(<LotListingForm resumeLocalDraftScopeId="scope-separate" />);
-    await waitForResolvedLotLocation(); addValidListing();
-    fireEvent.click(screen.getByRole("button", { name: "Create Lot Listing" }));
-    await heldForAttention();
-
-    // Only an eligible separate recovery is a decision the form can offer.
-    expect(backgroundUploads.isForegroundRequired("lot-listing", "scope-separate")).toBe(canCreateSeparate);
-    expect(mocks.upsertWithMedia).not.toHaveBeenCalled(); expect(mocks.deleteByClientId).not.toHaveBeenCalled();
-    if (!canCreateSeparate) return;
-
-    // Reopened from Drafts, the draft submits inline and offers the recovery.
-    first.unmount();
-    render(<LotListingForm resumeLocalDraftScopeId="scope-separate" />);
+    render(<LotListingForm resumeLocalDraftScopeId="upload-review:lot-listing-inline" />);
     await waitForResolvedLotLocation(); addValidListing();
     fireEvent.click(screen.getByRole("button", { name: "Create Lot Listing" }));
     await screen.findByText(/old submission cannot be reused/);
-    expect(screen.getByRole("button", { name: "Save separate draft" })).toBeVisible();
+    expect(Boolean(screen.queryByRole("button", { name: "Save separate draft" }))).toBe(canCreateSeparate);
+    expect(mocks.upsertWithMedia).not.toHaveBeenCalled(); expect(mocks.deleteByClientId).not.toHaveBeenCalled();
     expect(screen.getByTestId("selected-listing-media")).toHaveTextContent("lot-photo.jpg");
   });
 
@@ -387,18 +437,10 @@ describe("LotListingForm explicit save and upload workflow", () => {
     expect(screen.getByTestId("selected-listing-media")).toHaveTextContent("lot-photo.jpg");
   });
 
-  it("shows the existing-report dialog when the returned draft is submitted again", async () => {
-    mocks.uploadReportFilesDirectToR2.mockRejectedValue({ response: { status: 409, data: { code: "ACTIVE_REPORT_EXISTS" } } });
-    const first = render(<LotListingForm resumeLocalDraftScopeId="scope-active" />);
-    await waitForResolvedLotLocation(); addValidListing();
-    fireEvent.click(screen.getByRole("button", { name: "Create Lot Listing" }));
-    await heldForAttention();
-    expect(backgroundUploads.isForegroundRequired("lot-listing", "scope-active")).toBe(true);
-    first.unmount();
-
-    // Reopening that draft from Drafts submits inline, where the prompt lives.
+  it("opens existing-report status separately without closing the current listing", async () => {
     const onSuccess = vi.fn();
-    render(<LotListingForm onSuccess={onSuccess} resumeLocalDraftScopeId="scope-active" />);
+    mocks.uploadReportFilesDirectToR2.mockRejectedValue({ response: { status: 409, data: { code: "ACTIVE_REPORT_EXISTS" } } });
+    render(<LotListingForm resumeLocalDraftScopeId="upload-review:lot-listing-inline" onSuccess={onSuccess} />);
     await waitForResolvedLotLocation(); addValidListing();
     fireEvent.click(screen.getByRole("button", { name: "Create Lot Listing" }));
     const dialog = await screen.findByRole("dialog", { name: "Report already processing" });
@@ -530,6 +572,7 @@ describe("LotListingForm explicit save and upload workflow", () => {
       }
       fireEvent.click(screen.getByRole("button", { name: "Create Lot & Continue" }));
       await waitFor(() => expect(mocks.uploadReportFilesDirectToR2).toHaveBeenCalledOnce());
+      expect(mocks.enqueue).not.toHaveBeenCalled();
       expect(onAcceptedAndContinue).not.toHaveBeenCalled();
       expect(mocks.deleteByClientId).not.toHaveBeenCalled();
       const details = mocks.uploadReportFilesDirectToR2.mock.calls[0][0].details;
@@ -890,7 +933,7 @@ describe("LotListingForm explicit save and upload workflow", () => {
     ).toBeVisible();
   });
 
-  it("hands the upload to the line, clears the form, and stops it from the bar without auto-saving", async () => {
+  it("shows Stop upload, aborts the submission, and never auto-saves it", async () => {
     const pendingUpload = deferred<Record<string, unknown>>();
     mocks.uploadReportFilesDirectToR2.mockImplementation(
       ({ signal }: { signal: AbortSignal }) => {
@@ -904,28 +947,33 @@ describe("LotListingForm explicit save and upload workflow", () => {
       }
     );
 
-    const { container } = render(<LotListingForm resumeLocalDraftScopeId="scope-stop" />);
+    const { container } = render(<LotListingForm resumeLocalDraftScopeId="upload-review:lot-listing-inline" />);
     await waitForResolvedLotLocation();
     addValidListing();
+    const contractInput = screen.getByRole("textbox", {
+      name: /contract number/i,
+    });
     fireEvent.click(
       screen.getByRole("button", { name: "Create Lot Listing" })
     );
-    await waitFor(() =>
-      expect(mocks.uploadReportFilesDirectToR2).toHaveBeenCalledOnce()
-    );
 
-    /*
-       The upload now runs in the line, so the form neither blocks the page nor
-       owns the control that stops it. Stop lives on the upload bar, and the
-       form is cleared for the next listing.
-    */
+    const uploadScreen = await screen.findByRole("dialog", {
+      name: "Uploading your report",
+    });
+    expect(uploadScreen).toHaveClass("fixed", "inset-0", "z-[1500]");
+    expect(container.querySelector("form")).toHaveAttribute("aria-busy", "true");
+    const hiddenFormContent = container.querySelector(
+      '[aria-hidden="true"][inert]'
+    );
+    expect(hiddenFormContent).toBeInTheDocument();
+    expect(hiddenFormContent).toContainElement(contractInput);
+    expect(screen.queryByRole("textbox", { name: /contract number/i })).not.toBeInTheDocument();
     expect(
-      screen.queryByRole("dialog", { name: "Uploading your report" })
+      screen.queryByRole("progressbar", { name: "Upload progress" })
     ).not.toBeInTheDocument();
-    expect(container.querySelector('[aria-hidden="true"][inert]')).toBeNull();
     expect(
-      screen.getByRole("textbox", { name: /contract number/i })
-    ).toHaveValue("");
+      screen.getByRole("progressbar", { name: "Report upload progress" })
+    ).toHaveAttribute("aria-valuenow", "0");
 
     const uploadArguments = mocks.uploadReportFilesDirectToR2.mock.calls[0][0];
     expect(uploadArguments).toMatchObject({
@@ -940,87 +988,32 @@ describe("LotListingForm explicit save and upload workflow", () => {
     });
     expect(uploadArguments.signal).toBeInstanceOf(AbortSignal);
 
-    const active = backgroundUploads.getSnapshot().active;
-    expect(active).toMatchObject({ kind: "lot-listing", title: "LOT-TEST-1", canPause: true, finalizing: false });
-    backgroundUploads.stop(active!.id);
-
-    await waitFor(() => expect(uploadArguments.signal.aborted).toBe(true));
-    await waitFor(() => expect(backgroundUploads.getSnapshot().active).toBeNull());
-    // Stopping submits nothing, never auto-saves, and leaves the saved draft.
-    expect(mocks.upsertWithMedia).not.toHaveBeenCalled();
-    expect(mocks.deleteByClientId).not.toHaveBeenCalled();
-    expect(mocks.deleteScopedDraft).not.toHaveBeenCalled();
-    expect(backgroundUploads.getSnapshot().notices.at(-1)).toMatchObject({ heading: "Upload stopped" });
-  });
-
-  /*
-     The hand-off used to return with the inline-upload locks still set, so the
-     cleared form stayed inert and refused every later Save Draft and Submit
-     until it was reopened. The next listing must work at once, under its own
-     draft scope, while the first upload is still running.
-  */
-  it("keeps the form usable after a hand-off: the next listing saves under its own scope and queues", async () => {
-    mocks.uploadReportFilesDirectToR2.mockImplementation(
-      () => new Promise(() => undefined)
-    );
-    mocks.upsertWithMedia.mockResolvedValue({ _id: "draft-2", media: [] });
-
-    const { container } = render(<LotListingForm resumeLocalDraftScopeId="scope-first" />);
-    await waitForResolvedLotLocation();
-    addValidListing();
-    fireEvent.click(screen.getByRole("button", { name: "Create Lot Listing" }));
-    await waitFor(() => expect(mocks.uploadReportFilesDirectToR2).toHaveBeenCalledOnce());
-    expect(backgroundUploads.getSnapshot().active).toMatchObject({ scopeId: "scope-first" });
-
-    await waitForResolvedLotLocation();
-    expect(container.querySelector("form")).not.toHaveAttribute("aria-busy", "true");
-    fireEvent.change(
-      screen.getByRole("textbox", { name: /contract number/i }),
-      { target: { value: "LOT-TEST-2" } }
-    );
-    fireEvent.click(screen.getByRole("button", { name: "Add test media" }));
-
-    fireEvent.click(screen.getAllByRole("button", { name: "Save Draft" })[0]);
-    await waitFor(() => expect(mocks.upsertWithMedia).toHaveBeenCalledOnce());
-    const savedDraft = mocks.upsertWithMedia.mock.calls[0][0];
-    expect(savedDraft).toMatchObject({ contractNo: "LOT-TEST-2" });
-    // Never over the first listing's scope: its upload resumes from that draft.
-    expect(savedDraft.clientDraftId).not.toBe("scope-first");
+    fireEvent.click(screen.getByRole("button", { name: "Stop upload" }));
     await waitFor(() =>
       expect(
-        screen.queryByRole("dialog", { name: "Saving your draft" })
+        screen.queryByRole("dialog", { name: "Uploading your report" })
       ).not.toBeInTheDocument()
     );
 
-    fireEvent.click(screen.getByRole("button", { name: "Create Lot Listing" }));
-    await waitFor(() => expect(backgroundUploads.getSnapshot().queued).toHaveLength(1));
-    const snapshot = backgroundUploads.getSnapshot();
-    expect(snapshot.active).toMatchObject({ title: "LOT-TEST-1", scopeId: "scope-first" });
-    expect(snapshot.queued[0]).toMatchObject({
-      kind: "lot-listing",
-      title: "LOT-TEST-2",
-      scopeId: savedDraft.clientDraftId,
-      status: "queued",
-    });
-    // One upload at a time: the second waits for the first.
-    expect(mocks.uploadReportFilesDirectToR2).toHaveBeenCalledOnce();
+    expect(uploadArguments.signal.aborted).toBe(true);
+    expect(mocks.upsertWithMedia).not.toHaveBeenCalled();
     expect(
       screen.getByRole("textbox", { name: /contract number/i })
-    ).toHaveValue("");
+    ).toHaveValue("LOT-TEST-1");
+    expect(screen.getByTestId("test-lot-count")).toHaveTextContent("1");
+    expect(screen.getByText(/upload stopped/i)).toBeInTheDocument();
   });
 
-  it("recovers a changed submission manifest through the returned draft", async () => {
-    const manifestConflict = {
-      response: {
-        status: 409,
-        data: { code: "SUBMISSION_MANIFEST_CHANGED", data: { accepted: false, canSupersede: true } },
-      },
-    };
+  it("recovers a changed submission manifest with a new upload identity", async () => {
     const retryUpload = deferred<Record<string, unknown>>();
     let retrySignal: AbortSignal | undefined;
     mocks.uploadReportFilesDirectToR2
-      .mockRejectedValueOnce(manifestConflict)
-      .mockRejectedValueOnce(manifestConflict)
+      .mockRejectedValueOnce({
+        response: {
+          status: 409,
+          data: { code: "SUBMISSION_MANIFEST_CHANGED", data: { accepted: false, canSupersede: true } },
+        },
+      })
       .mockImplementationOnce(({ signal }: { signal: AbortSignal }) => {
         retrySignal = signal;
         signal.addEventListener(
@@ -1030,28 +1023,10 @@ describe("LotListingForm explicit save and upload workflow", () => {
         );
         return retryUpload.promise;
       });
-
-    // The first attempt runs in the line and comes back needing a decision.
-    const first = render(<LotListingForm resumeLocalDraftScopeId="scope-manifest" />);
+    render(<LotListingForm resumeLocalDraftScopeId="upload-review:lot-listing-inline" />);
     await waitForResolvedLotLocation();
     addValidListing();
-    fireEvent.click(
-      screen.getByRole("button", { name: "Create Lot Listing" })
-    );
-    await waitFor(() =>
-      expect(mocks.uploadReportFilesDirectToR2).toHaveBeenCalledTimes(1)
-    );
-    await waitFor(() =>
-      expect(backgroundUploads.isForegroundRequired("lot-listing", "scope-manifest")).toBe(true)
-    );
-    const firstDetails =
-      mocks.uploadReportFilesDirectToR2.mock.calls[0][0].details;
-    first.unmount();
 
-    // Reopening that draft submits inline, where the recovery prompt lives.
-    render(<LotListingForm resumeLocalDraftScopeId="scope-manifest" />);
-    await waitForResolvedLotLocation();
-    addValidListing();
     fireEvent.click(
       screen.getByRole("button", { name: "Create Lot Listing" })
     );
@@ -1060,72 +1035,62 @@ describe("LotListingForm explicit save and upload workflow", () => {
       name: "Start a new upload?",
     });
     expect(within(recovery).getByText(/photos changed/i)).toBeVisible();
+    const firstDetails =
+      mocks.uploadReportFilesDirectToR2.mock.calls[0][0].details;
     fireEvent.click(
       within(recovery).getByRole("button", { name: "Start new upload" })
     );
 
     await waitFor(() =>
-      expect(mocks.uploadReportFilesDirectToR2).toHaveBeenCalledTimes(3)
+      expect(mocks.uploadReportFilesDirectToR2).toHaveBeenCalledTimes(2)
     );
-    const replacement =
-      mocks.uploadReportFilesDirectToR2.mock.calls[2][0].details;
-    expect(replacement.force_new).toBe(false);
-    expect(replacement.supersedes_client_submission_id).toBe(
+    const secondDetails =
+      mocks.uploadReportFilesDirectToR2.mock.calls[1][0].details;
+    expect(secondDetails.force_new).toBe(false);
+    expect(secondDetails.supersedes_client_submission_id).toBe(
       firstDetails.client_submission_id
     );
-    expect(replacement.client_submission_id).not.toBe(
+    expect(secondDetails.client_submission_id).not.toBe(
       firstDetails.client_submission_id
     );
-
-    /*
-       The decision has been taken, so the replacement upload goes back to the
-       line rather than holding the page open again.
-    */
     expect(retrySignal).toBeInstanceOf(AbortSignal);
-    expect(
-      screen.queryByRole("dialog", { name: "Uploading your report" })
-    ).not.toBeInTheDocument();
-    const active = backgroundUploads.getSnapshot().active;
-    expect(active).not.toBeNull();
-    backgroundUploads.stop(active!.id);
+
+    const retryDialog = await screen.findByRole("dialog", {
+      name: "Uploading your report",
+    });
+    fireEvent.click(
+      within(retryDialog).getByRole("button", { name: "Stop upload" })
+    );
     await waitFor(() => expect(retrySignal?.aborted).toBe(true));
-    expect(mocks.deleteScopedDraft).not.toHaveBeenCalled();
+    await waitFor(() =>
+      expect(
+        screen.queryByRole("dialog", { name: "Uploading your report" })
+      ).not.toBeInTheDocument()
+    );
+    expect(
+      screen.getByRole("textbox", { name: /contract number/i })
+    ).toHaveValue("LOT-TEST-1");
+    expect(screen.getByTestId("test-lot-count")).toHaveTextContent("1");
   });
 
   it("carries the rejected upload identity into an explicit force-new replacement", async () => {
-    const activeConflict = {
-      response: { status: 409, data: { code: "ACTIVE_REPORT_EXISTS" } },
-    };
     mocks.uploadReportFilesDirectToR2
-      .mockRejectedValueOnce(activeConflict)
-      .mockRejectedValueOnce(activeConflict)
+      .mockRejectedValueOnce({
+        response: {
+          status: 409,
+          data: { code: "ACTIVE_REPORT_EXISTS" },
+        },
+      })
       .mockResolvedValueOnce({
         message: "Accepted",
         reportId: "replacement-lot-report",
         jobId: "replacement-lot-job",
         status: "processing",
       });
-
-    // The first attempt runs in the line and is returned for a decision.
-    const first = render(<LotListingForm resumeLocalDraftScopeId="scope-force-new" />);
+    render(<LotListingForm resumeLocalDraftScopeId="upload-review:lot-listing-inline" />);
     await waitForResolvedLotLocation();
     addValidListing();
-    fireEvent.click(
-      screen.getByRole("button", { name: "Create Lot Listing" })
-    );
-    await waitFor(() =>
-      expect(mocks.uploadReportFilesDirectToR2).toHaveBeenCalledTimes(1)
-    );
-    await waitFor(() =>
-      expect(backgroundUploads.isForegroundRequired("lot-listing", "scope-force-new")).toBe(true)
-    );
-    const firstDetails =
-      mocks.uploadReportFilesDirectToR2.mock.calls[0][0].details;
-    first.unmount();
 
-    render(<LotListingForm resumeLocalDraftScopeId="scope-force-new" />);
-    await waitForResolvedLotLocation();
-    addValidListing();
     fireEvent.click(
       screen.getByRole("button", { name: "Create Lot Listing" })
     );
@@ -1133,6 +1098,8 @@ describe("LotListingForm explicit save and upload workflow", () => {
     const conflict = await screen.findByRole("dialog", {
       name: "Report already processing",
     });
+    const firstDetails =
+      mocks.uploadReportFilesDirectToR2.mock.calls[0][0].details;
     fireEvent.click(
       within(conflict).getByRole("button", {
         name: "Create Separate Report",
@@ -1140,10 +1107,10 @@ describe("LotListingForm explicit save and upload workflow", () => {
     );
 
     await waitFor(() =>
-      expect(mocks.uploadReportFilesDirectToR2).toHaveBeenCalledTimes(3)
+      expect(mocks.uploadReportFilesDirectToR2).toHaveBeenCalledTimes(2)
     );
     const replacementDetails =
-      mocks.uploadReportFilesDirectToR2.mock.calls[2][0].details;
+      mocks.uploadReportFilesDirectToR2.mock.calls[1][0].details;
     expect(replacementDetails.force_new).toBe(true);
     expect(replacementDetails.supersedes_client_submission_id).toBe(
       firstDetails.client_submission_id
@@ -1153,47 +1120,46 @@ describe("LotListingForm explicit save and upload workflow", () => {
     );
   });
 
-  it("clears the saved draft only once the line reports acceptance", async () => {
+  it("removes cancellation after acceptance while final cleanup is pending", async () => {
     const cleanup = deferred<void>();
-    const upload = deferred<Record<string, unknown>>();
-    mocks.uploadReportFilesDirectToR2.mockReturnValueOnce(upload.promise);
+    mocks.uploadReportFilesDirectToR2.mockResolvedValueOnce({
+      message: "Accepted",
+      reportId: "accepted-report", jobId: "accepted-job", status: "processing",
+    });
     mocks.deleteByClientId.mockReturnValueOnce(cleanup.promise);
-    render(<LotListingForm resumeLocalDraftScopeId="scope-accept" />);
+    render(<LotListingForm resumeLocalDraftScopeId="upload-review:lot-listing-inline" />);
     await waitForResolvedLotLocation();
     addValidListing();
 
     fireEvent.click(
       screen.getByRole("button", { name: "Create Lot Listing" })
     );
-    await waitFor(() =>
-      expect(mocks.uploadReportFilesDirectToR2).toHaveBeenCalledOnce()
-    );
 
-    /*
-       The draft is what a resumed upload is rebuilt from, so it must survive
-       the whole transfer and be cleared only on confirmed acceptance.
-    */
-    expect(mocks.deleteByClientId).not.toHaveBeenCalled();
-    expect(mocks.deleteScopedDraft).not.toHaveBeenCalled();
-
-    upload.resolve({
-      message: "Accepted",
-      reportId: "accepted-report", jobId: "accepted-job", status: "processing",
+    const dialog = await screen.findByRole("dialog", {
+      name: "Uploading your report",
     });
-    await waitFor(() => expect(mocks.deleteByClientId).toHaveBeenCalled());
-
-    // A cleanup still in flight must not hold the line or the notice back.
     await waitFor(() =>
-      expect(backgroundUploads.getSnapshot().notices.at(-1)).toMatchObject({
-        kind: "sent",
-        heading: "Sent",
-      })
+      expect(
+        within(dialog).getAllByText("Report accepted · finalizing…")
+      ).not.toHaveLength(0)
     );
-    expect(backgroundUploads.getSnapshot().active).toBeNull();
+    expect(
+      within(dialog).queryByRole("button", { name: /stop upload/i })
+    ).not.toBeInTheDocument();
+    const acceptedSignal =
+      mocks.uploadReportFilesDirectToR2.mock.calls[0][0].signal;
+    fireEvent.keyDown(document, { key: "Escape" });
+    expect(acceptedSignal.aborted).toBe(false);
+
     cleanup.resolve();
+    await waitFor(() =>
+      expect(
+        screen.queryByRole("dialog", { name: "Uploading your report" })
+      ).not.toBeInTheDocument()
+    );
   });
 
-  it("stops the legacy multipart fallback from the line after upload-session incompatibility", async () => {
+  it("cancels the legacy multipart fallback after upload-session incompatibility", async () => {
     let fallbackSignal: AbortSignal | undefined;
     const pendingFallback = deferred<Record<string, unknown>>();
     mocks.uploadReportFilesDirectToR2.mockRejectedValueOnce({
@@ -1219,31 +1185,37 @@ describe("LotListingForm explicit save and upload workflow", () => {
       }
     );
 
-    render(<LotListingForm resumeLocalDraftScopeId="scope-fallback" />);
+    render(<LotListingForm resumeLocalDraftScopeId="upload-review:lot-listing-inline" />);
     await waitForResolvedLotLocation();
     addValidListing();
     fireEvent.click(
       screen.getByRole("button", { name: "Create Lot Listing" })
     );
 
-    // The fallback runs in the line too, under the same signal.
+    const uploadScreen = await screen.findByRole("dialog", {
+      name: "Uploading your report",
+    });
     await waitFor(() => expect(mocks.apiPost).toHaveBeenCalledOnce());
     const directSignal =
       mocks.uploadReportFilesDirectToR2.mock.calls[0][0].signal;
     expect(fallbackSignal).toBe(directSignal);
     expect(fallbackSignal).toBeInstanceOf(AbortSignal);
-    expect(
-      screen.queryByRole("dialog", { name: "Uploading your report" })
-    ).not.toBeInTheDocument();
 
-    const active = backgroundUploads.getSnapshot().active;
-    expect(active).not.toBeNull();
-    backgroundUploads.stop(active!.id);
+    fireEvent.click(
+      within(uploadScreen).getByRole("button", { name: "Stop upload" })
+    );
 
     await waitFor(() => expect(fallbackSignal?.aborted).toBe(true));
-    await waitFor(() => expect(backgroundUploads.getSnapshot().active).toBeNull());
+    await waitFor(() =>
+      expect(
+        screen.queryByRole("dialog", { name: "Uploading your report" })
+      ).not.toBeInTheDocument()
+    );
     expect(mocks.upsertWithMedia).not.toHaveBeenCalled();
-    expect(mocks.deleteScopedDraft).not.toHaveBeenCalled();
+    expect(
+      screen.getByRole("textbox", { name: /contract number/i })
+    ).toHaveValue("LOT-TEST-1");
+    expect(screen.getByTestId("test-lot-count")).toHaveTextContent("1");
   });
 
   it("does not start a legacy listing submission for a later session-file 404", async () => {
@@ -1251,7 +1223,7 @@ describe("LotListingForm explicit save and upload workflow", () => {
       response: { status: 404 },
     });
 
-    render(<LotListingForm resumeLocalDraftScopeId="scope-404" />);
+    render(<LotListingForm resumeLocalDraftScopeId="upload-review:lot-listing-inline" />);
     await waitForResolvedLotLocation();
     addValidListing();
     fireEvent.click(
@@ -1261,16 +1233,9 @@ describe("LotListingForm explicit save and upload workflow", () => {
     await waitFor(() =>
       expect(mocks.uploadReportFilesDirectToR2).toHaveBeenCalledOnce()
     );
-    /*
-       Only an explicit upload-session incompatibility may fall back to the
-       legacy multipart path. A missing session file is an interrupted upload
-       of this same submission: held for a retry from the bar, never resent
-       another way and never sent back to the form for a decision.
-    */
-    const held = await heldForAttention();
-    expect(held).toMatchObject({ status: "attention", needsForm: false });
+    await screen.findByText(/upload could not be confirmed/i);
     expect(mocks.apiPost).not.toHaveBeenCalled();
-    expect(mocks.deleteScopedDraft).not.toHaveBeenCalled();
+    expect(screen.getByTestId("test-lot-count")).toHaveTextContent("1");
   });
 
   it("does not let a stale geolocation response overwrite a manual location", async () => {
@@ -1368,7 +1333,7 @@ describe("LotListingForm explicit save and upload workflow", () => {
         else error?.({} as GeolocationPositionError);
       }
     );
-    render(<LotListingForm />);
+    render(<LotListingForm resumeLocalDraftScopeId="upload-review:lot-listing-inline" />);
     const location = await waitForResolvedLotLocation();
 
     fireEvent.click(screen.getByRole("button", { name: "Re-detect" }));
@@ -1391,7 +1356,7 @@ describe("LotListingForm explicit save and upload workflow", () => {
   });
 
   it("preserves the readable name, exact coordinates, and attribution when the provider fails", async () => {
-    render(<LotListingForm />);
+    render(<LotListingForm resumeLocalDraftScopeId="upload-review:lot-listing-inline" />);
     const location = await waitForResolvedLotLocation();
     mocks.reverseGeocode.mockRejectedValueOnce(
       new Error("Reverse geocoding unavailable")
@@ -1484,7 +1449,7 @@ describe("LotListingForm explicit save and upload workflow", () => {
     );
   });
 
-  it("aborts a draft save when the form unmounts, but never a handed-off upload", async () => {
+  it("aborts active draft saves and submissions when the form unmounts", async () => {
     let saveSignal: AbortSignal | undefined;
     mocks.upsertWithMedia.mockImplementation(
       (_input, _lots, _onProgress, signal: AbortSignal) => {
@@ -1496,7 +1461,7 @@ describe("LotListingForm explicit save and upload workflow", () => {
         });
       }
     );
-    const draftView = render(<LotListingForm />);
+    const draftView = render(<LotListingForm resumeLocalDraftScopeId="upload-review:lot-listing-inline" />);
     fireEvent.click(
       screen.getAllByRole("button", { name: "Save Draft" })[0]
     );
@@ -1515,7 +1480,7 @@ describe("LotListingForm explicit save and upload workflow", () => {
         });
       }
     );
-    const submissionView = render(<LotListingForm resumeLocalDraftScopeId="scope-unmount" />);
+    const submissionView = render(<LotListingForm resumeLocalDraftScopeId="upload-review:lot-listing-inline" />);
     await waitForResolvedLotLocation();
     addValidListing();
     fireEvent.click(
@@ -1523,18 +1488,6 @@ describe("LotListingForm explicit save and upload workflow", () => {
     );
     await waitFor(() => expect(submitSignal).toBeInstanceOf(AbortSignal));
     submissionView.unmount();
-
-    /*
-       The upload belongs to the line, not to this component, so closing the
-       form leaves it running. That inversion is the point of the feature: the
-       appraiser can start the next listing while this one finishes uploading.
-       Only an explicit Pause or Stop may abort it.
-    */
-    await waitFor(() => expect(backgroundUploads.getSnapshot().active).not.toBeNull());
-    expect(submitSignal?.aborted).toBe(false);
-
-    const active = backgroundUploads.getSnapshot().active;
-    backgroundUploads.stop(active!.id);
     await waitFor(() => expect(submitSignal?.aborted).toBe(true));
   });
 

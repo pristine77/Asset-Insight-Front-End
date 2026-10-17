@@ -77,7 +77,13 @@ object TransferCoordinator {
             it.getString("status") in setOf("queued", "uploading", "interrupted", "waiting_network") }.forEach { job ->
             val pending = scheduler.getPendingJob(job.getInt("schedulerId")) ?: return@forEach
             if (pending.requiredNetwork?.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN) != true) return@forEach
-            try { schedule(context, job) } catch (error: Exception) {
+            if (scheduler.getPendingJobReason(job.getInt("schedulerId")) == JobScheduler.PENDING_JOB_REASON_EXECUTING) return@forEach
+            try {
+                // jobs() intentionally contains compact metadata, not files.
+                // Only this legacy pending job needs its immutable byte sizes;
+                // normal polling and running jobs keep the metadata-only path.
+                TransferStore.read(context, job.getString("id"))?.let { schedule(context, it) }
+            } catch (error: Exception) {
                 Log.w("ReportTransfer", "Could not re-queue ${job.getString("id")} for VPN networks; Pause and Resume re-queues it", error)
             }
         }

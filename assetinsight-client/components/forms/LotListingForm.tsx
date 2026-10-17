@@ -39,6 +39,8 @@ import { useAuthContext } from "@/context/AuthContext";
 import { createLotListing } from "@/services/lotListing";
 import { backgroundUploads } from "@/services/backgroundUploadManager";
 import { describeOrderedFiles, orderedSubmissionFiles } from "@/services/uploadJobFiles";
+import { captureAuthSession, assertAuthSessionCurrent, isAuthSessionCurrent } from "@/lib/auth-storage";
+import { isUploadReviewScope, type UploadReviewIdentity } from "@/services/uploadReviewNavigation";
 import {
   ReportDraftService,
   createReportDraftClientId,
@@ -143,7 +145,7 @@ type Props = {
   resumeLocalDraftScopeId?: string;
 };
 
-type DraftSnapshot = {
+type DraftSnapshot = UploadReviewIdentity & {
   auctioneerWorkItemId?: string;
   contractNo: string;
   salesDate: string;
@@ -376,6 +378,7 @@ export default function LotListingForm({
   const [submitting, setSubmitting] = useState(false);
   const [submissionFinalizing, setSubmissionFinalizing] = useState(false);
   const [uploadPercent, setUploadPercent] = useState(0);
+  const [preparingBackgroundUpload, setPreparingBackgroundUpload] = useState(false);
   const [uploadStats, setUploadStats] = useState<{
     totalFiles: number;
     totalSize: number;
@@ -420,6 +423,7 @@ export default function LotListingForm({
   );
   const supersededSubmissionIdRef = useRef<string | null>(null);
   const forceNewSubmissionRef = useRef(false);
+  const submissionActivityIdRef = useRef<string | undefined>(undefined);
   const submitLockRef = useRef(false);
   const activeFormOperationRef = useRef<"draft-save" | "submit" | null>(null);
   const reportEventSentRef = useRef(false);
@@ -484,6 +488,9 @@ export default function LotListingForm({
   );
 
   snapshotRef.current = {
+    submissionActivityId: submissionActivityIdRef.current,
+    forceNewSubmission: forceNewSubmissionRef.current,
+    supersededSubmissionId: supersededSubmissionIdRef.current || undefined,
     contractNo,
     salesDate,
     location,
@@ -816,6 +823,9 @@ export default function LotListingForm({
 
   const applyRestoredDraft = useCallback(
     (data: DraftSnapshot, revision: number, missingMediaCount: number) => {
+      submissionActivityIdRef.current = data.submissionActivityId;
+      forceNewSubmissionRef.current = data.forceNewSubmission === true;
+      supersededSubmissionIdRef.current = data.supersededSubmissionId || null;
       const explicitCoordinates = isValidBrowserCoordinates(
         data.latitude,
         data.longitude
@@ -1202,6 +1212,7 @@ export default function LotListingForm({
   }, [deleteDraftStorage]);
 
   const resetFormState = useCallback(() => {
+    submissionActivityIdRef.current = undefined;
     locationRequestGenerationRef.current += 1;
     locationLookupAbortRef.current?.abort();
     locationLookupAbortRef.current = null;
@@ -1476,6 +1487,7 @@ export default function LotListingForm({
       autosaveBlockedRef.current = true;
       const controller = new AbortController();
       submitAbortRef.current = controller;
+      const submitSession = captureAuthSession();
       setCancellingOperation(false);
       setSubmissionFinalizing(false);
 
@@ -1527,7 +1539,7 @@ export default function LotListingForm({
         bank_photos_enabled: bankPhotosEnabled,
         watermark_images: watermarkImages,
         progress_id: jobId,
-        activity_id: draftScopeId,
+        activity_id: submissionActivityIdRef.current || draftScopeId,
         client_submission_id: jobId,
         force_new: forceNewSubmissionRef.current,
         ...(supersededSubmissionIdRef.current
@@ -1566,12 +1578,23 @@ export default function LotListingForm({
          draft whose last background attempt hit one of those is marked
          foreground, so its next Submit runs inline where it can be answered.
       */
+      try {
+      if (saveFlightRef.current) await saveFlightRef.current;
+      assertAuthSessionCurrent(submitSession);
+      controller.signal.throwIfAborted();
       const mustStayInForm =
         Boolean(auctioneer) ||
+        isUploadReviewScope(draftScopeId) ||
         backgroundUploads.isForegroundRequired("lot-listing", draftScopeId);
       if (!mustStayInForm && userId) {
+        setPreparingBackgroundUpload(true);
         const orderedFiles = orderedSubmissionFiles("lot-listing", lotsForSubmission);
-        backgroundUploads.enqueue({
+        const draftSnapshot = await buildDraftEnvelope({
+          ...snapshotRef.current!, clientSubmissionId: jobId, lots: lotsForSubmission,
+        }, requestedRevisionRef.current);
+        assertAuthSessionCurrent(submitSession);
+        controller.signal.throwIfAborted();
+        await backgroundUploads.enqueue({
           ownerId: userId,
           kind: "lot-listing",
           scopeId: draftScopeId,
@@ -1581,6 +1604,9 @@ export default function LotListingForm({
           clientSubmissionId: jobId,
           details,
           files: describeOrderedFiles(orderedFiles),
+          media: orderedFiles,
+          draftSnapshot,
+          signal: controller.signal,
           needsFormDecision: lotListingSubmissionNeedsForm,
           upload: async (onProgress, signal) => {
             const response = await createLotListing(details, lotsForSubmission, {
@@ -1588,22 +1614,12 @@ export default function LotListingForm({
               signal,
             });
             assertReportUploadAccepted(response);
-            if (isPreviousReportReceipt(response)) {
-              // Accepted, but for an earlier submission. These edits were not
-              // sent, so this must not read as a completed upload.
-              throw Object.assign(
-                new Error(
-                  "An earlier submission was already accepted. Your current edits have not been submitted again."
-                ),
-                { code: PREVIOUS_RECEIPT_CODE }
-              );
-            }
+            // Exact immutable retries are reconciled by the manager.
             return response;
           },
-          // The saved draft is what a resumed upload is rebuilt from, so it is
-          // cleared only once the server has accepted this submission.
-          onAccepted: () => clearAcceptedDraft().then(() => undefined),
         });
+        assertAuthSessionCurrent(submitSession);
+        controller.signal.throwIfAborted();
         /*
            The next listing needs its own draft scope: the handed-off upload
            still owns the saved media behind the old one.
@@ -1623,6 +1639,7 @@ export default function LotListingForm({
            reset has rendered, so clearing the form never reads as an edit.
         */
         setSubmitting(false);
+        setPreparingBackgroundUpload(false);
         submitLockRef.current = false;
         if (activeFormOperationRef.current === "submit") {
           activeFormOperationRef.current = null;
@@ -1636,11 +1653,12 @@ export default function LotListingForm({
         setShowDraftBanner(false);
         setDraftIssue(null);
         window.setTimeout(() => {
+          if (!isAuthSessionCurrent(submitSession)) return;
           autosaveBlockedRef.current = false;
         }, 0);
         reportDraftStatus("saved", "Upload continues in the background");
         const handedOff =
-          "Upload started. It continues in the background — the bar at the bottom shows its progress.";
+          "Report saved on this browser. Upload continues while this tab stays open; use the upload bar to pause or resume.";
         toast.success(handedOff);
         onSuccess?.(handedOff);
         return;
@@ -1663,7 +1681,6 @@ export default function LotListingForm({
         );
       };
 
-      try {
         /*
            One transport, shared with the background line and with a resumed
            upload: the per-lot ordering is part of the manifest identity, so it
@@ -1674,6 +1691,7 @@ export default function LotListingForm({
           signal: controller.signal,
         });
         assertReportUploadAccepted(responseData);
+        assertAuthSessionCurrent(submitSession);
         if (isPreviousReportReceipt(responseData)) {
           throw new Error("An earlier submission was already accepted. Your current edits have not been submitted again. Open My Reports in another tab to check the existing report before continuing.");
         }
@@ -1707,6 +1725,7 @@ export default function LotListingForm({
           onSuccess?.(acceptedMessage);
         }
       } catch (submitError: any) {
+        setPreparingBackgroundUpload(false);
         const isConflict =
           submitError?.response?.status === 409 &&
           submitError?.response?.data?.code === "ACTIVE_REPORT_EXISTS";
@@ -1722,6 +1741,8 @@ export default function LotListingForm({
         if (submitAbortRef.current === controller) submitAbortRef.current = null;
         setCancellingOperation(false);
         setSubmissionFinalizing(false);
+
+        if (!isAuthSessionCurrent(submitSession)) return;
 
         if (controller.signal.aborted) {
           const message =
@@ -1774,6 +1795,9 @@ export default function LotListingForm({
     },
     [
       auctioneer,
+      buildDraftEnvelope,
+      draftScopeId,
+      userId,
       bankPhotosEnabled,
       clearAcceptedDraft,
       contractNo,
@@ -1892,7 +1916,7 @@ export default function LotListingForm({
         <FormTransferProgressScreen
           mode="report-upload"
           percent={uploadPercent}
-          message={`Uploading ${uploadStats.totalFiles} file${
+          message={preparingBackgroundUpload ? "Saving the report and original media on this browser before closing the form. Keep this page open." : `Uploading ${uploadStats.totalFiles} file${
             uploadStats.totalFiles === 1 ? "" : "s"
           }`}
           totalFiles={uploadStats.totalFiles}

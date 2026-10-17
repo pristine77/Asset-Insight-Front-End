@@ -592,6 +592,19 @@ describe('waiting for signal', () => {
     expect(snapshot().active).toMatchObject({ draftId: a.draftId, status: 'uploading' });
   });
 
+  it('does not re-arm a rejected network request when global Offline wins before its catch', async () => {
+    const waits = signalWaits();
+    const a = job('a');
+    manager.enqueue(a.request);
+    await flush();
+    a.last().fail(networkError());
+    pauseActiveUploads();
+    await flush();
+    expect(waits).toHaveLength(0);
+    expect(a.upload).toHaveBeenCalledTimes(1);
+    expect(snapshot().held).toEqual([expect.objectContaining({ status: 'paused' })]);
+  });
+
   it('a person\'s Resume after the tries ran out starts a fresh count', async () => {
     const waits = signalWaits();
     const a = job('a');

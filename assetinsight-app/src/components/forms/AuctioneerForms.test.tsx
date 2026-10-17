@@ -21,7 +21,7 @@ let mockOwner: string | null = 'owner';
 jest.mock('expo-crypto', () => ({ randomUUID: () => require('node:crypto').randomUUID() }));
 
 jest.mock('@react-native-community/netinfo', () => ({ __esModule: true, default: { fetch: jest.fn(async () => ({ isConnected: true, isInternetReachable: true })) } }));
-jest.mock('../../services/offlineCaptureStore', () => ({ __esModule: true, default: { getOwnerId: () => mockOwner, setSubmissionState: jest.fn(async () => undefined), recordDraftOpened: jest.fn(async () => undefined) } }));
+jest.mock('../../services/offlineCaptureStore', () => ({ __esModule: true, default: { getOwnerId: () => mockOwner, getDraft: jest.fn(), setSubmissionState: jest.fn(async () => undefined), recordDraftOpened: jest.fn(async () => undefined) } }));
 jest.mock('../../services/offlineSubmissionService', () => ({ prepareOfflineSubmission: jest.fn(async draft => draft) }));
 // The wait for a steady connection is driven by each test (see signalWaits).
 jest.mock('../../services/uploadAutoResume', () => ({
@@ -143,6 +143,21 @@ describe.each(['asset', 'lotListing'] as const)('%s upload progress and explicit
       })),
     }));
     jest.mocked(AutoSaveService.getDraft).mockResolvedValue(saved as any);
+    let persisted: any = { ...saved, localRevision: 1 };
+    jest.mocked(OfflineCaptureStore.getDraft).mockImplementation(async () => persisted);
+    jest.mocked(AutoSaveService.saveDraft).mockImplementation(async input => {
+      persisted = { ...persisted, ...input, id: 'local-parent', ownerId: 'owner',
+        localRevision: persisted.localRevision + 1, lots: input.lots.map(lot => {
+          const { files, extraFiles, videoFile, ...rest } = lot;
+          return { ...rest, mainImages: files, extraImages: extraFiles,
+            videoFiles: videoFile ? [videoFile] : lot.videoFiles || [] };
+        }) };
+      return persisted;
+    });
+    jest.mocked(OfflineCaptureStore.setSubmissionState).mockImplementation(async (_id, state) => {
+      persisted = { ...persisted, submissionState: state, localRevision: persisted.localRevision + 1 };
+      return persisted;
+    });
     const closed = jest.fn();
     const view = await render(<Form visible draftIdToLoad="local-parent" onClose={closed} />);
     await waitFor(() => expect(screen.getByTestId('mock-photo-count').props.children).toBe(photoCount));
@@ -237,6 +252,7 @@ describe.each(['asset', 'lotListing'] as const)('%s upload progress and explicit
   });
 
   it('does not offer to pause a completed receipt while local acceptance is being saved', async () => {
+    await mount();
     let finishLocal!: () => void;
     jest.mocked(OfflineCaptureStore.setSubmissionState).mockImplementation(async (_id, state) => {
       if (state === 'accepted') await new Promise<void>(resolve => { finishLocal = resolve; });
@@ -246,7 +262,6 @@ describe.each(['asset', 'lotListing'] as const)('%s upload progress and explicit
       progress?.(100, { ...detail, percent: 100, stage: 'complete', message: 'Upload complete', completedFiles: 160 });
       return { jobId: 'job-parent', reportId: 'report-parent', message: 'Queued', accepted: true };
     });
-    await mount();
     await fireEvent.press(screen.getByRole('button', { name: submitLabel }));
     await waitFor(() => expect(OfflineCaptureStore.setSubmissionState).toHaveBeenCalledWith('local-parent', 'accepted', 'report-parent'));
     expect(screen.queryByRole('button', { name: 'Pause upload' })).toBeNull();
@@ -495,6 +510,59 @@ describe.each(['asset', 'lotListing'] as const)('%s upload progress and explicit
       expect(waits[0].signal.aborted).toBe(true);
     }
     await act(async () => { waits[0].ready(true); });
+    expect(upload).toHaveBeenCalledTimes(1);
+    expect(screen.queryByText(waitingText)).toBeNull();
+  });
+
+  it.each(['offline', 'logout', 'revision'] as const)('keeps a waiting submission paused after %s changes', async (change) => {
+    const waits = signalWaits();
+    const first = pendingUpload();
+    const { saved } = await mount();
+    await fireEvent.press(screen.getByRole('button', { name: submitLabel }));
+    await waitFor(() => expect(upload).toHaveBeenCalledTimes(1));
+    await act(async () => { first.reject(networkError()); });
+    await waitFor(() => expect(waits).toHaveLength(1));
+    await act(async () => {
+      if (change === 'offline') pauseActiveUploads();
+      else if (change === 'logout') setUploadOwner(null);
+      else jest.mocked(OfflineCaptureStore.getDraft).mockResolvedValue({ ...saved, localRevision: 99, formData: { ...saved.formData, ownerName: 'Later edited owner' } } as any);
+      waits[0].ready(true);
+    });
+    expect(upload).toHaveBeenCalledTimes(1);
+    expect(screen.queryByText(waitingText)).toBeNull();
+  });
+
+  it('cannot resume when global Offline arrives during the draft authority read', async () => {
+    const waits = signalWaits();
+    const first = pendingUpload();
+    const { saved } = await mount();
+    await fireEvent.press(screen.getByRole('button', { name: submitLabel }));
+    await waitFor(() => expect(upload).toHaveBeenCalledTimes(1));
+    await act(async () => { first.reject(networkError()); });
+    await waitFor(() => expect(waits).toHaveLength(1));
+    let complete!: (value: any) => void;
+    jest.mocked(OfflineCaptureStore.getDraft).mockImplementationOnce(() => new Promise(resolve => { complete = resolve; }));
+    await act(async () => { waits[0].ready(true); });
+    await act(async () => { pauseActiveUploads(); complete(saved); });
+    expect(upload).toHaveBeenCalledTimes(1);
+    expect(screen.queryByText(waitingText)).toBeNull();
+  });
+
+  it('does not register a signal waiter after Offline races the paused-state write', async () => {
+    const waits = signalWaits();
+    const first = pendingUpload();
+    await mount();
+    const persist = jest.mocked(OfflineCaptureStore.setSubmissionState).getMockImplementation()!;
+    let finishPaused!: () => void;
+    jest.mocked(OfflineCaptureStore.setSubmissionState).mockImplementation((...args) => args[1] === 'paused'
+      ? new Promise(resolve => { finishPaused = () => { void Promise.resolve(persist(...args)).then(resolve); }; })
+      : persist(...args));
+    await fireEvent.press(screen.getByRole('button', { name: submitLabel }));
+    await waitFor(() => expect(upload).toHaveBeenCalledTimes(1));
+    await act(async () => { first.reject(networkError()); });
+    await waitFor(() => expect(finishPaused).toBeDefined());
+    await act(async () => { pauseActiveUploads(); finishPaused(); });
+    expect(waits).toHaveLength(0);
     expect(upload).toHaveBeenCalledTimes(1);
     expect(screen.queryByText(waitingText)).toBeNull();
   });

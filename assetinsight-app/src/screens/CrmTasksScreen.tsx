@@ -1173,6 +1173,14 @@ const CrmTasksScreen = ({
       setOutlookSyncingTaskId(task._id);
       const result = await crmTaskApi.addTaskToOutlookCalendar(task._id);
 
+      if (result.pending) {
+        Alert.alert('Outlook sync queued', result.message || 'Your calendar update is queued. It has not been confirmed by Outlook yet.');
+        return;
+      }
+      if (!result.eventId) {
+        Alert.alert('Outlook confirmation unavailable', 'Outlook has not confirmed an event. Check your calendar and refresh before trying again.');
+        return;
+      }
       if (result.webLink) {
         Alert.alert('Added to Outlook', 'Task added to your Outlook calendar.', [
           {
@@ -1258,10 +1266,12 @@ const CrmTasksScreen = ({
         result.failedCount > 0
           ? `\n\n${result.failedCount} failed. ${result.failed[0]?.reason || 'Check your task dates and try again.'}`
           : '';
+      const pendingHint = result.pendingCount > 0
+        ? `\n\n${result.pendingCount} queued, not yet confirmed by Outlook.` : '';
       setCalendarSyncModalVisible(false);
       Alert.alert(
-        'Outlook Sync Complete',
-        `${result.createdCount} task(s) added to calendar.${failedHint}`
+        result.pendingCount > 0 ? 'Outlook sync queued' : 'Outlook Sync Complete',
+        `${result.createdCount} task(s) added to calendar.${pendingHint}${failedHint}`
       );
     } catch (e: any) {
       Alert.alert(

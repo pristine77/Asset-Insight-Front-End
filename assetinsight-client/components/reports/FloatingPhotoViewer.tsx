@@ -33,7 +33,6 @@ import {
   ExternalLink,
   Maximize2,
   Minus,
-  Trash2,
   X,
 } from "lucide-react";
 
@@ -46,8 +45,6 @@ type FloatingPhotoViewerProps = {
   onClose: () => void;
   /** Shown in the title bar, e.g. "Lot #10051". */
   title?: string;
-  /** Removes the photo at `index` from the lot; omit to hide the button. */
-  onRemove?: (index: number) => void;
 };
 
 type Geometry = { x: number; y: number; width: number; height: number };
@@ -106,7 +103,6 @@ export default function FloatingPhotoViewer({
   onIndexChange,
   onClose,
   title,
-  onRemove,
 }: FloatingPhotoViewerProps) {
   const [mounted, setMounted] = useState(false);
   const [mode, setMode] = useState<WindowMode>("normal");
@@ -327,17 +323,6 @@ export default function FloatingPhotoViewer({
         >
           <ExternalLink className="h-4 w-4" />
         </a>
-        {onRemove ? (
-          <button
-            type="button"
-            onClick={() => onRemove(position)}
-            className={`${iconButton} hover:!bg-[var(--app-danger-soft)] hover:!text-[var(--app-danger)]`}
-            aria-label={`Remove photo ${position + 1}`}
-            title="Remove photo"
-          >
-            <Trash2 className="h-4 w-4" />
-          </button>
-        ) : null}
         <span className="mx-1 h-5 w-px bg-[var(--app-border)]" aria-hidden="true" />
         <button type="button" onClick={() => setMode("minimized")} className={iconButton} aria-label="Minimize photo viewer" title="Minimize">
           <Minus className="h-4 w-4" />

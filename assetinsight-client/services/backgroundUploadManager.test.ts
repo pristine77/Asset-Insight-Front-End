@@ -1,411 +1,142 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-
-const resumeStore = vi.hoisted(() => ({
-  rememberResumableUpload: vi.fn(async () => {}),
-  attachResumableSession: vi.fn(async () => {}),
-  recordResumableProgress: vi.fn(async () => {}),
-  forgetResumableUpload: vi.fn(async () => {}),
-  forgetOwnerResumableUploads: vi.fn(async () => {}),
-}));
-
-vi.mock("./uploadResumeStore", () => resumeStore);
-
-import {
-  INTERRUPTED_MESSAGE,
-  PAUSED_MESSAGE,
-  createBackgroundUploadManager,
-  describeBackgroundUpload,
-  type BackgroundUploadRequest,
-} from "./backgroundUploadManager";
-
-type Deferred = {
-  promise: Promise<unknown>;
-  resolve: (value?: unknown) => void;
-  reject: (error: unknown) => void;
-  progress?: (fraction: number) => void;
-  signal?: AbortSignal;
-  started: boolean;
-};
-
-function deferredUpload(): Deferred {
-  const state: Deferred = {
-    started: false,
-  } as Deferred;
-  state.promise = new Promise((resolve, reject) => {
-    state.resolve = resolve as Deferred["resolve"];
-    state.reject = reject;
-  });
-  return state;
-}
-
-function request(
-  overrides: Partial<BackgroundUploadRequest> & { deferred: Deferred }
-): BackgroundUploadRequest {
-  const { deferred, ...rest } = overrides;
-  return {
-    ownerId: "owner-1",
-    kind: "asset",
-    scopeId: "scope-1",
-    endpoint: "/asset",
-    title: "CN-1001",
-    totalFiles: 4,
-    clientSubmissionId: "submission-1",
-    details: { contract_no: "CN-1001" },
-    files: [{ name: "a1.jpg", size: 10, lastModified: 1700000000000 }],
-    upload: (onProgress, signal) => {
-      deferred.started = true;
-      deferred.progress = onProgress;
-      deferred.signal = signal;
-      return deferred.promise;
-    },
-    ...rest,
-  };
-}
-
+import { advanceAuthSession } from "@/lib/auth-storage";
+const store = vi.hoisted(() => ({ rememberResumableUpload: vi.fn(), forgetResumableUpload: vi.fn(), recordResumableProgress: vi.fn(), attachResumableSession: vi.fn(), markResumableNeedsForm: vi.fn(), getResumableUpload: vi.fn() }));
+vi.mock("./uploadResumeStore", async (original) => ({ ...await original<typeof import("./uploadResumeStore")>(), ...store }));
+import { createBackgroundUploadManager, describeBackgroundUpload, type BackgroundUploadRequest } from "./backgroundUploadManager";
 const flush = () => new Promise((resolve) => setTimeout(resolve, 0));
-
+function deferred() {
+  let resolve!: (value: unknown) => void, reject!: (reason: unknown) => void;
+  const promise = new Promise<unknown>((done, fail) => { resolve = done; reject = fail; });
+  return { promise, resolve, reject };
+}
+function fixture(overrides: Partial<BackgroundUploadRequest> = {}) {
+  const result = deferred(); let progress!: (value: number) => void; let signal!: AbortSignal;
+  const upload = vi.fn((notify: (value: number) => void, abort: AbortSignal) => { progress = notify; signal = abort; return result.promise; });
+  const media = [new File(["original"], "photo.jpg", { lastModified: 1 })];
+  const request: BackgroundUploadRequest = { ownerId: "owner-1", kind: "asset", scopeId: "scope-1", endpoint: "/asset", title: "Report", totalFiles: 1, clientSubmissionId: "submission-1", details: { client_submission_id: "submission-1" }, files: [{ name: "photo.jpg", size: 8, lastModified: 1 }], media, draftSnapshot: { userId: "owner-1", kind: "asset", lots: [{ files: media }] }, upload, ...overrides };
+  return { request, result, upload, progress: (value: number) => progress(value), getSignal: () => signal };
+}
 let manager: ReturnType<typeof createBackgroundUploadManager>;
-
 beforeEach(() => {
-  manager = createBackgroundUploadManager();
-  manager.setOwner("owner-1");
+  vi.resetAllMocks();
+  for (const method of Object.values(store)) method.mockResolvedValue(undefined);
+  manager = createBackgroundUploadManager(); manager.setOwner("owner-1");
 });
-
-afterEach(() => {
-  manager.resetForTests();
-  vi.clearAllMocks();
-});
-
-describe("the line", () => {
-  it("runs one upload at a time and starts the next on acceptance", async () => {
-    const first = deferredUpload();
-    const second = deferredUpload();
-    manager.enqueue(request({ deferred: first, scopeId: "scope-1" }));
-    manager.enqueue(request({ deferred: second, scopeId: "scope-2" }));
-    await flush();
-
-    expect(first.started).toBe(true);
-    expect(second.started).toBe(false);
-    expect(manager.getSnapshot().queued).toHaveLength(1);
-
-    first.resolve({ reportId: "report-1" });
-    await flush();
-
-    expect(second.started).toBe(true);
-    expect(manager.getSnapshot().queued).toHaveLength(0);
+afterEach(() => manager.resetForTests());
+describe("durable background upload manager", () => {
+  it("does not start or acknowledge handoff before the media transaction commits", async () => {
+    const saving = deferred(); store.rememberResumableUpload.mockReturnValue(saving.promise);
+    const f = fixture(); let handedOff = false;
+    const pending = manager.enqueue(f.request).then(() => { handedOff = true; });
+    await flush(); expect(f.upload).not.toHaveBeenCalled(); expect(handedOff).toBe(false);
+    saving.resolve(undefined); await pending; await flush(); expect(f.upload).toHaveBeenCalledOnce();
   });
-
-  it("tells listeners an upload was accepted and clears its resume record", async () => {
-    const accepted = vi.fn();
-    manager.onAccepted(accepted);
-    const upload = deferredUpload();
-    manager.enqueue(request({ deferred: upload }));
-    await flush();
-
-    upload.resolve({ reportId: "report-1" });
-    await flush();
-
-    expect(accepted).toHaveBeenCalledWith({
-      kind: "asset",
-      scopeId: "scope-1",
-      result: { reportId: "report-1" },
-    });
-    expect(resumeStore.forgetResumableUpload).toHaveBeenCalledWith("owner-1", "asset", "scope-1");
-    expect(manager.getSnapshot().notices.at(-1)).toMatchObject({ kind: "sent", heading: "Sent" });
+  it("rejects quota/storage failure and never starts transport", async () => {
+    store.rememberResumableUpload.mockRejectedValue(new Error("No device storage")); const f = fixture();
+    await expect(manager.enqueue(f.request)).rejects.toThrow(/storage/); await flush();
+    expect(f.upload).not.toHaveBeenCalled(); expect(manager.getSnapshot().active).toBeNull();
   });
-
-  it("records a resume record at hand-off so a closed tab can recover", async () => {
-    manager.enqueue(request({ deferred: deferredUpload() }));
-    await flush();
-
-    expect(resumeStore.rememberResumableUpload).toHaveBeenCalledWith(
-      expect.objectContaining({
-        ownerId: "owner-1",
-        kind: "asset",
-        scopeId: "scope-1",
-        clientSubmissionId: "submission-1",
-        totalFiles: 4,
-        uploadedFiles: 0,
-      })
-    );
+  it("aborts handoff if caller leaves during durable saving", async () => {
+    const saving = deferred(); store.rememberResumableUpload.mockReturnValue(saving.promise);
+    const controller = new AbortController(); const f = fixture({ signal: controller.signal });
+    const pending = manager.enqueue(f.request); controller.abort(); saving.resolve(undefined);
+    await expect(pending).rejects.toThrow(); await flush(); expect(f.upload).not.toHaveBeenCalled();
   });
-
-  it("does not record a second time when a resume re-enqueues its own job", async () => {
-    manager.enqueue(request({ deferred: deferredUpload(), skipPersist: true }));
-    await flush();
-
-    expect(resumeStore.rememberResumableUpload).not.toHaveBeenCalled();
+  it("serializes independent jobs and only frees the accepted immutable identity", async () => {
+    const a = fixture(), b = fixture({ scopeId: "scope-2", clientSubmissionId: "submission-2" });
+    await manager.enqueue(a.request); await manager.enqueue(b.request); await flush();
+    expect(a.upload).toHaveBeenCalledOnce(); expect(b.upload).not.toHaveBeenCalled();
+    a.result.resolve({ reportId: "r1", accepted: true }); await flush(); await flush();
+    expect(b.upload).toHaveBeenCalledOnce();
+    expect(store.forgetResumableUpload).toHaveBeenCalledWith("owner-1", "asset", "scope-1", "submission-1", expect.any(Object));
   });
-});
-
-describe("pausing and resuming", () => {
-  it("aborts the transfer and holds the job as paused", async () => {
-    const upload = deferredUpload();
-    const id = manager.enqueue(request({ deferred: upload }));
-    await flush();
-
-    manager.pause(id);
-    expect(upload.signal?.aborted).toBe(true);
-
-    upload.reject(Object.assign(new Error("aborted"), { name: "AbortError" }));
-    await flush();
-
-    const held = manager.getSnapshot().held;
-    expect(held).toHaveLength(1);
-    expect(held[0]).toMatchObject({ status: "paused", message: PAUSED_MESSAGE });
-    expect(manager.getSnapshot().active).toBeNull();
+  it.each([0.95, 1])("never claims acceptance at %s transport progress", async (fraction) => {
+    const f = fixture(); await manager.enqueue(f.request); await flush(); f.progress(fraction);
+    const active = manager.getSnapshot().active!;
+    expect(active.finalizing).toBe(true); expect(active.canPause).toBe(false); expect(active.percent).toBeLessThan(100);
+    expect(describeBackgroundUpload(active)).toBe("Confirming server acceptance");
+    expect(manager.getSnapshot().notices).toEqual([]); expect(store.forgetResumableUpload).not.toHaveBeenCalled();
   });
-
-  it("falls back to the interrupted wording when a failure carries no message", async () => {
-    const upload = deferredUpload();
-    manager.enqueue(request({ deferred: upload }));
-    await flush();
-
-    upload.reject(new Error(""));
-    await flush();
-
-    expect(manager.getSnapshot().held[0]).toMatchObject({
-      status: "attention",
-      message: INTERRUPTED_MESSAGE,
-    });
+  it.each([{ reportId: "r1", accepted: false, jobId: "j", status: "processing" }, { reportId: "r1" }, { reportId: "r1", accepted: true, phase: "upload" }, { reportId: "r1", accepted: true, reportAvailable: false }])("rejects incomplete/explicitly unaccepted result %# without Sent or cleanup", async (receipt) => {
+    const onAccepted = vi.fn(), event = vi.fn(); manager.onAccepted(event);
+    const f = fixture({ onAccepted }); await manager.enqueue(f.request); await flush(); f.result.resolve(receipt); await flush();
+    expect(manager.getSnapshot().held).toHaveLength(1); expect(manager.getSnapshot().notices.every((notice) => notice.kind === "attention")).toBe(true);
+    expect(onAccepted).not.toHaveBeenCalled(); expect(event).not.toHaveBeenCalled(); expect(store.forgetResumableUpload).not.toHaveBeenCalled();
   });
-
-  it("puts a resumed job back in line and gives it a fresh attempt", async () => {
-    // Each call to upload() is its own attempt, as the transport behaves.
-    const attempts: Deferred[] = [];
-    const id = manager.enqueue({
-      ...request({ deferred: deferredUpload() }),
-      upload: (onProgress, signal) => {
-        const attempt = deferredUpload();
-        attempt.progress = onProgress;
-        attempt.signal = signal;
-        attempts.push(attempt);
-        return attempt.promise;
-      },
-    });
-    await flush();
-
-    manager.pause(id);
-    attempts[0].reject(Object.assign(new Error("aborted"), { name: "AbortError" }));
-    await flush();
-    expect(manager.getSnapshot().held).toHaveLength(1);
-
-    manager.resume(id);
-    await flush();
-
-    expect(attempts).toHaveLength(2);
-    expect(manager.getSnapshot().held).toHaveLength(0);
-    expect(manager.getSnapshot().active).toMatchObject({ id, status: "uploading" });
+  it("holds a fresh reused acceptance for explicit review without deleting current media", async () => {
+    const f = fixture(); await manager.enqueue(f.request); await flush(); f.result.resolve({ reportId: "old", accepted: true, reusedAcceptance: true }); await flush(); await flush();
+    expect(manager.getSnapshot().held[0].needsForm).toBe(true); expect(store.markResumableNeedsForm).toHaveBeenCalled();
+    expect(store.forgetResumableUpload).not.toHaveBeenCalled(); expect(manager.getSnapshot().notices[0].kind).toBe("attention");
   });
-
-  it("stops offering Pause once the submission is being finalized", async () => {
-    const upload = deferredUpload();
-    const id = manager.enqueue(request({ deferred: upload }));
-    await flush();
-
-    upload.progress?.(0.5);
-    expect(manager.getSnapshot().active?.canPause).toBe(true);
-
-    upload.progress?.(0.96);
-    expect(manager.getSnapshot().active).toMatchObject({ canPause: false, finalizing: true });
-
-    manager.pause(id);
-    expect(upload.signal?.aborted).toBe(false);
+  it("accepts a verified exact immutable retry receipt, not a new submission", async () => {
+    const f = fixture({ skipPersist: true }); store.getResumableUpload.mockResolvedValue({ ...f.request });
+    await manager.enqueue(f.request); await flush(); f.result.resolve({ reportId: "r1", accepted: true, reusedAcceptance: true }); await flush();
+    expect(store.rememberResumableUpload).not.toHaveBeenCalled(); expect(manager.getSnapshot().notices[0].kind).toBe("sent");
   });
-
-  it("keeps a stopped upload out of the line and forgets how to resume it", async () => {
-    const upload = deferredUpload();
-    const id = manager.enqueue(request({ deferred: upload }));
-    await flush();
-
-    manager.stop(id);
-    await flush();
-
-    expect(upload.signal?.aborted).toBe(true);
-    expect(manager.getSnapshot().active).toBeNull();
-    expect(manager.getSnapshot().held).toHaveLength(0);
-    expect(resumeStore.forgetResumableUpload).toHaveBeenCalledWith("owner-1", "asset", "scope-1");
+  it("does not allow skipPersist to bypass missing durable media metadata", async () => {
+    const f = fixture({ skipPersist: true }); await expect(manager.enqueue(f.request)).rejects.toThrow(/could not be verified/);
+    await flush(); expect(f.upload).not.toHaveBeenCalled();
   });
-});
-
-describe("failure", () => {
-  it("holds the job for attention and keeps its message", async () => {
-    const upload = deferredUpload();
-    manager.enqueue(request({ deferred: upload }));
-    await flush();
-
-    upload.reject(new Error("An earlier submission was already accepted."));
-    await flush();
-
-    expect(manager.getSnapshot().held[0]).toMatchObject({
-      status: "attention",
-      message: "An earlier submission was already accepted.",
-    });
-    expect(manager.getSnapshot().notices.at(-1)).toMatchObject({ kind: "attention" });
-    // A failure must not look like a completed submission.
-    expect(resumeStore.forgetResumableUpload).not.toHaveBeenCalled();
+  it("does not emit old-owner acceptance after switching during asynchronous cleanup", async () => {
+    const deletion = deferred(); store.forgetResumableUpload.mockReturnValue(deletion.promise);
+    const onAccepted = vi.fn(), listener = vi.fn(); manager.onAccepted(listener);
+    const f = fixture({ onAccepted }); await manager.enqueue(f.request); await flush();
+    f.result.resolve({ reportId: "r1", accepted: true }); await flush();
+    manager.setOwner("owner-2"); deletion.resolve(undefined); await flush();
+    expect(manager.getSnapshot().notices).toEqual([]); expect(onAccepted).not.toHaveBeenCalled(); expect(listener).not.toHaveBeenCalled();
   });
-});
-
-describe("conflicts only the form can resolve", () => {
-  const conflict = () =>
-    Object.assign(new Error("Another report is already active."), { code: "ACTIVE_REPORT_EXISTS" });
-
-  it("marks the draft foreground so its next Submit runs inline", async () => {
-    const upload = deferredUpload();
-    manager.enqueue({
-      ...request({ deferred: upload }),
-      needsFormDecision: (error) => (error as { code?: string })?.code === "ACTIVE_REPORT_EXISTS",
-    });
-    await flush();
-
-    expect(manager.isForegroundRequired("asset", "scope-1")).toBe(false);
-    upload.reject(conflict());
-    await flush();
-
-    expect(manager.isForegroundRequired("asset", "scope-1")).toBe(true);
-    expect(manager.getSnapshot().held[0]).toMatchObject({ needsForm: true });
-    expect(manager.getSnapshot().held[0].message).toContain("Open the report from Drafts");
+  it("fences callbacks on same-owner session change without waiting for shell effects", async () => {
+    const f = fixture(); const accepted = vi.fn(); manager.onAccepted(accepted);
+    await manager.enqueue(f.request); await flush(); advanceAuthSession();
+    f.progress(0.5); expect(f.getSignal().aborted).toBe(true);
+    f.result.resolve({ reportId: "r1", accepted: true }); await flush();
+    expect(accepted).not.toHaveBeenCalled(); expect(store.forgetResumableUpload).not.toHaveBeenCalled();
+    expect(manager.getSnapshot()).toEqual({ active: null, queued: [], held: [], notices: [] });
   });
-
-  it("refuses to retry such a job from the bar", async () => {
-    const attempts: Deferred[] = [];
-    const id = manager.enqueue({
-      ...request({ deferred: deferredUpload() }),
-      needsFormDecision: () => true,
-      upload: () => {
-        const attempt = deferredUpload();
-        attempts.push(attempt);
-        return attempt.promise;
-      },
-    });
-    await flush();
-    attempts[0].reject(conflict());
-    await flush();
-
-    manager.resume(id);
-    await flush();
-
-    expect(attempts).toHaveLength(1);
-    expect(manager.getSnapshot().held).toHaveLength(1);
+  it("hides notices immediately on a silent same-owner session replacement", async () => {
+    const f = fixture(); await manager.enqueue(f.request); await flush(); f.result.resolve({ reportId: "r1", accepted: true }); await flush();
+    expect(manager.getSnapshot().notices).toHaveLength(1); advanceAuthSession();
+    expect(manager.getSnapshot().notices).toEqual([]);
   });
-
-  it("leaves an ordinary failure retryable from the bar", async () => {
-    const attempts: Deferred[] = [];
-    const id = manager.enqueue({
-      ...request({ deferred: deferredUpload() }),
-      needsFormDecision: () => false,
-      upload: () => {
-        const attempt = deferredUpload();
-        attempts.push(attempt);
-        return attempt.promise;
-      },
-    });
-    await flush();
-    attempts[0].reject(new Error("network lost"));
-    await flush();
-
-    manager.resume(id);
-    await flush();
-
-    expect(attempts).toHaveLength(2);
-    expect(manager.isForegroundRequired("asset", "scope-1")).toBe(false);
+  it("does not run acceptance cleanup after a silent session replacement during its durable await", async () => {
+    const deletion = deferred(); store.forgetResumableUpload.mockReturnValue(deletion.promise);
+    const cleanup = vi.fn(), listener = vi.fn(); manager.onAccepted(listener);
+    const f = fixture({ onAccepted: cleanup }); await manager.enqueue(f.request); await flush();
+    f.result.resolve({ reportId: "r1", accepted: true }); await flush(); advanceAuthSession(); deletion.resolve(undefined); await flush();
+    expect(cleanup).not.toHaveBeenCalled(); expect(listener).not.toHaveBeenCalled(); expect(manager.getSnapshot().notices).toEqual([]);
   });
-
-  it("releases the requirement once the draft is accepted", async () => {
-    const attempts: Deferred[] = [];
-    manager.enqueue({
-      ...request({ deferred: deferredUpload() }),
-      needsFormDecision: () => true,
-      upload: () => {
-        const attempt = deferredUpload();
-        attempts.push(attempt);
-        return attempt.promise;
-      },
-    });
-    await flush();
-    attempts[0].reject(conflict());
-    await flush();
-    expect(manager.isForegroundRequired("asset", "scope-1")).toBe(true);
-
-    // The form took the decision, resolved it, and submitted inline.
-    manager.clearForegroundRequirement("asset", "scope-1");
-    expect(manager.isForegroundRequired("asset", "scope-1")).toBe(false);
+  it("stops notification iteration if a listener switches accounts", async () => {
+    const f = fixture(); const later = vi.fn(), cleanup = vi.fn();
+    manager.onAccepted(() => manager.setOwner("owner-2")); manager.onAccepted(later);
+    await manager.enqueue({ ...f.request, onAccepted: cleanup }); await flush(); f.result.resolve({ reportId: "r1", accepted: true }); await flush();
+    expect(later).not.toHaveBeenCalled(); expect(cleanup).not.toHaveBeenCalled(); expect(manager.getSnapshot().notices).toEqual([]);
   });
-});
-
-describe("account changes", () => {
-  it("empties the line without writing for the previous account", async () => {
-    const upload = deferredUpload();
-    manager.enqueue(request({ deferred: upload }));
-    await flush();
-
-    manager.setOwner("owner-2");
-    upload.resolve({ reportId: "report-1" });
-    await flush();
-
-    expect(upload.signal?.aborted).toBe(true);
-    expect(manager.getSnapshot()).toMatchObject({ active: null, queued: [], held: [] });
-    expect(resumeStore.forgetOwnerResumableUploads).toHaveBeenCalledWith("owner-1");
-    // Acceptance arriving after the switch must not clear the new owner's state.
-    expect(resumeStore.forgetResumableUpload).not.toHaveBeenCalled();
+  it("keeps durable data on logout and ignores late progress/failure", async () => {
+    const f = fixture(); await manager.enqueue(f.request); await flush(); manager.setOwner(null);
+    expect(f.getSignal().aborted).toBe(true); f.progress(0.7); f.result.reject(new Error("Network Error")); await flush();
+    expect(manager.getSnapshot().notices).toEqual([]); expect(store.forgetResumableUpload).not.toHaveBeenCalled();
   });
-});
-
-describe("draft guards", () => {
-  it("reports a draft as busy only while it is queued or uploading", async () => {
-    const upload = deferredUpload();
-    const id = manager.enqueue(request({ deferred: upload }));
-    await flush();
-    expect(manager.isDraftBusy("asset", "scope-1")).toBe(true);
-
-    manager.pause(id);
-    upload.reject(Object.assign(new Error("aborted"), { name: "AbortError" }));
-    await flush();
-
-    expect(manager.isDraftBusy("asset", "scope-1")).toBe(false);
-    expect(manager.entryForDraft("asset", "scope-1")).toMatchObject({ status: "paused" });
-    expect(manager.entryForDraft("asset", "other")).toBeNull();
+  it("retains paused/stopped work and cannot say nothing was submitted", async () => {
+    const f = fixture(); const id = await manager.enqueue(f.request); await flush(); manager.stop(id);
+    expect(manager.getSnapshot().held[0].message).toMatch(/may already have accepted/);
+    expect(store.forgetResumableUpload).not.toHaveBeenCalled(); f.result.reject(new Error("aborted")); await flush();
   });
-});
-
-describe("leaving the page", () => {
-  it("warns while work is outstanding and stops warning once the line empties", async () => {
-    const add = vi.spyOn(window, "addEventListener");
-    const remove = vi.spyOn(window, "removeEventListener");
-    const upload = deferredUpload();
-    manager.enqueue(request({ deferred: upload }));
-    await flush();
-
-    expect(add).toHaveBeenCalledWith("beforeunload", expect.any(Function));
-
-    upload.resolve({ reportId: "report-1" });
-    await flush();
-
-    expect(remove).toHaveBeenCalledWith("beforeunload", expect.any(Function));
+  it("maps raw conflict errors, persists review mode and never retries a conflict from the bar", async () => {
+    const f = fixture(); const id = await manager.enqueue(f.request); await flush();
+    f.result.reject({ message: "Request failed with status code 409", response: { status: 409, data: {} } }); await flush(); await flush();
+    expect(manager.getSnapshot().held[0].needsForm).toBe(true); expect(manager.getSnapshot().held[0].message).not.toMatch(/409|status code/);
+    expect(store.markResumableNeedsForm).toHaveBeenCalledWith("owner-1", "asset", "scope-1", "submission-1", expect.any(Object));
+    manager.resume(id); expect(f.upload).toHaveBeenCalledOnce();
   });
-});
-
-describe("describeBackgroundUpload", () => {
-  it("names each state the appraiser can see", () => {
-    const base = {
-      id: "upload-1",
-      ownerId: "owner-1",
-      kind: "asset" as const,
-      title: "CN-1001",
-      percent: 63,
-      totalFiles: 5,
-      pausing: false,
-      canPause: true,
-      finalizing: false,
-      needsForm: false,
-    };
-
-    expect(describeBackgroundUpload({ ...base, status: "queued" })).toBe("Waiting in line");
-    expect(describeBackgroundUpload({ ...base, status: "paused" })).toBe("Paused");
-    expect(describeBackgroundUpload({ ...base, status: "attention" })).toBe("Needs attention");
-    expect(describeBackgroundUpload({ ...base, status: "uploading", pausing: true })).toBe("Pausing");
-    expect(describeBackgroundUpload({ ...base, status: "uploading", finalizing: true })).toBe("Finalizing");
-    expect(describeBackgroundUpload({ ...base, status: "uploading" })).toBe("Uploading 63%");
+  it("keeps success truthful even when exact local cleanup fails", async () => {
+    const f = fixture(); store.forgetResumableUpload.mockRejectedValue(new Error("quota"));
+    await manager.enqueue(f.request); await flush(); f.result.resolve({ reportId: "r1", accepted: true }); await flush();
+    expect(manager.getSnapshot().notices[0].kind).toBe("sent"); expect(manager.getSnapshot().held).toEqual([]);
+  });
+  it("rejects duplicate concurrent handoffs and different bound account", async () => {
+    const saving = deferred(); store.rememberResumableUpload.mockReturnValue(saving.promise); const f = fixture();
+    const pending = manager.enqueue(f.request); await expect(manager.enqueue(f.request)).rejects.toThrow(/already in the queue/);
+    await expect(manager.enqueue({ ...f.request, ownerId: "owner-2" })).rejects.toThrow(/session changed/);
+    saving.resolve(undefined); await pending;
   });
 });

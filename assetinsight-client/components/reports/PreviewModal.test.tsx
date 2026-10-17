@@ -469,8 +469,12 @@ describe("PreviewModal valuation methods", () => {
     );
 
     const firstTitle = await screen.findByDisplayValue("Asset 1");
+    // A collapsed content-visibility placeholder can move the bottom pager
+    // between scrolling it into view and clicking. These 20 rows stay laid out.
+    expect(firstTitle.closest(".app-render-row")).toBeNull();
+    expect(screen.getByDisplayValue("Asset 20").closest(".app-render-row")).toBeNull();
     expect(screen.queryByDisplayValue("Asset 21")).toBeNull();
-    expect(screen.getByText("Showing 1–20 of 205 lots")).toBeInTheDocument();
+    expect(pagination().getByText("Showing 1–20 of 205 lots")).toBeInTheDocument();
 
     firstTitle.focus();
     fireEvent.change(firstTitle, { target: { value: "Focused asset" } });
@@ -516,6 +520,67 @@ describe("PreviewModal valuation methods", () => {
     expect(await screen.findByDisplayValue("Asset 21")).toBeInTheDocument();
     expect(screen.queryByDisplayValue("Focused asset")).toBeNull();
     // The same budget as the other heavy bulk-selection tests: 205 lots.
+  }, 20_000);
+
+  it.each(["desktop", "mobile"])("navigates the bottom pager and saves all 142 lots and 1824 photo references on %s", async (layout) => {
+    if (layout === "mobile") {
+      vi.stubGlobal("matchMedia", vi.fn(() => ({ matches: false, addEventListener: vi.fn(), removeEventListener: vi.fn() })));
+    }
+    const response: any = makePreviewResponse();
+    response.data.status = "approved";
+    const photos = Array.from({ length: 1824 }, (_, index) => `https://media.example.test/qa-photo-${index}.jpg`);
+    let photoIndex = 0;
+    response.data.image_count = photos.length;
+    response.data.imageUrls = photos;
+    response.data.preview_data.lots = Array.from({ length: 142 }, (_, index) => {
+      const count = index < 120 ? 13 : 12;
+      const indexes = Array.from({ length: count }, () => photoIndex++);
+      return { ...response.data.preview_data.lots[0], lot_id: `qa-stable-${index}`, lot_number: String(index + 1),
+        title: `Asset ${index + 1}`, image_indices: indexes, image_urls: indexes.map(i => photos[i]),
+        cover_image_url: photos[indexes[0]], description: `Original description ${index + 1}` };
+    });
+    const expectedLots = structuredClone(response.data.preview_data.lots);
+    expectedLots[0].title = "First page edit";
+    expectedLots[20].title = "Second page edit";
+    expectedLots[141].title = "Last page edit";
+    const submit = vi.fn().mockResolvedValue({ message: "Queued", data: {} });
+    render(<PreviewModal isOpen reportId="qa-142" isResubmitMode onClose={vi.fn()}
+      loadPreviewDataOverride={vi.fn().mockResolvedValue(response)} resubmitReportOverride={submit} />);
+    const firstTitle = await screen.findByDisplayValue("Asset 1");
+    expect(firstTitle.closest(".app-render-row")).toBeNull();
+    expect(screen.getByDisplayValue("Asset 20").closest(".app-render-row")).toBeNull();
+    const bottom = () => within(screen.getByRole("navigation", { name: "Asset lots pagination bottom" }));
+    expect(pagination().getByText("Page 1 of 8")).toBeInTheDocument();
+    expect(bottom().getByText("Showing 1–20 of 142 lots")).toBeInTheDocument();
+    expect(bottom().getByRole("button", { name: "Previous lots page" })).toBeDisabled();
+    expect(screen.getByText("Saving generates files for all 142 lots across all 8 pages, not only this page.")).toBeInTheDocument();
+    firstTitle.focus();
+    fireEvent.change(firstTitle, { target: { value: "First page edit" } });
+    const start = screen.getByRole("group", { name: "Lot page 1 of 8" });
+    const scroll = vi.fn();
+    Object.defineProperty(start, "scrollIntoView", { configurable: true, value: scroll });
+    fireEvent.click(bottom().getByRole("button", { name: "Next lots page" }));
+    expect(start).toHaveFocus();
+    expect(start).toHaveAccessibleName("Lot page 2 of 8");
+    expect(scroll).toHaveBeenCalledWith({ block: "start", behavior: "instant" });
+    fireEvent.change(screen.getByDisplayValue("Asset 21"), { target: { value: "Second page edit" } });
+    for (let page = 3; page <= 8; page++) fireEvent.click(bottom().getByRole("button", { name: "Next lots page" }));
+    expect(bottom().getByText("Showing 141–142 of 142 lots")).toBeInTheDocument();
+    expect(bottom().getByText("Page 8 of 8")).toBeInTheDocument();
+    expect(bottom().getByRole("button", { name: "Next lots page" })).toBeDisabled();
+    fireEvent.change(screen.getByDisplayValue("Asset 142"), { target: { value: "Last page edit" } });
+    fireEvent.click(bottom().getByRole("button", { name: "Previous lots page" }));
+    expect(start).toHaveFocus();
+    expect(pagination().getByText("Showing 121–140 of 142 lots")).toBeInTheDocument();
+    for (let page = 6; page >= 1; page--) fireEvent.click(pagination().getByRole("button", { name: "Previous lots page" }));
+    expect(screen.getByDisplayValue("First page edit")).toBeInTheDocument();
+    fireEvent.click(saveChangesButton());
+    await waitFor(() => expect(submit).toHaveBeenCalledTimes(1));
+    const saved = submit.mock.calls[0][1];
+    expect(saved.lots).toEqual(expectedLots);
+    expect(saved.lots.flatMap((lot: any) => lot.image_urls)).toEqual(photos);
+    expect(saved.lots.flatMap((lot: any) => lot.image_indices)).toEqual(Array.from({ length: 1824 }, (_, i) => i));
+    expect(mocks.submitForApproval).not.toHaveBeenCalled();
   }, 20_000);
 
   it("preserves selected lots across pages, applies page/all groups, and clears without changing values", async () => {

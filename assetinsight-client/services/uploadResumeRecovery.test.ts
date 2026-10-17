@@ -1,167 +1,62 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
-
-const drafts = vi.hoisted(() => ({ loadScopedDraft: vi.fn() }));
-vi.mock("@/components/forms/drafts/storage", () => drafts);
-
-const asset = vi.hoisted(() => ({
-  AssetService: {
-    create: vi.fn(async (...args: unknown[]) => ({ reportId: "r1", args })),
-  },
-}));
-vi.mock("./asset", () => asset);
-
-const lotListing = vi.hoisted(() => ({
-  createLotListing: vi.fn(async (...args: unknown[]) => ({ reportId: "r2", args })),
-}));
-vi.mock("./lotListing", () => lotListing);
-
-import { describeResumeOutcome, prepareResumeFromRecord } from "./uploadResumeRecovery";
+import "fake-indexeddb/auto";
+import { Blob as NativeBlob, File as NativeFile } from "node:buffer";
+import { beforeEach, afterEach, describe, expect, it, vi } from "vitest";
+const create = vi.hoisted(() => ({ asset: vi.fn(), lot: vi.fn() }));
+vi.mock("./asset", () => ({ AssetService: { create: create.asset } }));
+vi.mock("./lotListing", () => ({ createLotListing: create.lot }));
 import { describeOrderedFiles, orderedSubmissionFiles } from "./uploadJobFiles";
-import type { UploadResumeRecord } from "./uploadResumeStore";
-
-const file = (name: string, size = 10) =>
-  new File([new Uint8Array(size)], name, { type: "image/jpeg", lastModified: 1700000000000 });
-
-const lots = () => [
-  { files: [file("a1.jpg"), file("a2.jpg")], extraFiles: [file("a-extra.jpg")], videoFiles: [file("a.mp4")] },
-  { files: [file("b1.jpg")], extraFiles: [], videoFiles: [] },
-];
-
-function record(overrides: Partial<UploadResumeRecord> = {}): UploadResumeRecord {
-  const kind = overrides.kind || "asset";
-  return {
-    version: 1,
-    key: "owner-1:asset:scope-1",
-    ownerId: "owner-1",
-    kind,
-    scopeId: "scope-1",
-    endpoint: kind === "asset" ? "/asset" : "/lot-listing",
-    details: { contract_no: "CN-1001", client_submission_id: "submission-1" },
-    files: describeOrderedFiles(orderedSubmissionFiles(kind, lots())),
-    clientSubmissionId: "submission-1",
-    sessionId: "session-1",
-    title: "CN-1001",
-    totalFiles: 5,
-    uploadedFiles: 3,
-    savedAt: new Date().toISOString(),
-    ...overrides,
-  };
+import { loadResumableDraft, markResumableNeedsForm, rememberResumableUpload, resetUploadResumeStoreForTests } from "./uploadResumeStore";
+import { prepareResumeFromRecord, describeResumeOutcome } from "./uploadResumeRecovery";
+let sequence = 0;
+beforeEach(() => { vi.stubGlobal("Blob", NativeBlob); vi.stubGlobal("File", NativeFile); vi.clearAllMocks(); });
+afterEach(() => vi.unstubAllGlobals());
+async function save(kind: "asset" | "lot-listing") {
+  const ownerId = `recovery-owner-${++sequence}`;
+  const photo = (name: string) => new File([name], name, { type: name.endsWith("mp4") ? "video/mp4" : "image/jpeg", lastModified: 4 });
+  const lots = [{ id: "lot-a", files: [photo("a.jpg")], extraFiles: [photo("a-extra.jpg")], videoFiles: [photo("a.mp4")] }, { id: "lot-b", files: [photo("b.jpg")], extraFiles: [], videoFiles: [photo("b.mp4")] }];
+  const media = orderedSubmissionFiles(kind, lots);
+  const snapshot = { version: 3, revision: 7, savedAt: "2026-10-15", userId: ownerId, kind, ...(kind === "asset" ? { formData: { contractNo: "123", watermarkImages: false }, lots } : { data: { contractNo: "123", watermarkImages: false, lots } }) };
+  const record = await rememberResumableUpload({ ownerId, kind, scopeId: "scope", endpoint: kind === "asset" ? "/asset" : "/lot-listing", title: "123", clientSubmissionId: "stable-submit", details: { client_submission_id: "stable-submit", contract_no: "123", mixed_lots: [{ count: 1, extra_count: 1, video_count: 1 }, { count: 1, video_count: 1 }] }, files: describeOrderedFiles(media), totalFiles: media.length, uploadedFiles: 0 }, media, snapshot);
+  return { record, lots };
 }
-
-beforeEach(() => {
-  vi.clearAllMocks();
-  drafts.loadScopedDraft.mockResolvedValue({ envelope: { lots: lots() }, missingMediaCount: 0 });
-});
-
-describe("prepareResumeFromRecord", () => {
-  it("rebuilds a runnable request when the saved draft still matches", async () => {
-    const outcome = await prepareResumeFromRecord(record());
-
-    expect(outcome.status).toBe("ready");
-    if (outcome.status !== "ready") return;
-    expect(outcome.request).toMatchObject({
-      ownerId: "owner-1",
-      kind: "asset",
-      scopeId: "scope-1",
-      clientSubmissionId: "submission-1",
-      // The record is already durable; re-recording would reset its progress.
-      skipPersist: true,
-    });
-    // The payload must be replayed verbatim, not rebuilt from the draft.
-    expect(outcome.request.details).toEqual(record().details);
+describe("immutable upload recovery after browser reload", () => {
+  it.each(["asset", "lot-listing"] as const)("resumes %s with original bytes/order and same details despite no autosaved draft", async (kind) => {
+    const { record, lots } = await save(kind); lots[0].files = []; resetUploadResumeStoreForTests();
+    const outcome = await prepareResumeFromRecord(record); expect(outcome.status).toBe("ready");
+    if (outcome.status !== "ready") throw new Error("fixture could not restore");
+    expect(outcome.request.clientSubmissionId).toBe("stable-submit"); expect(outcome.request.skipPersist).toBe(true);
+    expect(outcome.request.details).toEqual(record.details); expect(await outcome.request.media[0].text()).toBe("a.jpg");
+    expect(outcome.request.media.map((file) => file.name)).toEqual(kind === "asset" ? ["a.jpg", "a-extra.jpg", "b.jpg", "a.mp4", "b.mp4"] : ["a.jpg", "a-extra.jpg", "a.mp4", "b.jpg", "b.mp4"]);
+    const progress = vi.fn(), signal = new AbortController().signal;
+    await outcome.request.upload(progress, signal);
+    if (kind === "asset") {
+      expect(create.asset.mock.calls[0][1].map((file: File) => file.name)).toEqual(["a.jpg", "a-extra.jpg", "b.jpg"]);
+      expect(create.asset.mock.calls[0][2].map((file: File) => file.name)).toEqual(["a.mp4", "b.mp4"]);
+    } else expect(create.lot.mock.calls[0][1][0].videoFiles[0].name).toBe("a.mp4");
   });
-
-  it("replays an Asset upload through the Asset service", async () => {
-    const outcome = await prepareResumeFromRecord(record());
-    if (outcome.status !== "ready") throw new Error("expected ready");
-
-    await outcome.request.upload(() => {}, new AbortController().signal);
-
-    expect(asset.AssetService.create).toHaveBeenCalledTimes(1);
-    const [, images, videos] = asset.AssetService.create.mock.calls[0];
-    expect((images as File[]).map((item) => item.name)).toEqual([
-      "a1.jpg",
-      "a2.jpg",
-      "a-extra.jpg",
-      "b1.jpg",
-    ]);
-    expect((videos as File[]).map((item) => item.name)).toEqual(["a.mp4"]);
+  it("does not rebuild from supplied metadata when the durable record is absent", async () => {
+    const { record } = await save("asset"); const outcome = await prepareResumeFromRecord({ ...record, key: "missing" });
+    expect(outcome.status).toBe("draft-missing"); expect(create.asset).not.toHaveBeenCalled();
   });
-
-  it("replays a Lot Listing upload through its own service, keeping lot order", async () => {
-    const outcome = await prepareResumeFromRecord(record({ kind: "lot-listing" }));
-    if (outcome.status !== "ready") throw new Error("expected ready");
-
-    await outcome.request.upload(() => {}, new AbortController().signal);
-
-    expect(lotListing.createLotListing).toHaveBeenCalledTimes(1);
-    expect(asset.AssetService.create).not.toHaveBeenCalled();
+  it("uses durable metadata rather than a stale caller copy", async () => {
+    const { record } = await save("asset");
+    const outcome = await prepareResumeFromRecord({ ...record, details: { contract_no: "tampered" } });
+    expect(outcome.status === "ready" && outcome.request.details).toEqual(record.details);
   });
-
-  it("refuses when the draft is gone", async () => {
-    drafts.loadScopedDraft.mockResolvedValue(null);
-    expect(await prepareResumeFromRecord(record())).toEqual({ status: "draft-missing" });
+  it("requires explicit review of durable conflicts after refresh", async () => {
+    const { record } = await save("lot-listing");
+    await markResumableNeedsForm(record.ownerId, record.kind, record.scopeId, record.clientSubmissionId);
+    const outcome = await prepareResumeFromRecord(record); expect(outcome.status).toBe("error");
+    expect(describeResumeOutcome(outcome)).toMatch(/Review saved report/);
+    expect(await loadResumableDraft(record)).not.toBeNull(); expect(create.lot).not.toHaveBeenCalled();
   });
-
-  it("refuses when the draft cannot be read at all", async () => {
-    drafts.loadScopedDraft.mockRejectedValue(new Error("corrupt"));
-    expect(await prepareResumeFromRecord(record())).toEqual({ status: "draft-missing" });
+  it("rejects owner change/abort during recovery, retaining the original", async () => {
+    const { record } = await save("asset"); const controller = new AbortController(); controller.abort();
+    expect((await prepareResumeFromRecord(record, { signal: controller.signal })).status).toBe("error");
+    expect(await loadResumableDraft(record)).not.toBeNull();
   });
-
-  it("refuses when photographs are no longer stored locally", async () => {
-    drafts.loadScopedDraft.mockResolvedValue({ envelope: { lots: lots() }, missingMediaCount: 2 });
-    expect(await prepareResumeFromRecord(record())).toEqual({ status: "media-missing", missing: 2 });
-  });
-
-  it("refuses a draft that gained a photo after the upload began", async () => {
-    const changed = lots();
-    changed[1].files.push(file("b2.jpg"));
-    drafts.loadScopedDraft.mockResolvedValue({ envelope: { lots: changed }, missingMediaCount: 0 });
-
-    expect(await prepareResumeFromRecord(record())).toEqual({ status: "changed", reason: "count" });
-  });
-
-  it("refuses a draft whose photo was replaced under the same name", async () => {
-    const changed = lots();
-    changed[0].files[0] = file("a1.jpg", 999);
-    drafts.loadScopedDraft.mockResolvedValue({ envelope: { lots: changed }, missingMediaCount: 0 });
-
-    expect(await prepareResumeFromRecord(record())).toEqual({
-      status: "changed",
-      reason: "identity",
-    });
-  });
-
-  it("does not call a report service for any refusal", async () => {
-    drafts.loadScopedDraft.mockResolvedValue(null);
-    await prepareResumeFromRecord(record());
-
-    expect(asset.AssetService.create).not.toHaveBeenCalled();
-    expect(lotListing.createLotListing).not.toHaveBeenCalled();
-  });
-});
-
-describe("describeResumeOutcome", () => {
-  it("says nothing when the upload can simply continue", () => {
-    expect(describeResumeOutcome({ status: "ready" } as never)).toBeNull();
-  });
-
-  it("points every refusal at Reports rather than at submitting again", () => {
-    for (const outcome of [
-      { status: "draft-missing" } as const,
-      { status: "media-missing", missing: 2 } as const,
-      { status: "changed", reason: "identity" } as const,
-    ]) {
-      expect(describeResumeOutcome(outcome)).toContain("Reports");
-    }
-  });
-
-  it("counts missing photos with matching agreement", () => {
-    expect(describeResumeOutcome({ status: "media-missing", missing: 1 })).toContain(
-      "1 photo is no longer stored"
-    );
-    expect(describeResumeOutcome({ status: "media-missing", missing: 3 })).toContain(
-      "3 photos are no longer stored"
-    );
+  it("keeps recovery guidance useful and never displays raw HTTP codes", () => {
+    expect(describeResumeOutcome({ status: "changed", reason: "identity" })).toMatch(/media order/);
+    expect(describeResumeOutcome({ status: "media-missing", missing: 1 })).toMatch(/1 original media file/);
   });
 });

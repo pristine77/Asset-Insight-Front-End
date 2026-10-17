@@ -331,7 +331,7 @@ describe("LotListingPreviewModal inspection location", () => {
       loadPreviewDataOverride={vi.fn().mockResolvedValue(response)}
       updatePreviewDataOverride={updatePreview} resubmitReportOverride={resubmit}
       uploadPreviewLotImagesOverride={uploadImages} refreshSpecPdfOverride={refreshSpecPdf} />);
-    fireEvent.change(await screen.findByDisplayValue("Test description"), { target: { value: "Complete edited description" } });
+    fireEvent.change(await screen.findByDisplayValue("Test lot"), { target: { value: "Complete edited title" } });
     expect(screen.queryByRole("button", { name: /^Save changes$/i })).toBeNull();
     const action = screen.getByRole("button", { name: "Save preview" });
     fireEvent.click(action); fireEvent.click(action);
@@ -340,7 +340,7 @@ describe("LotListingPreviewModal inspection location", () => {
     });
     expect(resubmit).toHaveBeenCalledTimes(1);
     expect(resubmit).toHaveBeenCalledWith("combined-listing", expect.objectContaining({
-      lots: [expect.objectContaining({ lot_id: "lot-1", description: "Complete edited description" })],
+      lots: [expect.objectContaining({ lot_id: "lot-1", title: "Complete edited title", description: "Test description" })],
     }));
     expect(updatePreview).not.toHaveBeenCalled();
     expect(uploadImages).not.toHaveBeenCalled();
@@ -362,11 +362,11 @@ describe("LotListingPreviewModal inspection location", () => {
     const onClose = vi.fn();
     render(<LotListingPreviewModal isOpen reportId="retry-listing" onClose={onClose}
       loadPreviewDataOverride={vi.fn().mockResolvedValue(response)} resubmitReportOverride={resubmit} />);
-    const description = await screen.findByDisplayValue("Test description");
-    fireEvent.change(description, { target: { value: "Retain this edit" } });
+    const title = await screen.findByDisplayValue("Test lot");
+    fireEvent.change(title, { target: { value: "Retain this edit" } });
     fireEvent.click(screen.getByRole("button", { name: "Save preview" }));
     await waitFor(() => expect(mocks.toastError).toHaveBeenCalledWith("Another file generation is in progress. Try again when it finishes."));
-    expect(description).toHaveValue("Retain this edit");
+    expect(title).toHaveValue("Retain this edit");
     expect(onClose).not.toHaveBeenCalled();
     fireEvent.click(screen.getByRole("button", { name: "Save preview" }));
     await waitFor(() => expect(onClose).toHaveBeenCalledOnce());

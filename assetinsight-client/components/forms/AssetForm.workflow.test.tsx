@@ -4,8 +4,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AuctioneerWorkItemSetup } from "@/services/auctioneer";
 import type { ReportDraftRecord } from "@/services/reportDrafts";
 import AssetForm from "./AssetForm";
-import { backgroundUploads } from "@/services/backgroundUploadManager";
 import type { MixedLot } from "./mixed/types";
+import type { BackgroundUploadRequest } from "@/services/backgroundUploadManager";
+import { advanceAuthSession } from "@/lib/auth-storage";
 
 type DraftProgress = {
   phase: "preparing" | "uploading" | "verifying" | "complete";
@@ -39,6 +40,17 @@ const mocks = vi.hoisted(() => ({
   toastError: vi.fn(),
   toastInfo: vi.fn(),
   toastWarning: vi.fn(),
+  enqueue: vi.fn(),
+  isForegroundRequired: vi.fn(),
+  createDraftId: vi.fn(),
+}));
+
+vi.mock("@/services/backgroundUploadManager", () => ({
+  backgroundUploads: {
+    enqueue: mocks.enqueue,
+    isForegroundRequired: mocks.isForegroundRequired,
+    clearForegroundRequirement: vi.fn(),
+  },
 }));
 
 vi.mock("next/navigation", () => ({
@@ -161,7 +173,7 @@ vi.mock("@/services/reportDrafts", () => ({
     restoreLots: mocks.restoreLots,
     get: mocks.getDraft,
   },
-  createReportDraftClientId: () => "asset-workflow-draft",
+  createReportDraftClientId: mocks.createDraftId,
   getDuplicateLotWarning: () => null,
   getReportDraftDeviceId: () => "asset-workflow-device",
 }));
@@ -310,6 +322,8 @@ function makeAssetResumeDraft(
 describe("AssetForm manual save and submission workflow", () => {
   beforeEach(() => {
     Object.values(mocks).forEach((mock) => mock.mockReset());
+    mocks.isForegroundRequired.mockReturnValue(false);
+    mocks.createDraftId.mockReturnValue("asset-workflow-draft");
     mocks.authUser.mockReturnValue({ _id: "user-asset-workflow", username: "Alex Appraiser", companyName: "Asset Insight QA" });
     mocks.deleteDraftByClientId.mockResolvedValue(undefined);
     mocks.deleteScopedDraft.mockResolvedValue(undefined);
@@ -349,6 +363,88 @@ describe("AssetForm manual save and submission workflow", () => {
     }
   });
 
+  it("closes only after durable handoff and protects the next report from late upload cleanup", async () => {
+    const persistence = deferred<string>();
+    const upload = deferred<Record<string, unknown>>();
+    const onSuccess = vi.fn();
+    mocks.enqueue.mockReturnValueOnce(persistence.promise);
+    mocks.createAsset.mockReturnValueOnce(upload.promise);
+    let sequence = 0;
+    mocks.createDraftId.mockImplementation(() => `independent-asset-${++sequence}`);
+    const view = render(<AssetForm onSuccess={onSuccess} />);
+    await waitForResolvedAssetLocation(); fillRequiredReportFields(); addTestMedia();
+    fireEvent.click(screen.getByRole("button", { name: "Create report" }));
+    await waitFor(() => expect(mocks.enqueue).toHaveBeenCalledOnce());
+    const request = mocks.enqueue.mock.calls[0][0] as BackgroundUploadRequest;
+    expect(request).toMatchObject({ ownerId: "user-asset-workflow", kind: "asset", totalFiles: 1, scopeId: "independent-asset-1" });
+    expect(request.files[0]).toMatchObject({ name: "asset-photo.jpg", size: request.media[0].size, lastModified: 1 });
+    expect(request.draftSnapshot).toMatchObject({ formData: { clientName: "Workflow Client", clientSubmissionId: request.clientSubmissionId }, lots: [{ files: [request.media[0]] }] });
+    expect(onSuccess).not.toHaveBeenCalled();
+    expect(mocks.createAsset).not.toHaveBeenCalled();
+    await act(async () => persistence.resolve("background-job"));
+    await waitFor(() => expect(onSuccess).toHaveBeenCalledOnce());
+    expect(onSuccess).toHaveBeenCalledWith(expect.stringContaining("while this tab stays open"));
+    expect(screen.getByLabelText(/Client name/i)).toHaveValue("");
+    expect(screen.getByTestId("selected-asset-media")).toHaveTextContent("No media selected");
+    expect(request.signal?.aborted).toBe(false);
+    fillRequiredReportFields(); addTestMedia();
+    fireEvent.change(screen.getByLabelText(/Client name/i), { target: { value: "Next client" } });
+    fireEvent.change(screen.getByLabelText(/Inspection location/i), { target: { value: "Next yard" } });
+    const lateResult = request.upload(vi.fn(), new AbortController().signal);
+    await act(async () => upload.resolve({ reportId: "accepted-old", jobId: "job-old", status: "processing" }));
+    await lateResult;
+    expect(screen.getByLabelText(/Client name/i)).toHaveValue("Next client");
+    expect(screen.getByTestId("selected-asset-media")).toHaveTextContent("asset-photo.jpg");
+    expect(mocks.deleteDraftByClientId).not.toHaveBeenCalled();
+    expect(mocks.deleteScopedDraft).not.toHaveBeenCalled();
+    const nextPersistence = deferred<string>();
+    mocks.enqueue.mockReturnValueOnce(nextPersistence.promise);
+    fireEvent.click(screen.getByRole("button", { name: "Create report" }));
+    await waitFor(() => expect(mocks.enqueue).toHaveBeenCalledTimes(2));
+    const next = mocks.enqueue.mock.calls[1][0] as BackgroundUploadRequest;
+    expect(next.scopeId).not.toBe(request.scopeId);
+    expect(next.clientSubmissionId).not.toBe(request.clientSubmissionId);
+    expect(next.details.client_name).toBe("Next client");
+    await act(async () => nextPersistence.reject(new Error("Storage unavailable. Retry this same report.")));
+    view.unmount();
+    expect(request.signal?.aborted).toBe(false);
+  });
+
+  it("keeps an ordinary form and media when durable handoff fails", async () => {
+    const onSuccess = vi.fn();
+    mocks.enqueue.mockRejectedValueOnce(new Error("Browser storage is full. Free space and retry this same report."));
+    render(<AssetForm onSuccess={onSuccess} />);
+    await waitForResolvedAssetLocation(); fillRequiredReportFields(); addTestMedia();
+    fireEvent.click(screen.getByRole("button", { name: "Create report" }));
+    await screen.findByText(/Browser storage is full/);
+    expect(onSuccess).not.toHaveBeenCalled();
+    expect(mocks.createAsset).not.toHaveBeenCalled();
+    expect(screen.getByLabelText(/Client name/i)).toHaveValue("Workflow Client");
+    expect(screen.getByTestId("selected-asset-media")).toHaveTextContent("asset-photo.jpg");
+    expect(mocks.deleteScopedDraft).not.toHaveBeenCalled();
+    expect(mocks.deleteDraftByClientId).not.toHaveBeenCalled();
+  });
+
+  it.each(["cancel", "session", "unmount"] as const)("ignores a late handoff after %s", async (interruption) => {
+    const persistence = deferred<string>();
+    const onSuccess = vi.fn();
+    mocks.enqueue.mockReturnValueOnce(persistence.promise);
+    const view = render(<AssetForm onSuccess={onSuccess} />);
+    await waitForResolvedAssetLocation(); fillRequiredReportFields(); addTestMedia();
+    fireEvent.click(screen.getByRole("button", { name: "Create report" }));
+    await waitFor(() => expect(mocks.enqueue).toHaveBeenCalledOnce());
+    const request = mocks.enqueue.mock.calls[0][0] as BackgroundUploadRequest;
+    if (interruption === "cancel") fireEvent.click(screen.getByRole("button", { name: "Stop upload" }));
+    else if (interruption === "session") advanceAuthSession();
+    else view.unmount();
+    await act(async () => persistence.resolve("late-job"));
+    if (interruption !== "session") expect(request.signal?.aborted).toBe(true);
+    expect(onSuccess).not.toHaveBeenCalled();
+    expect(mocks.toastSuccess).not.toHaveBeenCalled();
+    expect(mocks.deleteScopedDraft).not.toHaveBeenCalled();
+    expect(mocks.deleteDraftByClientId).not.toHaveBeenCalled();
+  });
+
   it.each([
     { failure: new Error("Network Error"), expected: /connection|network/i },
     { failure: Object.assign(new Error("Request failed with status code 409"), { response: { status: 409, data: { code: "DRAFT_REVISION_CONFLICT", message: "This draft changed on another device. Review the latest saved version." } } }), expected: /version already saved/i },
@@ -369,88 +465,58 @@ describe("AssetForm manual save and submission workflow", () => {
     expect(mocks.toastSuccess).not.toHaveBeenCalled();
   });
 
-  /*
-     Submit hands the upload to the background line and closes the form, so a
-     refusal no longer surfaces in a form that is still on screen. The data is
-     still safe — the saved draft is untouched, the line holds the upload for
-     attention, and the draft is marked foreground so reopening it from Drafts
-     submits inline, where its dialog can be answered. These tests assert that
-     chain rather than the old on-screen form.
-  */
-  const heldForAttention = async () => {
-    await waitFor(() => expect(backgroundUploads.getSnapshot().held).toHaveLength(1));
-    return backgroundUploads.getSnapshot().held[0];
-  };
-
-  it.each([{}, { reportId: "unaccepted-placeholder", phase: "upload", status: "uploading" }])("keeps the draft and asks for the form when a receipt is not acceptance %j", async (receipt) => {
+  it.each([{}, { reportId: "unaccepted-placeholder", phase: "upload", status: "uploading" }])("does not clear a form for an incomplete acceptance receipt %j", async (receipt) => {
+    const onSuccess = vi.fn();
     mocks.createAsset.mockResolvedValue(receipt);
-    render(<AssetForm resumeLocalDraftScopeId="scope-receipt" />);
+    render(<AssetForm resumeLocalDraftScopeId="upload-review:asset-inline" onSuccess={onSuccess} />);
     await waitForResolvedAssetLocation();
     fillRequiredReportFields();
     addTestMedia();
     fireEvent.click(screen.getByRole("button", { name: "Create report" }));
     await waitFor(() => expect(mocks.createAsset).toHaveBeenCalledOnce());
-
-    const held = await heldForAttention();
-    expect(held).toMatchObject({ status: "attention" });
-    /*
-       An unconfirmed receipt is retryable as the same upload — the server may
-       still have accepted it, so recreating the report is the one thing that
-       must not happen. It therefore stays resumable from the bar rather than
-       demanding a decision in the form.
-    */
-    expect(held.message).toMatch(/Retry this same upload; do not recreate the report/);
-    expect(held.needsForm).toBe(false);
-    expect(backgroundUploads.isForegroundRequired("asset", "scope-receipt")).toBe(false);
-    // An unproven receipt must never be treated as a completed submission.
+    await waitFor(() => expect(screen.getByRole("button", { name: "Create report" })).toBeEnabled());
+    expect(onSuccess).not.toHaveBeenCalled();
     expect(mocks.deleteScopedDraft).not.toHaveBeenCalled();
     expect(mocks.deleteDraftByClientId).not.toHaveBeenCalled();
+    expect(screen.getByLabelText(/Client name/i)).toHaveValue("Workflow Client");
+    expect(screen.getByTestId("selected-asset-media")).toHaveTextContent("asset-photo.jpg");
   });
 
-  it("keeps the draft when an earlier accepted report is found", async () => {
+  it("keeps current data when an earlier accepted report is found", async () => {
+    const onSuccess = vi.fn();
     mocks.createAsset.mockResolvedValue({ reportId: "old-report", jobId: "old-job", status: "processed", reusedAcceptance: true });
-    render(<AssetForm resumeLocalDraftScopeId="scope-earlier" />);
+    render(<AssetForm resumeLocalDraftScopeId="upload-review:asset-inline" onSuccess={onSuccess} />);
     await waitForResolvedAssetLocation(); fillRequiredReportFields(); addTestMedia();
     fireEvent.click(screen.getByRole("button", { name: "Create report" }));
-
-    const held = await heldForAttention();
-    expect(held.message).toMatch(/earlier submission was already accepted/);
-    expect(backgroundUploads.isForegroundRequired("asset", "scope-earlier")).toBe(true);
+    await screen.findByText(/earlier submission was already accepted/);
+    expect(onSuccess).not.toHaveBeenCalled();
     expect(mocks.deleteDraftByClientId).not.toHaveBeenCalled();
     expect(mocks.deleteScopedDraft).not.toHaveBeenCalled();
+    expect(screen.getByTestId("selected-asset-media")).toHaveTextContent("asset-photo.jpg");
   });
 
-  it.each([true, false])("sends an unusable old submission back to the form, offering separate recovery only for authoritative eligibility %s", async (canCreateSeparate) => {
+  it.each([true, false])("offers separate saved recovery only for authoritative eligibility %s", async (canCreateSeparate) => {
     mocks.createAsset.mockRejectedValue({ response: { status: 409, data: { code: "UPLOAD_SESSION_REPORT_UNAVAILABLE", data: { sessionId: "old-session", accepted: true, reportAvailable: false, canCreateSeparate } } } });
-    render(<AssetForm resumeLocalDraftScopeId="scope-separate" />);
+    render(<AssetForm resumeLocalDraftScopeId="upload-review:asset-inline" />);
     await waitForResolvedAssetLocation(); fillRequiredReportFields(); addTestMedia();
     fireEvent.click(screen.getByRole("button", { name: "Create report" }));
-    await heldForAttention();
-
-    // Only an eligible separate recovery is a decision the form can offer.
-    expect(backgroundUploads.isForegroundRequired("asset", "scope-separate")).toBe(canCreateSeparate);
+    await screen.findByText(/old submission cannot be reused/);
+    expect(Boolean(screen.queryByRole("button", { name: "Save separate draft" }))).toBe(canCreateSeparate);
     expect(mocks.upsertWithMedia).not.toHaveBeenCalled();
     expect(mocks.deleteDraftByClientId).not.toHaveBeenCalled();
+    expect(screen.getByTestId("selected-asset-media")).toHaveTextContent("asset-photo.jpg");
   });
 
-  it("shows the existing-report dialog when the returned draft is submitted again", async () => {
+  it("checks an existing report in another tab without closing the unsent form", async () => {
+    const onSuccess = vi.fn();
     mocks.createAsset.mockRejectedValue({ response: { status: 409, data: { code: "ACTIVE_REPORT_EXISTS" } } });
-    const first = render(<AssetForm resumeLocalDraftScopeId="scope-active" />);
+    render(<AssetForm resumeLocalDraftScopeId="upload-review:asset-inline" onSuccess={onSuccess} />);
     await waitForResolvedAssetLocation(); fillRequiredReportFields(); addTestMedia();
     fireEvent.click(screen.getByRole("button", { name: "Create report" }));
-    await heldForAttention();
-    expect(backgroundUploads.isForegroundRequired("asset", "scope-active")).toBe(true);
-    first.unmount();
-
-    // Reopening that draft from Drafts submits inline, where the prompt lives.
-    render(<AssetForm resumeLocalDraftScopeId="scope-active" />);
-    await waitForResolvedAssetLocation(); fillRequiredReportFields(); addTestMedia();
-    fireEvent.click(screen.getByRole("button", { name: "Create report" }));
-
     const dialog = await screen.findByRole("dialog", { name: "Report already processing" });
     const link = within(dialog).getByRole("link", { name: "Open My Reports (new tab)" });
-    expect(link).toHaveAttribute("target", "_blank");
-    expect(mocks.deleteDraftByClientId).not.toHaveBeenCalled();
+    expect(link).toHaveAttribute("target", "_blank"); fireEvent.click(link);
+    expect(onSuccess).not.toHaveBeenCalled(); expect(mocks.deleteDraftByClientId).not.toHaveBeenCalled();
     expect(screen.getByLabelText(/Client name/i)).toHaveValue("Workflow Client");
   });
 
@@ -496,6 +562,7 @@ describe("AssetForm manual save and submission workflow", () => {
       }
       fireEvent.click(screen.getByRole("button", { name: "Create Lot & Continue" }));
       await waitFor(() => expect(mocks.createAsset).toHaveBeenCalledOnce());
+      expect(mocks.enqueue).not.toHaveBeenCalled();
       expect(onAcceptedAndContinue).not.toHaveBeenCalled();
       expect(mocks.deleteDraftByClientId).not.toHaveBeenCalled();
       const details = mocks.createAsset.mock.calls[0][0];
@@ -676,7 +743,7 @@ describe("AssetForm manual save and submission workflow", () => {
 
   it("submits sparse per-lot video counts with every selected clip in lot order", async () => {
     mocks.createAsset.mockResolvedValueOnce({ reportId: "video-report", jobId: "accepted-job", status: "processing" });
-    render(<AssetForm />);
+    render(<AssetForm resumeLocalDraftScopeId="upload-review:asset-inline" />);
     await waitForResolvedAssetLocation();
     fillRequiredReportFields();
     fireEvent.click(screen.getByRole("button", { name: "Add sparse lot videos" }));
@@ -904,7 +971,7 @@ describe("AssetForm manual save and submission workflow", () => {
     ).toBeVisible();
   });
 
-  it("stops a handed-off upload from the line, submitting nothing", async () => {
+  it("stops a valid report upload without auto-saving or clearing the form", async () => {
     let submitSignal: AbortSignal | undefined;
     mocks.createAsset.mockImplementation(
       (
@@ -923,48 +990,67 @@ describe("AssetForm manual save and submission workflow", () => {
         });
       }
     );
-    render(<AssetForm resumeLocalDraftScopeId="scope-stop" />);
+    render(<AssetForm resumeLocalDraftScopeId="upload-review:asset-inline" />);
     await waitForResolvedAssetLocation();
     fillRequiredReportFields();
     addTestMedia();
 
     fireEvent.click(screen.getByRole("button", { name: "Create report" }));
-    await waitFor(() => expect(submitSignal).toBeInstanceOf(AbortSignal));
 
-    /*
-       The upload now runs in the line, so the form neither blocks the page nor
-       owns the control that stops it. Stop lives on the upload bar.
-    */
-    expect(
-      screen.queryByRole("dialog", { name: "Uploading your report" })
-    ).not.toBeInTheDocument();
-    expect(document.getElementById("asset-clientName")?.closest("[inert]")).toBeNull();
+    const dialog = await screen.findByRole("dialog", {
+      name: "Uploading your report",
+    });
+    await waitFor(() => expect(mocks.createAsset).toHaveBeenCalledOnce());
     expect(mocks.createAsset.mock.calls[0][0].watermark_images).toBe(false);
+    expect(dialog).toHaveClass("fixed", "inset-0", "z-[1500]");
+    expect(
+      within(dialog).getByRole("button", { name: "Stop upload" })
+    ).toBeVisible();
+    expect(within(dialog).getByText(/keep this page open/i)).toBeVisible();
+    const hiddenWorkspace = document
+      .getElementById("asset-clientName")
+      ?.closest("[inert]");
+    expect(hiddenWorkspace).not.toBeNull();
+    expect(hiddenWorkspace).toHaveAttribute("inert");
+    expect(hiddenWorkspace).toHaveAttribute("aria-hidden", "true");
+    expect(
+      screen.queryByRole("contentinfo", { name: "Form actions" })
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Create report" })
+    ).not.toBeInTheDocument();
+    expect(mocks.upsertWithMedia).not.toHaveBeenCalled();
 
-    const active = backgroundUploads.getSnapshot().active;
-    expect(active).toMatchObject({ canPause: true, finalizing: false });
-    backgroundUploads.stop(active!.id);
+    fireEvent.click(
+      within(dialog).getByRole("button", { name: "Stop upload" })
+    );
 
     await waitFor(() => expect(submitSignal?.aborted).toBe(true));
-    await waitFor(() => expect(backgroundUploads.getSnapshot().active).toBeNull());
-    // Stopping submits nothing and leaves the saved draft to be reopened.
+    await waitFor(() =>
+      expect(
+        screen.queryByRole("dialog", { name: "Uploading your report" })
+      ).not.toBeInTheDocument()
+    );
+    expect(
+      document.getElementById("asset-clientName")?.closest("[inert]")
+    ).toBeNull();
     expect(mocks.upsertWithMedia).not.toHaveBeenCalled();
-    expect(mocks.deleteScopedDraft).not.toHaveBeenCalled();
-    expect(mocks.deleteDraftByClientId).not.toHaveBeenCalled();
+    expect(screen.getByLabelText(/Client name/i)).toHaveValue("Workflow Client");
+    expect(screen.getByTestId("selected-asset-media")).toHaveTextContent(
+      "asset-photo.jpg"
+    );
   });
 
-  it("recovers a changed submission manifest through the returned draft", async () => {
-    const manifestConflict = {
-      response: {
-        status: 409,
-        data: { code: "SUBMISSION_MANIFEST_CHANGED", data: { accepted: false, canSupersede: true } },
-      },
-    };
+  it("recovers a changed submission manifest with a new upload identity", async () => {
     const retryUpload = deferred<Record<string, unknown>>();
     let retrySignal: AbortSignal | undefined;
     mocks.createAsset
-      .mockRejectedValueOnce(manifestConflict)
-      .mockRejectedValueOnce(manifestConflict)
+      .mockRejectedValueOnce({
+        response: {
+          status: 409,
+          data: { code: "SUBMISSION_MANIFEST_CHANGED", data: { accepted: false, canSupersede: true } },
+        },
+      })
       .mockImplementationOnce(
         (
           _details: unknown,
@@ -980,100 +1066,80 @@ describe("AssetForm manual save and submission workflow", () => {
           );
           return retryUpload.promise;
         }
-      );
-
-    // The first attempt runs in the line and comes back needing a decision.
-    const first = render(<AssetForm resumeLocalDraftScopeId="scope-manifest" />);
-    await waitForResolvedAssetLocation();
-    fillRequiredReportFields();
-    addTestMedia();
-    fireEvent.click(screen.getByRole("button", { name: "Create report" }));
-    await waitFor(() => expect(mocks.createAsset).toHaveBeenCalledTimes(1));
-    await waitFor(() =>
-      expect(backgroundUploads.isForegroundRequired("asset", "scope-manifest")).toBe(true)
     );
-    const firstDetails = mocks.createAsset.mock.calls[0][0];
-    first.unmount();
-
-    // Reopening that draft submits inline, where the recovery prompt lives.
-    render(<AssetForm resumeLocalDraftScopeId="scope-manifest" />);
+    render(<AssetForm resumeLocalDraftScopeId="upload-review:asset-inline" />);
     await waitForResolvedAssetLocation();
     fillRequiredReportFields();
     addTestMedia();
+
     fireEvent.click(screen.getByRole("button", { name: "Create report" }));
 
     const recovery = await screen.findByRole("alertdialog", {
       name: "Start a new upload?",
     });
     expect(within(recovery).getByText(/photos changed/i)).toBeVisible();
+    const firstDetails = mocks.createAsset.mock.calls[0][0];
     fireEvent.click(
       within(recovery).getByRole("button", { name: "Start new upload" })
     );
 
-    await waitFor(() => expect(mocks.createAsset).toHaveBeenCalledTimes(3));
-    const replacement = mocks.createAsset.mock.calls[2][0];
-    expect(replacement.force_new).toBe(false);
-    expect(replacement.supersedes_client_submission_id).toBe(
+    await waitFor(() => expect(mocks.createAsset).toHaveBeenCalledTimes(2));
+    const secondDetails = mocks.createAsset.mock.calls[1][0];
+    expect(secondDetails.force_new).toBe(false);
+    expect(secondDetails.supersedes_client_submission_id).toBe(
       firstDetails.client_submission_id
     );
-    expect(replacement.client_submission_id).not.toBe(
+    expect(secondDetails.client_submission_id).not.toBe(
       firstDetails.client_submission_id
     );
-
-    /*
-       The decision has been taken, so the replacement upload goes back to the
-       line rather than holding the page open again.
-    */
     expect(retrySignal).toBeInstanceOf(AbortSignal);
-    expect(
-      screen.queryByRole("dialog", { name: "Uploading your report" })
-    ).not.toBeInTheDocument();
-    const active = backgroundUploads.getSnapshot().active;
-    expect(active).not.toBeNull();
-    backgroundUploads.stop(active!.id);
+
+    const retryDialog = await screen.findByRole("dialog", {
+      name: "Uploading your report",
+    });
+    fireEvent.click(
+      within(retryDialog).getByRole("button", { name: "Stop upload" })
+    );
     await waitFor(() => expect(retrySignal?.aborted).toBe(true));
-    expect(mocks.deleteScopedDraft).not.toHaveBeenCalled();
+    await waitFor(() =>
+      expect(
+        screen.queryByRole("dialog", { name: "Uploading your report" })
+      ).not.toBeInTheDocument()
+    );
+    expect(screen.getByLabelText(/Client name/i)).toHaveValue("Workflow Client");
+    expect(screen.getByTestId("selected-asset-media")).toHaveTextContent(
+      "asset-photo.jpg"
+    );
   });
 
   it("carries the rejected upload identity into an explicit force-new replacement", async () => {
-    const activeConflict = {
-      response: { status: 409, data: { code: "ACTIVE_REPORT_EXISTS" } },
-    };
     mocks.createAsset
-      .mockRejectedValueOnce(activeConflict)
-      .mockRejectedValueOnce(activeConflict)
+      .mockRejectedValueOnce({
+        response: {
+          status: 409,
+          data: { code: "ACTIVE_REPORT_EXISTS" },
+        },
+      })
       .mockResolvedValueOnce({ message: "Accepted", reportId: "accepted-report", jobId: "accepted-job", status: "processing" });
-
-    // The first attempt runs in the line and is returned for a decision.
-    const first = render(<AssetForm resumeLocalDraftScopeId="scope-force-new" />);
+    render(<AssetForm resumeLocalDraftScopeId="upload-review:asset-inline" />);
     await waitForResolvedAssetLocation();
     fillRequiredReportFields();
     addTestMedia();
-    fireEvent.click(screen.getByRole("button", { name: "Create report" }));
-    await waitFor(() => expect(mocks.createAsset).toHaveBeenCalledTimes(1));
-    await waitFor(() =>
-      expect(backgroundUploads.isForegroundRequired("asset", "scope-force-new")).toBe(true)
-    );
-    const firstDetails = mocks.createAsset.mock.calls[0][0];
-    first.unmount();
 
-    render(<AssetForm resumeLocalDraftScopeId="scope-force-new" />);
-    await waitForResolvedAssetLocation();
-    fillRequiredReportFields();
-    addTestMedia();
     fireEvent.click(screen.getByRole("button", { name: "Create report" }));
 
     const conflict = await screen.findByRole("dialog", {
       name: "Report already processing",
     });
+    const firstDetails = mocks.createAsset.mock.calls[0][0];
     fireEvent.click(
       within(conflict).getByRole("button", {
         name: "Create Separate Report",
       })
     );
 
-    await waitFor(() => expect(mocks.createAsset).toHaveBeenCalledTimes(3));
-    const replacementDetails = mocks.createAsset.mock.calls[2][0];
+    await waitFor(() => expect(mocks.createAsset).toHaveBeenCalledTimes(2));
+    const replacementDetails = mocks.createAsset.mock.calls[1][0];
     expect(replacementDetails.force_new).toBe(true);
     expect(replacementDetails.supersedes_client_submission_id).toBe(
       firstDetails.client_submission_id
@@ -1083,38 +1149,38 @@ describe("AssetForm manual save and submission workflow", () => {
     );
   });
 
-  it("clears the saved draft only once the line reports acceptance", async () => {
+  it("removes cancellation after acceptance while final cleanup is pending", async () => {
     const cleanup = deferred<void>();
-    const upload = deferred<Record<string, unknown>>();
-    mocks.createAsset.mockReturnValueOnce(upload.promise);
+    mocks.createAsset.mockResolvedValueOnce({ message: "Accepted", reportId: "accepted-report", jobId: "accepted-job", status: "processing" });
     mocks.deleteDraftByClientId.mockReturnValueOnce(cleanup.promise);
-    render(<AssetForm resumeLocalDraftScopeId="scope-accept" />);
+    render(<AssetForm resumeLocalDraftScopeId="upload-review:asset-inline" />);
     await waitForResolvedAssetLocation();
     fillRequiredReportFields();
     addTestMedia();
 
     fireEvent.click(screen.getByRole("button", { name: "Create report" }));
-    await waitFor(() => expect(mocks.createAsset).toHaveBeenCalledOnce());
 
-    /*
-       The draft is what a resumed upload is rebuilt from, so it must survive
-       the whole transfer and be cleared only on confirmed acceptance.
-    */
-    expect(mocks.deleteDraftByClientId).not.toHaveBeenCalled();
-    expect(mocks.deleteScopedDraft).not.toHaveBeenCalled();
-
-    upload.resolve({ message: "Accepted", reportId: "accepted-report", jobId: "accepted-job", status: "processing" });
-    await waitFor(() => expect(mocks.deleteDraftByClientId).toHaveBeenCalled());
-
-    // A cleanup still in flight must not hold the line or the notice back.
+    const dialog = await screen.findByRole("dialog", {
+      name: "Uploading your report",
+    });
     await waitFor(() =>
-      expect(backgroundUploads.getSnapshot().notices.at(-1)).toMatchObject({
-        kind: "sent",
-        heading: "Sent",
-      })
+      expect(
+        within(dialog).getAllByText("Report accepted · finalizing…")
+      ).not.toHaveLength(0)
     );
-    expect(backgroundUploads.getSnapshot().active).toBeNull();
+    expect(
+      within(dialog).queryByRole("button", { name: /stop upload/i })
+    ).not.toBeInTheDocument();
+    const acceptedSignal = mocks.createAsset.mock.calls[0][3].signal;
+    fireEvent.keyDown(document, { key: "Escape" });
+    expect(acceptedSignal.aborted).toBe(false);
+
     cleanup.resolve();
+    await waitFor(() =>
+      expect(
+        screen.queryByRole("dialog", { name: "Uploading your report" })
+      ).not.toBeInTheDocument()
+    );
   });
 
   it("does not let a stale geolocation response overwrite a manual location", async () => {
@@ -1207,7 +1273,7 @@ describe("AssetForm manual save and submission workflow", () => {
         else error?.({} as GeolocationPositionError);
       }
     );
-    render(<AssetForm />);
+    render(<AssetForm resumeLocalDraftScopeId="upload-review:asset-inline" />);
     const location = await waitForResolvedAssetLocation();
 
     fireEvent.click(screen.getByRole("button", { name: "Re-detect" }));
@@ -1225,7 +1291,7 @@ describe("AssetForm manual save and submission workflow", () => {
   });
 
   it("preserves the readable name, exact coordinates, and attribution when the provider fails", async () => {
-    render(<AssetForm />);
+    render(<AssetForm resumeLocalDraftScopeId="upload-review:asset-inline" />);
     const location = await waitForResolvedAssetLocation();
     mocks.reverseGeocode.mockRejectedValueOnce(
       new Error("Reverse geocoding unavailable")
@@ -1452,7 +1518,7 @@ describe("AssetForm manual save and submission workflow", () => {
     expect(mocks.geolocation).not.toHaveBeenCalled();
   });
 
-  it("aborts a draft save when the form unmounts, but never a handed-off upload", async () => {
+  it("aborts active draft saves and submissions when the form unmounts", async () => {
     let saveSignal: AbortSignal | undefined;
     mocks.upsertWithMedia.mockImplementation(
       (
@@ -1469,7 +1535,7 @@ describe("AssetForm manual save and submission workflow", () => {
         });
       }
     );
-    const draftView = render(<AssetForm />);
+    const draftView = render(<AssetForm resumeLocalDraftScopeId="upload-review:asset-inline" />);
     fireEvent.click(screen.getByRole("button", { name: /Save draft/i }));
     await waitFor(() => expect(saveSignal).toBeInstanceOf(AbortSignal));
     draftView.unmount();
@@ -1493,25 +1559,13 @@ describe("AssetForm manual save and submission workflow", () => {
         });
       }
     );
-    const submissionView = render(<AssetForm resumeLocalDraftScopeId="scope-unmount" />);
+    const submissionView = render(<AssetForm resumeLocalDraftScopeId="upload-review:asset-inline" />);
     await waitForResolvedAssetLocation();
     fillRequiredReportFields();
     addTestMedia();
     fireEvent.click(screen.getByRole("button", { name: "Create report" }));
     await waitFor(() => expect(submitSignal).toBeInstanceOf(AbortSignal));
     submissionView.unmount();
-
-    /*
-       The upload belongs to the line, not to this component, so closing the
-       form leaves it running. That inversion is the point of the feature: the
-       appraiser can start the next report while this one finishes uploading.
-       Only an explicit Pause or Stop may abort it.
-    */
-    await waitFor(() => expect(backgroundUploads.getSnapshot().active).not.toBeNull());
-    expect(submitSignal?.aborted).toBe(false);
-
-    const active = backgroundUploads.getSnapshot().active;
-    backgroundUploads.stop(active!.id);
     await waitFor(() => expect(submitSignal?.aborted).toBe(true));
   });
 

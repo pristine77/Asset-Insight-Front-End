@@ -182,6 +182,19 @@ describe("CRM task detail", () => {
     expect(screen.getByRole("link", { name: "Open event" })).toHaveAttribute("href", "https://outlook.example.test/event");
   });
 
+  it("does not label a queued Outlook sync as added or allow an immediate duplicate", async () => {
+    service.addTaskToOutlookCalendar.mockResolvedValue({ pending: true, message: "This follow-up is already queued for Outlook." });
+    setup();
+    fireEvent.click(await screen.findByRole("button", { name: "Add to Outlook" }));
+    const pending = await screen.findByRole("button", { name: "Outlook sync pending" });
+    expect(pending).toBeDisabled();
+    expect(screen.getByText("This follow-up is already queued for Outlook.")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Added to Outlook" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: "Open event" })).not.toBeInTheDocument();
+    fireEvent.click(pending);
+    expect(service.addTaskToOutlookCalendar).toHaveBeenCalledTimes(1);
+  });
+
   it("does not create an event after a late calendar connection response on a closed task", async () => {
     let resolveStatus!: (value: { connected: boolean }) => void;
     service.getOutlookCalendarStatus.mockReturnValue(new Promise((done) => { resolveStatus = done; }));

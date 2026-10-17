@@ -2,6 +2,8 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import UploadContinuationPanel from '../UploadContinuationPanel';
 import durableContinuationService from '../../services/durableContinuationService';
 import OfflineCaptureStore from '../../services/offlineCaptureStore';
+import { getAuthOperationEpoch } from '../../services/authSessionOperation';
+import { auctioneerErrorMessage } from '../../services/auctioneerErrors';
 import {
   ActivityIndicator,
   FlatList,
@@ -16,6 +18,7 @@ import auctioneerService, {
   type AuctioneerIncomingItem,
   type AuctioneerReportType,
   type AuctioneerWorkItemSetup,
+  isEditableAuctioneerSetup,
 } from '../../services/auctioneerService';
 import AssetFormSheet from '../forms/AssetFormSheet';
 import LotListingFormSheet from '../forms/LotListingFormSheet';
@@ -25,7 +28,7 @@ interface Props {
   onOpenReport: (reportId: string, reportType: AuctioneerReportType) => void;
 }
 
-/** Modern assigned contracts stay separate from legacy Auctionsoft task IDs. */
+/** Matches the web queue: sent work is Completed; every other state stays Outstanding. */
 export default function AuctioneerIncoming({ refreshVersion = 0, onOpenReport }: Props) {
   const { colors } = useAppTheme();
   const styles = useMemo(() => createStyles(colors), [colors]);
@@ -33,6 +36,8 @@ export default function AuctioneerIncoming({ refreshVersion = 0, onOpenReport }:
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [enabled, setEnabled] = useState(false);
+  const [queueTab, setQueueTab] = useState<'outstanding' | 'completed'>('outstanding');
+  const [unavailableMessage, setUnavailableMessage] = useState('');
   const [error, setError] = useState('');
   const [opening, setOpening] = useState<string | null>(null);
   const [setup, setSetup] = useState<AuctioneerWorkItemSetup | null>(null);
@@ -43,28 +48,45 @@ export default function AuctioneerIncoming({ refreshVersion = 0, onOpenReport }:
 
   const load = useCallback(async (refresh = false) => {
     const revision = ++readRevision.current;
+    const owner = OfflineCaptureStore.getOwnerId();
+    const authEpoch = getAuthOperationEpoch();
+    const isCurrent = () =>
+      mounted.current &&
+      revision === readRevision.current &&
+      owner === OfflineCaptureStore.getOwnerId() &&
+      authEpoch === getAuthOperationEpoch();
     setError('');
     if (refresh) setRefreshing(true);
     else setLoading(true);
     try {
       const status = await auctioneerService.getStatus();
-      if (!mounted.current || revision !== readRevision.current) return;
+      if (!isCurrent()) return;
       const available = status.enabled && status.configured;
       setEnabled(available);
+      setUnavailableMessage(
+        !status.enabled
+          ? 'Incoming is currently disabled for your account. Contact your administrator.'
+          : !status.configured
+            ? 'Incoming needs an Auctioneer connection. Contact your administrator to configure it.'
+            : ''
+      );
       if (!available) {
         setItems([]);
         return;
       }
       const next = await auctioneerService.getIncoming(refresh);
-      if (mounted.current && revision === readRevision.current) setItems(next);
+      if (isCurrent()) setItems(next);
     } catch (cause) {
-      if (mounted.current && revision === readRevision.current) {
+      if (isCurrent()) {
         setError(
-          cause instanceof Error ? cause.message : 'Could not load assigned contracts. Try again.'
+          auctioneerErrorMessage(
+            cause,
+            'Could not load assigned contracts. Check your connection and retry.'
+          )
         );
       }
     } finally {
-      if (mounted.current && revision === readRevision.current) {
+      if (isCurrent()) {
         setLoading(false);
         setRefreshing(false);
       }
@@ -85,29 +107,43 @@ export default function AuctioneerIncoming({ refreshVersion = 0, onOpenReport }:
       if (claimLock.current || (item.status !== 'available' && !item.claimedByMe)) return;
       claimLock.current = true;
       const owner = OfflineCaptureStore.getOwnerId();
+      const authEpoch = getAuthOperationEpoch();
+      const isCurrent = () =>
+        mounted.current &&
+        OfflineCaptureStore.getOwnerId() === owner &&
+        getAuthOperationEpoch() === authEpoch;
       setOpening(item.cycleKey);
       setError('');
       try {
         const next = item.workItemId
           ? await auctioneerService.getSetup(item.workItemId)
           : await auctioneerService.claim(item.cycleKey, reportType);
-        if (!mounted.current || OfflineCaptureStore.getOwnerId() !== owner) return;
+        if (!isCurrent()) return;
         if (next.reportId) onOpenReport(next.reportId, next.reportType);
         else {
-          const savedDraft = owner ? await durableContinuationService.successorDraft(next.workItemId) : undefined;
-          if (!mounted.current || OfflineCaptureStore.getOwnerId() !== owner) return;
-          setDraftId(savedDraft); setSetup(next); // The boundary rechecks claimed/unused state.
+          if (!isEditableAuctioneerSetup(next, reportType)) {
+            throw new Error(
+              'This work is no longer available for a new capture. Refresh Incoming to check its report.'
+            );
+          }
+          const savedDraft = owner
+            ? await durableContinuationService.successorDraft(next.workItemId)
+            : undefined;
+          if (!isCurrent()) return;
+          setDraftId(savedDraft);
+          setSetup(next); // The boundary rechecks claimed/unused state.
         }
       } catch (cause) {
-        if (mounted.current)
+        if (isCurrent())
           setError(
-            cause instanceof Error
-              ? cause.message
-              : 'Could not open this contract. Refresh Incoming and try again.'
+            auctioneerErrorMessage(
+              cause,
+              'Could not open this contract. Refresh Incoming and try again.'
+            )
           );
       } finally {
         claimLock.current = false;
-        if (mounted.current) setOpening(null);
+        if (isCurrent()) setOpening(null);
       }
     },
     [onOpenReport]
@@ -130,6 +166,7 @@ export default function AuctioneerIncoming({ refreshVersion = 0, onOpenReport }:
     ({ item }: { item: AuctioneerIncomingItem }) => {
       const busy = opening !== null;
       const claimedElsewhere = item.status !== 'available' && !item.claimedByMe;
+      const unavailable = claimedElsewhere || item.status === 'abandoned';
       return (
         <View style={styles.card}>
           <View style={styles.row}>
@@ -139,12 +176,28 @@ export default function AuctioneerIncoming({ refreshVersion = 0, onOpenReport }:
             )}
           </View>
           {!!item.customerName && <Text style={styles.meta}>{item.customerName}</Text>}
+          {!!item.consignorName && <Text style={styles.meta}>Consignor: {item.consignorName}</Text>}
+          {!!item.salespersonName && (
+            <Text style={styles.meta}>Salesperson: {item.salespersonName}</Text>
+          )}
+          {!!item.description && <Text style={styles.meta}>Description: {item.description}</Text>}
           {!!item.eventTitle && <Text style={styles.meta}>{item.eventTitle}</Text>}
           {!!item.location && <Text style={styles.meta}>{item.location}</Text>}
           <Text style={styles.meta}>
             {item.kind === 'scheduleA' ? `${item.lotCount} imported lots` : 'New lot capture'}
           </Text>
-          {claimedElsewhere ? (
+          <Text style={styles.status}>
+            {item.status === 'sent'
+              ? 'Sent to Auctioneer'
+              : item.status === 'available'
+                ? 'Available'
+                : item.status === 'claimed'
+                  ? 'Capture in progress'
+                  : item.status === 'abandoned'
+                    ? 'Claim released'
+                    : 'Report created'}
+          </Text>
+          {unavailable ? (
             <Text style={styles.meta}>This work is not available to open.</Text>
           ) : (
             <View style={styles.actions}>
@@ -184,10 +237,14 @@ export default function AuctioneerIncoming({ refreshVersion = 0, onOpenReport }:
     [colors.accent, open, opening, styles]
   );
 
+  const completedItems = items.filter((item) => item.status === 'sent');
+  const outstandingItems = items.filter((item) => item.status !== 'sent');
+  const visibleItems = queueTab === 'completed' ? completedItems : outstandingItems;
+
   return (
     <View style={styles.container}>
       <FlatList
-        data={enabled ? items : []}
+        data={enabled ? visibleItems : []}
         keyExtractor={(item) => item.workItemId || item.cycleKey}
         renderItem={renderItem}
         contentContainerStyle={styles.content}
@@ -201,14 +258,35 @@ export default function AuctioneerIncoming({ refreshVersion = 0, onOpenReport }:
         }
         ListHeaderComponent={
           <View style={styles.intro}>
-            <Text style={styles.heading}>Auctioneer 2.0 · Assigned contracts</Text>
+            <Text style={styles.heading}>Assigned contract queue</Text>
             <Text style={styles.meta}>
-              Open an Asset or Lot Listing. Generate files & new lot keeps this contract for your
-              next report.
+              Open an Asset or Lot Listing. Create Lot & Continue keeps this contract for your next
+              report.
             </Text>
+            <View style={styles.tabs} accessibilityRole="tablist">
+              {(['outstanding', 'completed'] as const).map((tab) => (
+                <TouchableOpacity
+                  key={tab}
+                  accessibilityRole="tab"
+                  accessibilityLabel={`${tab === 'outstanding' ? 'Outstanding' : 'Completed'} contracts`}
+                  accessibilityState={{ selected: queueTab === tab }}
+                  onPress={() => setQueueTab(tab)}
+                  style={[styles.tab, queueTab === tab && styles.selectedTab]}>
+                  <Text style={[styles.tabText, queueTab === tab && styles.selectedTabText]}>
+                    {tab === 'outstanding' ? 'Outstanding' : 'Completed'} (
+                    {tab === 'outstanding' ? outstandingItems.length : completedItems.length})
+                  </Text>
+                </TouchableOpacity>
+              ))}
+            </View>
             {!!error && (
               <View accessibilityLiveRegion="polite" style={styles.error}>
                 <Text style={styles.errorText}>{error}</Text>
+                {items.length > 0 && (
+                  <Text style={styles.meta}>
+                    Showing the last loaded contracts. Retry to check for updates.
+                  </Text>
+                )}
                 <TouchableOpacity
                   accessibilityRole="button"
                   accessibilityLabel="Retry assigned contracts"
@@ -218,7 +296,12 @@ export default function AuctioneerIncoming({ refreshVersion = 0, onOpenReport }:
                 </TouchableOpacity>
               </View>
             )}
-            <UploadContinuationPanel onOpen={(id, _type, next) => { setDraftId(id); setSetup(next); }} />
+            <UploadContinuationPanel
+              onOpen={(id, _type, next) => {
+                setDraftId(id);
+                setSetup(next);
+              }}
+            />
           </View>
         }
         ListEmptyComponent={
@@ -230,8 +313,10 @@ export default function AuctioneerIncoming({ refreshVersion = 0, onOpenReport }:
           ) : !error ? (
             <Text style={styles.meta}>
               {enabled
-                ? 'No assigned contracts are waiting. Pull down to refresh.'
-                : 'Auctioneer 2.0 is not enabled or configured on the server. Legacy Auctionsoft tasks remain available.'}
+                ? queueTab === 'completed'
+                  ? 'No reports have been sent to Auctioneer yet. Completed shows sent work, not contract closure.'
+                  : 'No outstanding contracts are waiting. Pull down to refresh.'
+                : unavailableMessage}
             </Text>
           ) : null
         }
@@ -266,6 +351,22 @@ const createStyles = (colors: AppThemeColors) =>
     content: { padding: 16, paddingBottom: 32, width: '100%', maxWidth: 920, alignSelf: 'center' },
     intro: { gap: 8, marginBottom: 16 },
     heading: { fontSize: 17, fontWeight: '700', color: colors.text },
+    tabs: { flexDirection: 'row', gap: 8, marginVertical: 8 },
+    tab: {
+      flex: 1,
+      minHeight: 44,
+      padding: 10,
+      justifyContent: 'center',
+      alignItems: 'center',
+      borderWidth: 1,
+      borderColor: colors.border,
+      borderRadius: 8,
+      backgroundColor: colors.surface,
+    },
+    selectedTab: { borderColor: colors.accent, backgroundColor: colors.accent },
+    tabText: { fontSize: 13, fontWeight: '700', color: colors.textSecondary, textAlign: 'center' },
+    selectedTabText: { color: colors.accentText },
+    status: { fontSize: 12, fontWeight: '700', color: colors.textSecondary },
     card: {
       padding: 14,
       borderWidth: 1,

@@ -734,44 +734,6 @@ const getDraftNormalizedContractNo = (draft: Partial<OfflineReportDraft>) =>
     draft.normalizedContractNo || draft.contractNo || draft.formData?.contractNo
   );
 
-const isWorkItemDraft = (formData?: Partial<AutoSaveFormData>) =>
-  Boolean(formData?.auctioneerWorkItemId || formData?.auctionManagementTaskId || formData?.auctionsoft);
-
-/**
- * Empty duplicate drafts (owner, 2026-10-11 phone test). Typing a contract
- * number saves a draft after 2 s, so a form closed before any photo was taken
- * leaves a draft holding only typed details, and opening the form again starts
- * a new draft. Both were listed here and both were copied to the cloud.
- *
- * When a draft gets its first photo or video, older drafts of the same report
- * type and contract number that hold no photos or video are discarded (hidden,
- * exactly as the Drafts screen's Discard does). Only drafts with nothing a
- * person could lose are touched: never submitted or being submitted, never
- * copied to the cloud, not an Offline capture, not Incoming or Auction
- * Management work. Several reports for one contract stay possible -- only
- * empty leftovers go. Best effort: it never fails the save that called it.
- */
-async function discardEmptyDraftsSupersededBy(saved: OfflineReportDraft): Promise<void> {
-  const ownerId = saved.ownerId;
-  const contract = getDraftNormalizedContractNo(saved);
-  if (!ownerId || !contract || saved.captureMode === 'offline' || isWorkItemDraft(saved.formData)) return;
-  const summaries = await OfflineCaptureStore.listSummaries(saved.type);
-  const savedCreated = new Date(saved.createdAt).getTime();
-  for (const row of summaries) {
-    if (OfflineCaptureStore.getOwnerId() !== ownerId) return;
-    if (row.id === saved.id || (row.ownerId && row.ownerId !== ownerId)) continue;
-    if (normalizeDraftContractNo(row.contractNo) !== contract) continue;
-    if ((row.submissionState || 'local') !== 'local' || row.captureMode === 'offline' || row.manualSubmissionRequired) continue;
-    if (row.counts.images > 0 || row.counts.videos > 0) continue;
-    // Only a leftover from before this draft; never a draft started since.
-    if (!(new Date(row.createdAt).getTime() < savedCreated)) continue;
-    const full = await OfflineCaptureStore.getDraft(row.id);
-    if (!full || full.cloudId || full.cloudSyncedAt || isWorkItemDraft(full.formData) || countDraftMedia(full) > 0) continue;
-    if (OfflineCaptureStore.getOwnerId() !== ownerId) return;
-    await OfflineCaptureStore.setSubmissionState(row.id, 'discarded');
-  }
-}
-
 const draftTitleFor = (type: OfflineDraftType, formData: AutoSaveFormData, fallback?: string) => {
   const trimmedFallback = fallback?.trim();
   if (trimmedFallback) return trimmedFallback;
@@ -955,12 +917,8 @@ export const AutoSaveService = {
       cloudSyncLastAttemptAt: current.cloudSyncLastAttemptAt,
     }), args.explicitActivitySave) : await OfflineCaptureStore.saveDraft(draft, args.explicitActivitySave);
     await flushBackupHandoff();
-    // The first photo or video of this draft: discard older empty drafts of the
-    // same contract (discardEmptyDraftsSupersededBy). Once per draft, so the
-    // 2 s autosave does not re-check on every save.
-    if (persistedMedia > 0 && (!existing || countDraftMedia(existing) === 0)) {
-      await discardEmptyDraftsSupersededBy(saved).catch(() => undefined);
-    }
+    // A contract number is not draft identity. Even a photo-free draft can
+    // contain valuable typed work, so saving this draft never hides another.
     return saved;
     });
   },

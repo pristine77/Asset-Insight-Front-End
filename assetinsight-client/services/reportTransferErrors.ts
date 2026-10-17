@@ -71,7 +71,7 @@ export function assertReportUploadAccepted(value: unknown): void {
   const phase = typeof receipt.phase === "string" ? receipt.phase.toLowerCase() : "";
   const finalState = ["processing", "queued", "processed", "preview", "done", "completed", "error", "failed"].includes(status) || ["processing", "done", "error"].includes(phase);
   const hasJob = typeof receipt.jobId === "string" && Boolean(receipt.jobId.trim());
-  if (typeof reportId !== "string" || !reportId.trim() || receipt.accepted === false || receipt.reportAvailable === false || response.code === "UPLOAD_SESSION_REPORT_UNAVAILABLE" || ["upload", "uploading", "preparing", "unavailable"].includes(status) || phase === "upload" || receipt.readyToComplete === true || !(receipt.accepted === true || (hasJob && finalState))) {
+  if (typeof reportId !== "string" || !reportId.trim() || response.accepted === false || response.reportAvailable === false || receipt.accepted === false || receipt.reportAvailable === false || response.code === "UPLOAD_SESSION_REPORT_UNAVAILABLE" || receipt.code === "UPLOAD_SESSION_REPORT_UNAVAILABLE" || ["upload", "uploading", "preparing", "unavailable"].includes(status) || phase === "upload" || receipt.readyToComplete === true || !(receipt.accepted === true || (hasJob && finalState))) {
     throw new Error("The server did not confirm report acceptance. Retry this same upload; do not recreate the report.");
   }
 }

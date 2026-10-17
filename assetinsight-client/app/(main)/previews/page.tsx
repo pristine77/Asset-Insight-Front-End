@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import dynamic from "next/dynamic";
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 import {
   ArrowRight,
@@ -883,12 +884,12 @@ export default function PreviewsPage() {
                 </p>
                 {activeTab === "new" && submittedReports.length > 0 ? <button type="button" className={`${styles.action} ${styles.actionPrimary} ${styles.emptyAction}`} onClick={() => setActiveTab("submitted")}>View submitted previews ({submittedReports.length})</button> : null}
                 {activeTab === "new" && !loadIssues.length && submittedReports.length === 0 ? (
-                  <a
+                  <Link
                     href="/dashboard"
                     className={`${styles.action} ${styles.actionPrimary} ${styles.emptyAction}`}
                   >
                     Create new report
-                  </a>
+                  </Link>
                 ) : null}
               </div>
             </div>

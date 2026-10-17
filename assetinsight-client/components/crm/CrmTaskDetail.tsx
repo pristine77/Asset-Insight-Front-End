@@ -42,6 +42,7 @@ function TaskDetailSession({ taskId, ownerId, user, onClose, onChanged }: CrmTas
   const [transferNote, setTransferNote] = useState("");
   const [calendarLink, setCalendarLink] = useState<string | undefined>();
   const [calendarExported, setCalendarExported] = useState(false);
+  const [calendarPending, setCalendarPending] = useState(false);
   const [emailDirty, setEmailDirty] = useState(false);
   const [historyDirty, setHistoryDirty] = useState(false);
   const [discardTarget, setDiscardTarget] = useState<"close" | "task" | "email" | "transfer" | "activity" | "details" | null>(null);
@@ -150,7 +151,7 @@ function TaskDetailSession({ taskId, ownerId, user, onClose, onChanged }: CrmTas
   }
 
   async function exportCalendar() {
-    if (calendarExported) return;
+    if (calendarExported || calendarPending) return;
     await runAction(async () => {
       const connection = await read((signal) => CrmService.getOutlookCalendarStatus({ signal }));
       if (!mounted.current) throw new DOMException("Task closed", "AbortError");
@@ -162,6 +163,12 @@ function TaskDetailSession({ taskId, ownerId, user, onClose, onChanged }: CrmTas
         throw cause;
       }
     }, (result) => {
+      if ("pending" in result && result.pending) {
+        setCalendarPending(true);
+        setCalendarLink(undefined);
+        setNotice(result.message);
+        return;
+      }
       setCalendarExported(true);
       setCalendarLink(safeCrmUrl(result.webLink));
       setNotice("Task added to Outlook.");
@@ -229,9 +236,9 @@ function TaskDetailSession({ taskId, ownerId, user, onClose, onChanged }: CrmTas
             <button type="button" className="app-button app-button--secondary" disabled={busy || !phones.length} aria-expanded={showPhones} onClick={() => setShowPhones((current) => !current)}><Phone size={17} aria-hidden />Call</button>
             <button type="button" className="app-button app-button--secondary" disabled={busy} onClick={() => showView("email")}><Mail size={17} aria-hidden />Email</button>
             <button type="button" className="app-button app-button--secondary" disabled={busy || !online} onClick={() => showView("transfer")}><ArrowRightLeft size={17} aria-hidden />Transfer</button>
-            <button type="button" className="app-button app-button--secondary" disabled={busy || !online || calendarExported} onClick={() => void exportCalendar()}><Calendar size={17} aria-hidden />{calendarExported ? "Added to Outlook" : "Add to Outlook"}</button>
+            <button type="button" className="app-button app-button--secondary" disabled={busy || !online || calendarExported || calendarPending} onClick={() => void exportCalendar()}><Calendar size={17} aria-hidden />{calendarPending ? "Outlook sync pending" : calendarExported ? "Added to Outlook" : "Add to Outlook"}</button>
           </div>
-          <p className={styles.muted}>Each Outlook export creates a new calendar event.</p>
+          <p className={styles.muted}>Follow-ups refresh their existing event; other tasks create a new calendar event.</p>
           {showPhones ? <div className={styles.phoneList} aria-label="Choose a phone number">{phones.map((phone) => <a className={styles.textButton} key={phone.href} href={phone.href}><Phone size={14} aria-hidden /><span>{phone.value} <span className={styles.muted}>({phone.label})</span></span></a>)}</div> : null}
         </header>
         {view === "email" ? <CrmEmailComposer clientName={task.clientName} email={task.email} user={user} onBack={() => showView("task")} onDirtyChange={setEmailDirty} /> : null}

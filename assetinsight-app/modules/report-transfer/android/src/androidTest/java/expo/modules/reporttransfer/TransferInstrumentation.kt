@@ -3,6 +3,10 @@ package expo.modules.reporttransfer
 import android.app.Activity
 import android.app.Instrumentation
 import android.app.job.JobScheduler
+import android.app.job.JobInfo
+import android.content.ComponentName
+import android.net.NetworkCapabilities
+import android.net.NetworkRequest
 import android.content.Context
 import android.content.ContextWrapper
 import android.content.Intent
@@ -163,6 +167,28 @@ class TransferInstrumentation : Instrumentation() {
             configure(context)
             val source = plan(original); val id = TransferStore.id("fixture-owner", "fixture-draft", "session-fixture-draft")
             TransferCoordinator.enqueue(context, source)
+            if (Build.VERSION.SDK_INT >= 34) {
+                val scheduler = context.getSystemService(Context.JOB_SCHEDULER_SERVICE) as JobScheduler
+                val job = TransferStore.read(context, id)!!
+                val schedulerId = job.getInt("schedulerId")
+                val scheduled = checkNotNull(scheduler.getPendingJob(schedulerId))
+                check(scheduled.requiredNetwork?.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN) == false) {
+                    "A newly submitted job must allow VPN internet"
+                }
+                // Reproduce an earlier build's queued NOT_VPN constraint. The
+                // normal read/configure path must repair only that queued job.
+                val legacy = JobInfo.Builder(schedulerId, ComponentName(context, TransferJobService::class.java))
+                    .setExtras(scheduled.extras).setPersisted(true).setUserInitiated(true)
+                    .setRequiredNetwork(NetworkRequest.Builder().addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET).build())
+                    .setEstimatedNetworkBytes(1024L * 1024, original.length()).build()
+                check(scheduler.schedule(legacy) == JobScheduler.RESULT_SUCCESS)
+                check(scheduler.getPendingJob(schedulerId)!!.requiredNetwork!!.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN))
+                TransferCoordinator.list(context, "fixture-owner")
+                check(scheduler.getPendingJob(schedulerId)!!.requiredNetwork!!.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN) == false) {
+                    "Previously queued jobs must not stay blocked behind NOT_VPN"
+                }
+                check(TransferStore.read(context, id)!!.getJSONObject("snapshot").toString() == job.getJSONObject("snapshot").toString())
+            }
             TransferCoordinator.cancel(context, TransferStore.read(context, id)!!)
             val reloaded = IsolatedContext(base, root)
             check(TransferCoordinator.list(reloaded, "fixture-owner").single()["totalFiles"] == 1)
@@ -171,6 +197,13 @@ class TransferInstrumentation : Instrumentation() {
             val cacheOriginal = File(base.cacheDir, "unsafe-transfer-fixture.jpg").also { it.writeBytes(bytes) }
             try { expectFailure { TransferCoordinator.enqueue(context, plan(cacheOriginal, "unsafe")) } } finally { cacheOriginal.delete() }
             TransferCoordinator.pause(context, "fixture-owner", "fixture-draft")
+            TransferCoordinator.list(context, "fixture-owner")
+            if (Build.VERSION.SDK_INT >= 34) {
+                val scheduler = context.getSystemService(Context.JOB_SCHEDULER_SERVICE) as JobScheduler
+                check(scheduler.getPendingJob(TransferStore.read(context, id)!!.getInt("schedulerId")) == null) {
+                    "Polling must not requeue an explicitly paused transfer"
+                }
+            }
             check(TransferEngine.run(context, id) == TransferEngine.Outcome.DONE)
             check(TransferStore.read(context, id)!!.getString("status") == "paused")
             TransferCoordinator.resume(context, "fixture-owner", "fixture-draft", null)

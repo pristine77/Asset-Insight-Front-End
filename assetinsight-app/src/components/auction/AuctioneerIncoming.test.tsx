@@ -10,6 +10,7 @@ import auctioneerService, {
 } from '../../services/auctioneerService';
 import legacyService from '../../services/auctionManagementService';
 import OfflineCaptureStore from '../../services/offlineCaptureStore';
+import { invalidateAuthOperations } from '../../services/authSessionOperation';
 
 let mockPanelOwner: string | undefined;
 
@@ -26,6 +27,8 @@ jest.mock('../../context/AuthContext', () => ({
 }));
 jest.mock('../../services/auctioneerService', () => ({
   __esModule: true,
+  isEditableAuctioneerSetup: jest.requireActual('../../services/auctioneerService')
+    .isEditableAuctioneerSetup,
   default: { getStatus: jest.fn(), getIncoming: jest.fn(), getSetup: jest.fn(), claim: jest.fn() },
 }));
 jest.mock('../../services/auctionManagementService', () => ({
@@ -119,14 +122,29 @@ beforeEach(() => {
 it('keeps pending Continue recovery inside the assigned-contract scroll list on short screens', async () => {
   mockPanelOwner = 'owner';
   const owner = jest.spyOn(OfflineCaptureStore, 'getOwnerId').mockReturnValue('owner');
-  const rows = jest.spyOn(OfflineCaptureStore, 'listContinuations').mockResolvedValue([{ id: 'pending', ownerId: 'owner', type: 'asset', stage: 'staged', parentSetup: { contract: { contractNo: 'pending-contract' } } }] as any);
+  const rows = jest
+    .spyOn(OfflineCaptureStore, 'listContinuations')
+    .mockResolvedValue([
+      {
+        id: 'pending',
+        ownerId: 'owner',
+        type: 'asset',
+        stage: 'staged',
+        parentSetup: { contract: { contractNo: 'pending-contract' } },
+      },
+    ] as any);
   try {
     await render(<AuctioneerIncoming onOpenReport={jest.fn()} />);
-    const button = await screen.findByRole('button', { name: 'Retry next lot for pending-contract' });
+    const button = await screen.findByRole('button', {
+      name: 'Retry next lot for pending-contract',
+    });
     const ancestors: string[] = [];
     for (let parent = button.parent; parent; parent = parent.parent) ancestors.push(parent.type);
-    expect(ancestors.some(type => /ScrollView/.test(type))).toBe(true);
-  } finally { owner.mockRestore(); rows.mockRestore(); }
+    expect(ancestors.some((type) => /ScrollView/.test(type))).toBe(true);
+  } finally {
+    owner.mockRestore();
+    rows.mockRestore();
+  }
 });
 
 it.each(['asset', 'lotListing'] as const)(
@@ -178,25 +196,21 @@ it('replaces an accepted form with the returned successor without claiming again
 });
 
 it('opens an already-used work item as its saved report, not a new capture', async () => {
-  jest
-    .mocked(auctioneerService.getIncoming)
-    .mockResolvedValue([
-      {
-        ...available,
-        status: 'report_created',
-        claimedByMe: true,
-        workItemId: 'work-1',
-        selectedReportType: 'lotListing',
-      },
-    ]);
-  jest
-    .mocked(auctioneerService.getSetup)
-    .mockResolvedValue({
-      ...setup,
-      reportType: 'lotListing',
+  jest.mocked(auctioneerService.getIncoming).mockResolvedValue([
+    {
+      ...available,
       status: 'report_created',
-      reportId: 'saved-report',
-    });
+      claimedByMe: true,
+      workItemId: 'work-1',
+      selectedReportType: 'lotListing',
+    },
+  ]);
+  jest.mocked(auctioneerService.getSetup).mockResolvedValue({
+    ...setup,
+    reportType: 'lotListing',
+    status: 'report_created',
+    reportId: 'saved-report',
+  });
   const onOpenReport = jest.fn();
   await render(<AuctioneerIncoming onOpenReport={onOpenReport} />);
   await fireEvent.press(await screen.findByRole('button', { name: 'Open contract 93530' }));
@@ -208,7 +222,7 @@ it('opens an already-used work item as its saved report, not a new capture', asy
 it('does not load contracts when the backend feature is disabled', async () => {
   jest.mocked(auctioneerService.getStatus).mockResolvedValue({ configured: true, enabled: false });
   await render(<AuctioneerIncoming onOpenReport={jest.fn()} />);
-  expect(await screen.findByText(/not enabled or configured/)).toBeTruthy();
+  expect(await screen.findByText(/currently disabled for your account/)).toBeTruthy();
   expect(auctioneerService.getIncoming).not.toHaveBeenCalled();
 });
 
@@ -233,15 +247,143 @@ it('does not expose open actions for work claimed by another user', async () => 
   expect(screen.queryByRole('button', { name: /Open contract/ })).toBeNull();
 });
 
-it('keeps legacy Auctionsoft as the default and loads modern contracts only when selected', async () => {
+it('opens the current assigned queue directly without the legacy localhost proxy', async () => {
   await render(<AuctionManagementScreen onOpenDrawer={jest.fn()} onOpenReport={jest.fn()} />);
-  expect(legacyService.getTasks).toHaveBeenCalledWith('incoming');
-  expect(auctioneerService.getStatus).not.toHaveBeenCalled();
-  await fireEvent.press(screen.getByRole('tab', { name: 'Auctioneer 2.0 contracts' }));
   expect(await screen.findByText('Contract 93530')).toBeTruthy();
+  expect(legacyService.getTasks).not.toHaveBeenCalled();
+  expect(legacyService.getTask).not.toHaveBeenCalled();
   expect(auctioneerService.getStatus).toHaveBeenCalledTimes(1);
-  await fireEvent.press(screen.getByRole('tab', { name: 'Legacy Auctionsoft tasks' }));
-  expect(screen.queryByText('Contract 93530')).toBeNull();
+  expect(screen.queryByText('Auctionsoft')).toBeNull();
+  await fireEvent.press(screen.getByRole('button', { name: 'Refresh incoming contracts' }));
+  expect(auctioneerService.getIncoming).toHaveBeenLastCalledWith(true);
+  expect(legacyService.getTasks).not.toHaveBeenCalled();
+});
+
+it('matches Pristine web Outstanding and Completed without hiding unsent or released claims', async () => {
+  jest
+    .mocked(auctioneerService.getIncoming)
+    .mockResolvedValue([
+      available,
+      {
+        ...available,
+        cycleKey: 'sent',
+        contractNo: '90002',
+        status: 'sent',
+        claimedByMe: true,
+        workItemId: 'sent-work',
+      },
+      {
+        ...available,
+        cycleKey: 'created',
+        contractNo: '90003',
+        status: 'report_created',
+        claimedByMe: true,
+        workItemId: 'created-work',
+      },
+      {
+        ...available,
+        cycleKey: 'released',
+        contractNo: '90004',
+        status: 'abandoned',
+        claimedByMe: true,
+      },
+    ]);
+  await render(<AuctioneerIncoming onOpenReport={jest.fn()} />);
+  expect(await screen.findByText('Outstanding (3)')).toBeTruthy();
+  expect(screen.getByText('Completed (1)')).toBeTruthy();
+  expect(screen.getByText('Contract 90003')).toBeTruthy();
+  expect(screen.getByText('Contract 90004')).toBeTruthy();
+  expect(screen.queryByRole('button', { name: 'Open contract 90004' })).toBeNull();
+  expect(screen.queryByText('Contract 90002')).toBeNull();
+  await fireEvent.press(screen.getByRole('tab', { name: 'Completed contracts' }));
+  expect(screen.getByText('Contract 90002')).toBeTruthy();
+  expect(screen.getByText('Sent to Auctioneer')).toBeTruthy();
+  expect(screen.queryByText('Contract 90003')).toBeNull();
+  jest
+    .mocked(auctioneerService.getSetup)
+    .mockResolvedValue({ ...setup, reportId: 'saved-sent', status: 'sent' });
+  const open = screen.getByRole('button', { name: 'Open contract 90002' });
+  await fireEvent.press(open);
+  expect(auctioneerService.getSetup).toHaveBeenCalledWith('sent-work');
+  expect(auctioneerService.claim).not.toHaveBeenCalled();
+});
+
+it('shows contract description and explicit contact roles from the API', async () => {
+  jest
+    .mocked(auctioneerService.getIncoming)
+    .mockResolvedValue([
+      {
+        ...available,
+        description: 'Farm equipment',
+        consignorName: 'Consignor name',
+        salespersonName: 'Salesperson name',
+      },
+    ]);
+  await render(<AuctioneerIncoming onOpenReport={jest.fn()} />);
+  expect(await screen.findByText('Description: Farm equipment')).toBeTruthy();
+  expect(screen.getByText('Consignor: Consignor name')).toBeTruthy();
+  expect(screen.getByText('Salesperson: Salesperson name')).toBeTruthy();
+});
+
+it('shows Retry instead of an empty success state or internal URL when the provider fails', async () => {
+  jest
+    .mocked(auctioneerService.getIncoming)
+    .mockRejectedValueOnce({
+      response: {
+        status: 502,
+        data: {
+          message:
+            'Could not reach Auctionsoft at http://127.0.0.1:3331/api/integrations/auction-management/tasks: fetch failed',
+        },
+      },
+    });
+  await render(<AuctioneerIncoming onOpenReport={jest.fn()} />);
+  expect(await screen.findByText(/server could not connect to Auctioneer/)).toBeTruthy();
+  expect(screen.queryByText(/127\.0\.0\.1|fetch failed|No outstanding/)).toBeNull();
+  await fireEvent.press(screen.getByRole('button', { name: 'Retry assigned contracts' }));
+  expect(await screen.findByText('Contract 93530')).toBeTruthy();
+});
+
+it('retains previously loaded contracts while a refresh fails', async () => {
+  await render(<AuctionManagementScreen onOpenDrawer={jest.fn()} onOpenReport={jest.fn()} />);
+  await screen.findByText('Contract 93530');
+  jest.mocked(auctioneerService.getIncoming).mockRejectedValueOnce(new Error('Network Error'));
+  await fireEvent.press(screen.getByRole('button', { name: 'Refresh incoming contracts' }));
+  expect(await screen.findByText(/Showing the last loaded contracts/)).toBeTruthy();
+  expect(screen.getByText('Contract 93530')).toBeTruthy();
+  expect(screen.queryByText(/No outstanding/)).toBeNull();
+});
+
+it('does not open a blank form when a saved work item is no longer editable', async () => {
+  jest
+    .mocked(auctioneerService.getSetup)
+    .mockResolvedValue({ ...setup, status: 'sent', reportId: undefined });
+  jest
+    .mocked(auctioneerService.getIncoming)
+    .mockResolvedValue([
+      { ...available, status: 'report_created', claimedByMe: true, workItemId: 'work-1' },
+    ]);
+  await render(<AuctioneerIncoming onOpenReport={jest.fn()} />);
+  await fireEvent.press(await screen.findByRole('button', { name: 'Open contract 93530' }));
+  expect(await screen.findByText(/no longer available for a new capture/)).toBeTruthy();
+  expect(screen.queryByText('Asset form work-1')).toBeNull();
+});
+
+it('ignores a late failed claim after the sign-in session changes', async () => {
+  let reject!: (cause: unknown) => void;
+  jest.mocked(auctioneerService.claim).mockReturnValue(
+    new Promise((_, fail) => {
+      reject = fail;
+    })
+  );
+  await render(<AuctioneerIncoming onOpenReport={jest.fn()} />);
+  await fireEvent.press(
+    await screen.findByRole('button', { name: 'Open contract 93530 as Asset' })
+  );
+  invalidateAuthOperations();
+  await act(async () => reject(new Error('Previous account private error')));
+  expect(screen.queryByText('Previous account private error')).toBeNull();
+  expect(screen.queryByText('Asset form work-1')).toBeNull();
 });
 
 it('provides a reachable Incoming entry in the listing drawer', async () => {

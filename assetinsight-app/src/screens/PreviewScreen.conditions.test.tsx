@@ -1,7 +1,7 @@
 import React from 'react';
-import { Alert, Platform, StyleSheet } from 'react-native';
+import { Alert, Platform, ScrollView, StyleSheet, View } from 'react-native';
 import * as ImagePicker from 'expo-image-picker';
-import { act, fireEvent, render, screen, waitFor } from '@testing-library/react-native';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react-native';
 import PreviewScreen from './PreviewScreen';
 import api from '../services/api';
 
@@ -32,8 +32,8 @@ jest.mock('../services/api', () => ({
   __esModule: true,
   default: { get: jest.fn(), put: jest.fn(), post: jest.fn() },
 }));
-jest.mock('../services/assetService', () => ({ __esModule: true, default: { regenerateLot: jest.fn() } }));
-jest.mock('../services/lotListingService', () => ({ __esModule: true, default: { regenerateLot: jest.fn() } }));
+jest.mock('../services/assetService', () => ({ __esModule: true, default: {} }));
+jest.mock('../services/lotListingService', () => ({ __esModule: true, default: {} }));
 jest.mock('../services/assignedApprovalService', () => ({ __esModule: true, default: {} }));
 jest.mock('../components/FarmlandValuationSummary', () => () => null);
 
@@ -99,6 +99,120 @@ beforeEach(() => {
 });
 afterEach(() => jest.restoreAllMocks());
 
+it.each(['Asset', 'LotListing'] as const)('hides narrative inputs but preserves their saved data when editing the %s Title', async reportType => {
+  saved = fixture(2);
+  const original = structuredClone(saved);
+  const view = await render(<PreviewScreen reportId="title-authority" reportType={reportType} mode="pending" onBack={onBack} />);
+  await screen.findByLabelText('Lot 1 title');
+  expect(screen.queryByLabelText('Lot 1 description')).toBeNull();
+  expect(screen.queryByLabelText('Lot 1 details')).toBeNull();
+  expect(screen.getByLabelText('Lot 1, Notes')).toBeTruthy();
+  await fireEvent.changeText(screen.getByLabelText('Lot 1 title'), 'Reviewed title for export TEST');
+  await save();
+  expect(saved.lots[0]).toEqual({ ...original.lots[0], title: 'Reviewed title for export TEST' });
+  expect(saved.lots[1]).toEqual(original.lots[1]);
+  await view.unmount();
+  await render(<PreviewScreen reportId="title-authority" reportType={reportType} mode="pending" onBack={onBack} />);
+  expect((await screen.findByLabelText('Lot 1 title')).props.value).toBe('Reviewed title for export TEST');
+  expect(screen.queryByLabelText('Lot 1 description')).toBeNull();
+  expect(screen.queryByLabelText('Lot 1 details')).toBeNull();
+});
+
+it.each(['Asset', 'LotListing'] as const)('navigates all 142 %s lots and saves all 1824 photo references with first/last edits intact', async reportType => {
+  saved = fixture(142);
+  let nextImage = 0;
+  saved.lots.forEach((lot, index) => {
+    // 120 x 13 + 22 x 12 = 1824 unique photo references, including photos
+    // beyond each card's thumbnail strip. Nothing may be sliced for Save.
+    lot.image_indexes = Array.from({ length: index < 120 ? 13 : 12 }, () => nextImage++);
+    lot.image_urls = lot.image_indexes.map(image => `https://assetinsight.pro/large-report-${image}.jpg`);
+    lot.cover_index = lot.image_indexes[0];
+  });
+  const original = structuredClone(saved);
+  jest.mocked(api.get).mockImplementation(async url => String(url).includes('category-specs')
+    ? { data: { data: { specs: [] } } }
+    : { data: { data: { ...wrapPreview(saved).data.data, imageUrls: saved.lots.flatMap(lot => lot.image_urls) } } });
+  const measure = jest.spyOn(View.prototype, 'measureLayout').mockImplementation(function(this: View, _relative, onSuccess) {
+    onSuccess(0, this.props.testID === 'preview-lot-142' ? 14200 : 100, 320, 500);
+  });
+  const scroll = jest.spyOn(ScrollView.prototype, 'scrollTo');
+  const view = await render(<PreviewScreen reportId="large-report" reportType={reportType} mode="pending" onBack={onBack} />);
+  await screen.findByLabelText('Lot 142 title');
+  expect(screen.getAllByTestId(/^preview-lot-\d+$/)).toHaveLength(142);
+  expect(screen.getByText('1824')).toBeTruthy();
+  const top = within(screen.getByTestId('preview-lot-navigation-top'));
+  const bottom = within(screen.getByTestId('preview-lot-navigation-bottom'));
+  expect(top.getByText('Showing all 142 lots')).toBeTruthy();
+  expect(bottom.getByText('End of all 142 lots')).toBeTruthy();
+  await fireEvent.changeText(screen.getByLabelText('Lot 1 title'), 'First lot edited, keep it');
+  await fireEvent.press(top.getByRole('button', { name: 'Go to last lot' }));
+  expect(scroll).toHaveBeenLastCalledWith({ y: 14200, animated: true });
+  await fireEvent.changeText(screen.getByLabelText('Lot 142 title'), 'Last lot edited, keep it');
+  await fireEvent.press(bottom.getByRole('button', { name: 'Go to first lot' }));
+  expect(scroll).toHaveBeenLastCalledWith({ y: 100, animated: true });
+  expect(measure).toHaveBeenCalledTimes(2);
+  expect(api.post).not.toHaveBeenCalled();
+  expect(api.put).not.toHaveBeenCalled();
+  expect(screen.getByLabelText('Lot 1 title').props.value).toBe('First lot edited, keep it');
+  expect(screen.getByLabelText('Lot 142 title').props.value).toBe('Last lot edited, keep it');
+  await save();
+  expect(api.post).toHaveBeenCalledTimes(1);
+  expect(saved.lots).toHaveLength(142);
+  expect(saved.lots.map(lot => lot.lot_id)).toEqual(original.lots.map(lot => lot.lot_id));
+  expect(saved.lots.map(lot => ({ urls: lot.image_urls, indexes: lot.image_indexes, cover: lot.cover_index })))
+    .toEqual(original.lots.map(lot => ({ urls: lot.image_urls, indexes: lot.image_indexes, cover: lot.cover_index })));
+  expect(new Set(saved.lots.flatMap(lot => lot.image_urls)).size).toBe(1824);
+  expect(saved.lots[0].title).toBe('First lot edited, keep it');
+  expect(saved.lots[141].title).toBe('Last lot edited, keep it');
+  expect(saved.lots.map(lot => ({ description: lot.description, details: lot.details })))
+    .toEqual(original.lots.map(lot => ({ description: lot.description, details: lot.details })));
+  expect(saved.lots.slice(1, 141)).toEqual(original.lots.slice(1, 141));
+  await view.unmount();
+  await render(<PreviewScreen reportId="large-report" reportType={reportType} mode="pending" onBack={onBack} />);
+  await screen.findByLabelText('Lot 142 title');
+  expect(screen.getByLabelText('Lot 1 title').props.value).toBe('First lot edited, keep it');
+  expect(screen.getByLabelText('Lot 142 title').props.value).toBe('Last lot edited, keep it');
+}, 20000);
+
+it('ignores an old lot jump measurement after switching report context', async () => {
+  saved = fixture(2);
+  let measured!: (x: number, y: number, width: number, height: number) => void;
+  jest.spyOn(View.prototype, 'measureLayout').mockImplementation((_relative, onSuccess) => { measured = onSuccess; });
+  const scroll = jest.spyOn(ScrollView.prototype, 'scrollTo');
+  const view = await render(<PreviewScreen reportId="old-report" reportType="Asset" mode="pending" onBack={onBack} />);
+  await screen.findByLabelText('Lot 2 title');
+  await fireEvent.press(within(screen.getByTestId('preview-lot-navigation-top')).getByRole('button', { name: 'Go to last lot' }));
+  await view.rerender(<PreviewScreen reportId="other-report" reportType="Asset" mode="pending" onBack={onBack} />);
+  await screen.findByDisplayValue('Other client');
+  await act(() => measured(0, 14200, 320, 500));
+  expect(scroll).not.toHaveBeenCalled();
+  expect(api.post).not.toHaveBeenCalled();
+});
+
+it.each(['Asset', 'LotListing'] as const)('%s exposes Save without per-lot AI controls and keeps the photo viewer read-only', async reportType => {
+  saved = fixture(1);
+  saved.lots[0].image_urls.push('https://assetinsight.pro/second-photo.jpg');
+  const retained = structuredClone(saved);
+  await render(<PreviewScreen reportId="save-only" reportType={reportType} mode="pending" onBack={onBack} />);
+  await screen.findByDisplayValue('93530');
+  expect(screen.getAllByRole('button', { name: 'Save' })).toHaveLength(1);
+  expect(screen.queryByRole('button', { name: /Re-Generate/i })).toBeNull();
+  await fireEvent.press(screen.getByRole('button', { name: 'Save' }));
+  expect(jest.mocked(Alert.alert).mock.calls.at(-1)?.[1]).toContain('Nothing is re-read by the AI');
+  expect(api.post).not.toHaveBeenCalled();
+  await fireEvent.press(screen.getByRole('button', { name: 'View lot 1 photo 1' }));
+  const viewer = within(screen.getByTestId('preview-photo-viewer'));
+  expect(viewer.queryByRole('button', { name: /remove|delete/i })).toBeNull();
+  expect(viewer.getByText('1 / 2')).toBeTruthy();
+  await fireEvent.press(viewer.getByRole('button', { name: 'Next photo' }));
+  expect(viewer.getByText('2 / 2')).toBeTruthy();
+  await fireEvent.press(viewer.getByRole('button', { name: 'Previous photo' }));
+  await fireEvent.press(viewer.getByRole('button', { name: 'Close photo gallery' }));
+  expect(saved).toEqual(retained);
+  expect(api.post).not.toHaveBeenCalled();
+  expect(api.put).not.toHaveBeenCalled();
+});
+
 it.each(['Asset', 'LotListing'] as const)('opens the %s Android photo picker with broad library access unavailable', async reportType => {
   const previousOS = Platform.OS;
   Platform.OS = 'android';
@@ -123,7 +237,7 @@ it.each(['Asset', 'LotListing'] as const)('opens the %s Android photo picker wit
   }
 });
 
-it.each(['Asset', 'LotListing'] as const)('saves %s with one current snapshot through the single Save action', async reportType => {
+it.each(['Asset', 'LotListing'] as const)('saves and regenerates %s with one current snapshot and no separate save', async reportType => {
   saved = fixture(2);
   jest.mocked(api.get).mockImplementation(async url => String(url).includes('category-specs')
     ? { data: { data: { specs: [] } } }
@@ -134,11 +248,7 @@ it.each(['Asset', 'LotListing'] as const)('saves %s with one current snapshot th
   await render(<PreviewScreen reportId="combined" reportType={reportType} mode="pending" onBack={onBack} onSuccess={success} />);
   const contract = await screen.findByDisplayValue('93530');
   await fireEvent.changeText(contract, 'UPDATED-93530');
-  // The footer carries exactly one save action: no grey "Save preview
-  // changes" button beside it, and no old "Save & ..." generation label.
   expect(screen.queryByRole('button', { name: 'Save preview changes' })).toBeNull();
-  expect(screen.queryByRole('button', { name: /^Save & / })).toBeNull();
-  expect(screen.getAllByRole('button', { name: 'Save' })).toHaveLength(1);
   await fireEvent.press(screen.getByRole('button', { name: 'Save' }));
   const confirm = confirmGeneration();
   await act(() => { void confirm.onPress?.(); void confirm.onPress?.(); });
@@ -204,8 +314,6 @@ const select = (lot: number) =>
   fireEvent.press(screen.getByRole('checkbox', { name: `Select lot ${lot} for bulk update` }));
 const apply = (group: string, value: string) =>
   fireEvent.press(screen.getByRole('button', { name: `${group}: ${value} to selected lots` }));
-// The footer Save confirmation (owner decision 2026-10-11: Save rebuilds the
-// files from the on-screen edits; it is no longer labelled as a generation).
 const confirmGeneration = () => jest.mocked(Alert.alert).mock.calls
   .filter(([title]) => title === 'Save')
   .at(-1)![2]!.find(button => button.text === 'Save')!;

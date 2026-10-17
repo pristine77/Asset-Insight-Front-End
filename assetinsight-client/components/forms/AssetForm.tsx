@@ -53,6 +53,8 @@ import { acceptedAuctioneerReportId } from "./auctioneerContinuation";
 import { assertReportUploadAccepted, canSaveSeparateReportDraft, isPreviousReportReceipt, reportTransferErrorData, reportTransferErrorMessage, safeReportOperationError } from "@/services/reportTransferErrors";
 import { backgroundUploads } from "@/services/backgroundUploadManager";
 import { describeOrderedFiles } from "@/services/uploadJobFiles";
+import { captureAuthSession, assertAuthSessionCurrent, isAuthSessionCurrent } from "@/lib/auth-storage";
+import { isUploadReviewScope, type UploadReviewIdentity } from "@/services/uploadReviewNavigation";
 import SeparateReportDraftRecovery from "./SeparateReportDraftRecovery";
 import {
   auctioneerDateOnly,
@@ -156,7 +158,7 @@ type LocalDraftMedia = FileDescriptor & {
   dataUrl: string;
 };
 
-type AssetDraftFormData = {
+type AssetDraftFormData = UploadReviewIdentity & {
   clientSubmissionId: string;
   auctioneerWorkItemId?: string;
   clientName: string;
@@ -442,6 +444,7 @@ const AssetForm = forwardRef<AssetFormHandle, Props>(function AssetForm(
   const submitLockRef = useRef(false);
   const activeFormOperationRef = useRef<"draft-save" | "submit" | null>(null);
   const [uploadProgress, setUploadProgress] = useState(0);
+  const [preparingBackgroundUpload, setPreparingBackgroundUpload] = useState(false);
   const [uploadStats, setUploadStats] = useState<{
     totalFiles: number;
     totalSize: number;
@@ -477,6 +480,7 @@ const AssetForm = forwardRef<AssetFormHandle, Props>(function AssetForm(
   );
   const supersededSubmissionIdRef = useRef<string | null>(null);
   const forceNewSubmissionRef = useRef(false);
+  const submissionActivityIdRef = useRef<string | undefined>(undefined);
   const createdEventDispatchedRef = useRef(false);
   const autoSaveBlockedRef = useRef(false);
   const draftProgressClearTimerRef =
@@ -572,6 +576,9 @@ const AssetForm = forwardRef<AssetFormHandle, Props>(function AssetForm(
 
   const currentFormData: AssetDraftFormData = {
     clientSubmissionId: jobIdRef.current || "",
+    submissionActivityId: submissionActivityIdRef.current,
+    forceNewSubmission: forceNewSubmissionRef.current,
+    supersededSubmissionId: supersededSubmissionIdRef.current || undefined,
     ...(auctioneer ? { auctioneerWorkItemId: auctioneer.workItemId } : {}),
     clientName,
     effectiveDate,
@@ -866,6 +873,9 @@ const AssetForm = forwardRef<AssetFormHandle, Props>(function AssetForm(
   }, [draftFingerprint, draftHydrated, restoreBlocked, userId]);
 
   const restoreFormFields = (formData: Partial<AssetDraftFormData>) => {
+    submissionActivityIdRef.current = formData.submissionActivityId;
+    forceNewSubmissionRef.current = formData.forceNewSubmission === true;
+    supersededSubmissionIdRef.current = formData.supersededSubmissionId || null;
     if (typeof formData.clientSubmissionId === "string" && formData.clientSubmissionId) {
       jobIdRef.current = formData.clientSubmissionId;
     }
@@ -1453,6 +1463,7 @@ const AssetForm = forwardRef<AssetFormHandle, Props>(function AssetForm(
   }, [auctioneer, currencyTouched, resumeDraft]);
 
   const resetForm = () => {
+    submissionActivityIdRef.current = undefined;
     locationRequestGenerationRef.current += 1;
     locationLookupAbortRef.current?.abort();
     locationLookupAbortRef.current = null;
@@ -1896,6 +1907,8 @@ const AssetForm = forwardRef<AssetFormHandle, Props>(function AssetForm(
     submitLockRef.current = true;
     const controller = new AbortController();
     submitAbortRef.current = controller;
+    const submitSession = captureAuthSession();
+    setSubmitting(true);
     setCancellingOperation(false);
     setSubmissionFinalizing(false);
 
@@ -1903,6 +1916,8 @@ const AssetForm = forwardRef<AssetFormHandle, Props>(function AssetForm(
     try {
       autoSaveBlockedRef.current = true;
       if (saveInFlightRef.current) await saveInFlightRef.current;
+      assertAuthSessionCurrent(submitSession);
+      controller.signal.throwIfAborted();
 
       const filesToSend = mixedLots.flatMap((lot) => [
         ...lot.files,
@@ -1940,7 +1955,7 @@ const AssetForm = forwardRef<AssetFormHandle, Props>(function AssetForm(
         bank_photos_enabled: bankPhotosEnabled,
         watermark_images: watermarkImages,
         progress_id: jobId,
-        activity_id: draftScopeId,
+        activity_id: submissionActivityIdRef.current || draftScopeId,
         client_submission_id: jobId,
         force_new: forceNewSubmissionRef.current,
         ...(supersededSubmissionIdRef.current
@@ -2002,11 +2017,16 @@ const AssetForm = forwardRef<AssetFormHandle, Props>(function AssetForm(
       */
       const mustStayInForm =
         Boolean(auctioneer) ||
+        isUploadReviewScope(draftScopeId) ||
         backgroundUploads.isForegroundRequired("asset", draftScopeId);
       if (!mustStayInForm) {
         const orderedFiles = [...filesToSend, ...videosToSend];
+        setPreparingBackgroundUpload(true);
+        setUploadProgress(0);
+        setUploadStats({ totalFiles: orderedFiles.length, totalSize: orderedFiles.reduce((sum, file) => sum + file.size, 0), uploadedBytes: 0, startTime: Date.now() });
         const handedOffScopeId = draftScopeId;
-        backgroundUploads.enqueue({
+        const snapshot = makeSnapshot(saveRevisionRef.current);
+        await backgroundUploads.enqueue({
           ownerId: userId,
           kind: "asset",
           scopeId: handedOffScopeId,
@@ -2016,6 +2036,14 @@ const AssetForm = forwardRef<AssetFormHandle, Props>(function AssetForm(
           clientSubmissionId: jobId,
           details: payload,
           files: describeOrderedFiles(orderedFiles),
+          media: orderedFiles,
+          draftSnapshot: {
+            version: FORM_DRAFT_VERSION, kind: "asset", userId,
+            revision: snapshot.revision, savedAt: new Date().toISOString(),
+            deviceId: getDeviceId(), formData: snapshot.formData, lots: snapshot.lots,
+            mediaMetadata: listDraftMediaLocations(snapshot.lots),
+          } satisfies AssetDraftEnvelope,
+          signal: controller.signal,
           needsFormDecision: assetSubmissionNeedsForm,
           upload: async (onProgress, signal) => {
             const response = await AssetService.create(
@@ -2025,22 +2053,16 @@ const AssetForm = forwardRef<AssetFormHandle, Props>(function AssetForm(
               { onUploadProgress: onProgress, signal }
             );
             assertReportUploadAccepted(response);
-            if (isPreviousReportReceipt(response)) {
-              // Accepted, but for an earlier submission. These edits were not
-              // sent, so this must not read as a completed upload.
-              throw Object.assign(
-                new Error(
-                  "An earlier submission was already accepted. Your current edits have not been submitted again."
-                ),
-                { code: PREVIOUS_RECEIPT_CODE }
-              );
-            }
+            // The manager distinguishes a first receipt from a retry of the
+            // exact immutable snapshot after an uncertain acceptance.
             return response;
           },
-          // The saved draft is what a resumed upload is rebuilt from, so it is
-          // cleared only once the server has accepted this submission.
-          onAccepted: () => clearDraftStorage().catch(() => undefined),
         });
+        assertAuthSessionCurrent(submitSession);
+        controller.signal.throwIfAborted();
+        // The immutable upload now owns its lifetime; closing this form must
+        // not abort it, or run cleanup against a later editable draft.
+        if (submitAbortRef.current === controller) submitAbortRef.current = null;
         /*
            The next report needs its own draft scope: the handed-off upload
            still owns the saved media behind the old one, and autosaving a new
@@ -2055,13 +2077,14 @@ const AssetForm = forwardRef<AssetFormHandle, Props>(function AssetForm(
         publishDraftStatus("saved", "Upload continues in the background");
         keepDraftSavingBlocked = true;
         window.setTimeout(() => {
+          if (!isAuthSessionCurrent(submitSession)) return;
           lastFingerprintRef.current = null;
           createdEventDispatchedRef.current = false;
           autoSaveBlockedRef.current = false;
           setDraftHydrated(true);
         }, 0);
         const handedOff =
-          "Upload started. It continues in the background — the bar at the bottom shows its progress.";
+          "Report saved on this browser. Upload continues while this tab stays open; use the upload bar to pause or resume.";
         toast.success(handedOff);
         onSuccess?.(handedOff);
         return;
@@ -2153,6 +2176,7 @@ const AssetForm = forwardRef<AssetFormHandle, Props>(function AssetForm(
       }
     } catch (submitError: any) {
       autoSaveBlockedRef.current = false;
+      if (!isAuthSessionCurrent(submitSession)) return;
       if (controller.signal.aborted) {
         const message =
           "Upload stopped. Your report details and selected media are still here and have not been cleared.";
@@ -2190,6 +2214,7 @@ const AssetForm = forwardRef<AssetFormHandle, Props>(function AssetForm(
         publishDraftStatus("dirty", "Submission failed · unsaved changes");
       }
     } finally {
+      setPreparingBackgroundUpload(false);
       setSubmitting(false);
       submitLockRef.current = false;
       if (activeFormOperationRef.current === "submit") {
@@ -2289,7 +2314,7 @@ const AssetForm = forwardRef<AssetFormHandle, Props>(function AssetForm(
         <FormTransferProgressScreen
           mode="report-upload"
           percent={uploadProgress}
-          message={`Uploading ${uploadStats.totalFiles} file${
+          message={preparingBackgroundUpload ? "Saving the report and original media on this browser before closing the form. Keep this page open." : `Uploading ${uploadStats.totalFiles} file${
             uploadStats.totalFiles === 1 ? "" : "s"
           } · ${uploadTimeRemaining()}`}
           totalFiles={uploadStats.totalFiles}

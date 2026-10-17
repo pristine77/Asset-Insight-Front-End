@@ -211,6 +211,49 @@ describe("CRM transfers and calendar", () => {
     expect(API.post).toHaveBeenCalledTimes(1);
   });
 
+  it("keeps an accepted Outlook sync pending without inventing an event or retrying", async () => {
+    vi.mocked(API.post).mockResolvedValueOnce({ status: 202, data: { pending: true, message: "This follow-up is already queued for Outlook." } });
+    await expect(CrmService.addTaskToOutlookCalendar(taskId)).resolves.toEqual({ pending: true, message: "This follow-up is already queued for Outlook." });
+    expect(API.post).toHaveBeenCalledExactlyOnceWith(`/crm/tasks/${taskId}/calendar/ms/outlook`, undefined, { _retry: true });
+  });
+
+  it.each([
+    { status: 202, data: {} },
+    { status: 200, data: { pending: true } },
+    { status: 202, data: { pending: "true" } },
+    { status: 202, data: { pending: true, eventId: "not-confirmed" } },
+    { status: 202, data: { pending: true, webLink: "https://outlook.office.com/event" } },
+  ])("rejects contradictory pending receipts without confirming or replaying: %j", async (response) => {
+    vi.mocked(API.post).mockResolvedValueOnce(response);
+    await expect(CrmService.addTaskToOutlookCalendar(taskId)).rejects.toThrow("Check your calendar before trying again");
+    expect(API.post).toHaveBeenCalledOnce();
+  });
+
+  it("accounts for pending bulk tasks separately from confirmed events", async () => {
+    const result = { createdCount: 1, failedCount: 0, pendingCount: 1,
+      created: [{ taskId, eventId: "confirmed-event", webLink: undefined }], failed: [],
+      pending: [{ taskId: updateId, reason: "Sync already queued" }] };
+    vi.mocked(API.post).mockResolvedValueOnce({ data: result });
+    await expect(CrmService.addTasksToOutlookCalendarBulk([taskId, updateId])).resolves.toEqual(result);
+    expect(API.post).toHaveBeenCalledOnce();
+  });
+
+  it.each([
+    { pendingCount: 2, pending: [{ taskId, reason: "Queued" }] },
+    { pendingCount: 1, pending: [{ taskId: agentId, reason: "Queued" }] },
+    { pendingCount: 2, pending: [{ taskId, reason: "Queued" }, { taskId, reason: "Queued" }] },
+    { pendingCount: 1, pending: [{ taskId, reason: "" }] },
+    { pendingCount: 1, pending: [{ taskId, reason: "Queued", eventId: "unexpected" }] },
+    { pendingCount: 1, pending: [{ taskId, reason: "Queued", webLink: "https://outlook.office.com/event" }] },
+    { pendingCount: 1 },
+    { pending: [] },
+    { createdCount: 1, created: [{ taskId, eventId: "event" }], pendingCount: 1, pending: [{ taskId, reason: "Queued" }] },
+  ])("rejects invalid or overlapping pending bulk receipts: %j", async (pending) => {
+    vi.mocked(API.post).mockResolvedValueOnce({ data: { createdCount: 0, failedCount: 0, created: [], failed: [], ...pending } });
+    await expect(CrmService.addTasksToOutlookCalendarBulk([taskId, updateId])).rejects.toThrow("calendar");
+    expect(API.post).toHaveBeenCalledOnce();
+  });
+
   it.each([
     {}, { connected: "false", configured: true }, { connected: false, configured: "true" },
     { connected: true }, { configured: false }, null,

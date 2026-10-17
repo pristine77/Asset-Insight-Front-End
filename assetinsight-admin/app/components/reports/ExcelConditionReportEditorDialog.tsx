@@ -83,6 +83,7 @@ import TableChartRoundedIcon from "@mui/icons-material/TableChartRounded";
 import UndoRoundedIcon from "@mui/icons-material/UndoRounded";
 import RedoRoundedIcon from "@mui/icons-material/RedoRounded";
 import WarningAmberRoundedIcon from "@mui/icons-material/WarningAmberRounded";
+import { excelConditionReportDescription, excelConditionReportTitleHelp } from "@/lib/excelConditionReportDescription";
 
 type BidValue = 5 | 25 | 100 | 1000 | null;
 
@@ -116,6 +117,8 @@ type ExcelCrRow = {
   disclaimerLotKey: string;
   lotNumber: string;
   title: string;
+  description?: string;
+  descriptionScope?: "lot" | "item";
   category: string;
   imageUrls: string[];
   specs: ExcelCrSpec[];
@@ -206,6 +209,10 @@ function normalisePayload(input: ExcelCrPayload): ExcelCrPayload {
             ),
             lotNumber: String(row?.lotNumber || ""),
             title: String(row?.title || ""),
+            ...excelConditionReportDescription(row),
+            descriptionScope: row.descriptionScope === "lot" || row.descriptionScope === "item"
+              ? row.descriptionScope
+              : undefined,
             category: String(row?.category || ""),
             imageUrls: Array.isArray(row?.imageUrls) ? row.imageUrls.filter(Boolean) : [],
             specs: Array.isArray(row?.specs)
@@ -976,6 +983,7 @@ export default function ExcelConditionReportEditorDialog({
         rowKey: row.rowKey,
         lotNumber: row.lotNumber,
         title: row.title,
+        ...excelConditionReportDescription(row),
         category: row.category,
         specs: row.specs.map((spec) => ({
           field: spec.field,
@@ -1088,6 +1096,7 @@ export default function ExcelConditionReportEditorDialog({
               WebkitTextFillColor: "#737773",
             },
             "& .MuiInputLabel-root, & .MuiFormLabel-root": { color: "#5d615d" },
+            "& .MuiFormHelperText-root": { color: "#5d615d" },
             "& .MuiFormControlLabel-label": { color: "#2b2e2b" },
             "& .MuiSelect-icon": { color: "#5d615d" },
           },
@@ -1135,8 +1144,9 @@ export default function ExcelConditionReportEditorDialog({
               sx={{
                 display: "grid",
                 flex: 1,
+                minWidth: 0,
                 minHeight: 0,
-                gridTemplateColumns: { xs: "1fr", md: "260px minmax(0, 1fr)", xl: "260px minmax(0, 1fr) 340px" },
+                gridTemplateColumns: { xs: "minmax(0, 1fr)", md: "260px minmax(0, 1fr)", xl: "260px minmax(0, 1fr) 340px" },
                 gridTemplateRows: { xs: "auto minmax(0, 1fr)", md: "minmax(0, 1fr)" },
                 overflow: { xs: "auto", md: "hidden" },
               }}
@@ -1146,6 +1156,7 @@ export default function ExcelConditionReportEditorDialog({
                 aria-label="Excel condition report rows"
                 sx={{
                   display: "flex",
+                  minWidth: 0,
                   minHeight: 0,
                   maxHeight: { xs: 250, md: "none" },
                   flexDirection: "column",
@@ -1287,7 +1298,7 @@ export default function ExcelConditionReportEditorDialog({
                     ) : null}
 
                     <Box sx={{ border: "1px solid #dedfe1", bgcolor: "#fff", p: { xs: 1.5, sm: 2 } }}>
-                      <SectionHeading title="Row identity" description="These values appear in the Excel lot row." />
+                      <SectionHeading title="Lot details" description="Edit the Title used in generated files, along with the lot number and category." />
                       <Box sx={{ display: "grid", gridTemplateColumns: { xs: "1fr", sm: "140px minmax(0, 1fr)", lg: "140px minmax(0, 1.4fr) minmax(180px, 0.8fr)" }, gap: 1.25, mt: 1.5 }}>
                         <TextField
                           size="small"
@@ -1309,6 +1320,7 @@ export default function ExcelConditionReportEditorDialog({
                         <TextField
                           size="small"
                           label="Title"
+                          helperText={excelConditionReportTitleHelp(activeRow.descriptionScope)}
                           value={activeRow.title}
                           disabled={saving}
                           onChange={(event) => updateActiveRow((row) => ({ ...row, title: event.target.value }))}
@@ -1463,7 +1475,7 @@ export default function ExcelConditionReportEditorDialog({
                     </Box>
 
                     <Box sx={{ display: { xl: "none" }, border: "1px solid #dedfe1", bgcolor: "#fff", p: { xs: 1.5, sm: 2 } }}>
-                      <SectionHeading title="Final Excel preview" description="A safe React preview of the Condition Report cell. Markup is hidden from editors." />
+                      <SectionHeading title="Lot content preview" description="Title and condition report details. Generated files use Title as Description; file layouts differ." />
                       <Box sx={{ mt: 1.5 }}><ConditionReportPreview row={activeRow} /></Box>
                     </Box>
                   </Stack>
@@ -1477,10 +1489,10 @@ export default function ExcelConditionReportEditorDialog({
 
               <Box
                 component="aside"
-                aria-label="Final Excel Condition Report preview"
+                aria-label="Lot content preview"
                 sx={{ display: { xs: "none", xl: "block" }, minHeight: 0, overflowY: "auto", borderLeft: "1px solid #dedfe1", bgcolor: "#fff", p: 2 }}
               >
-                <SectionHeading title="Final Excel preview" description="Safe React preview. The importer-compatible HTML is regenerated only in the XLSX file." />
+                <SectionHeading title="Lot content preview" description="Title and condition report details. Generated files use Title as Description; file layouts differ." />
                 {activeRow ? <Box sx={{ mt: 1.5 }}><ConditionReportPreview row={activeRow} /></Box> : null}
               </Box>
             </Box>

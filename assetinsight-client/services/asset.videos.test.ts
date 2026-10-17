@@ -18,7 +18,7 @@ const detailsFor = (counts: Array<number | undefined>): AssetCreateDetails => ({
 
 describe("Asset video lot transport", () => {
   beforeEach(() => {
-    mocks.post.mockReset().mockResolvedValue({ data: { reportId: "accepted" } });
+    mocks.post.mockReset().mockResolvedValue({ data: { reportId: "accepted", jobId: "job-accepted", status: "processing" } });
     mocks.direct.mockReset().mockResolvedValue({ reportId: "accepted" });
   });
 

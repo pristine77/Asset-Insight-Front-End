@@ -7,21 +7,12 @@ import {
   getLotListingPreview,
   getLotListingSubmittedPreview,
   uploadLotListingPreviewLotImages,
-  regenerateLotListingPreviewLot,
   submitLotListingForApproval,
   resubmitLotListing,
   type LotListing,
   type LotListingLot,
 } from "@/services/lotListing";
-import {
-  SAVE_PREVIEW_TITLE,
-  isLotRegenerationFor,
-  lotRegenerationConfirmMessage,
-  lotRegenerationLotLabel,
-  lotRegenerationStageText,
-  readLotRegeneration,
-} from "@/lib/lotRegeneration";
-import { useLotRegeneration } from "@/components/reports/useLotRegeneration";
+import { SAVE_PREVIEW_TITLE } from "@/lib/previewSave";
 import { mergeSubmittedPreviewData } from "@/lib/previewSaveMerge";
 import { getAssetCategorySpecs, type AssetCategorySpec } from "@/services/assets";
 import BottomDrawer from "@/components/BottomDrawer";
@@ -174,26 +165,7 @@ export default function LotListingPreviewModal({
       : isResubmitMode
         ? getLotListingSubmittedPreview(id)
         : getLotListingPreview(id);
-  // Re-Generate works on a saved report the owner is editing; drafts and
-  // assigned approvers use Save only.
-  const canRegenerateLots = Boolean(reportId) && !draftPreviewId && !isAssignedApprovalMode;
-  const { lotRegeneration, lotRegenerationPending, setLotRegeneration } = useLotRegeneration({
-    enabled: canRegenerateLots && isOpen,
-    reportId,
-    load: loadLotListingPreview,
-    onFinished: (response, finished) => {
-      applyLotListingState(response);
-      setHasChanges(false);
-      toast.success(
-        `${lotRegenerationLotLabel(finished, "The lot")} was re-generated. Review it, then Save to rebuild the files.`
-      );
-    },
-    onFailed: (failed) => {
-      toast.error(failed.error || "Re-Generate failed. Nothing on the lot was changed.");
-    },
-  });
-  // A lot being re-read keeps the editor read-only until the fresh lot arrives.
-  const editorLocked = activeMutation !== null || lotRegenerationPending;
+  const editorLocked = activeMutation !== null;
 
   useEffect(() => {
     if (isOpen && reportId) {
@@ -237,9 +209,6 @@ export default function LotListingPreviewModal({
     const nextPreviewFiles = data.preview_files || data.files;
     if (nextPreviewFiles) setPreviewFiles(nextPreviewFiles);
     if (Array.isArray(data.imageUrls)) setImageUrls(data.imageUrls);
-    if (Object.prototype.hasOwnProperty.call(data, "lot_regeneration")) {
-      setLotRegeneration(readLotRegeneration(data.lot_regeneration));
-    }
   };
 
   const loadPreviewData = async () => {
@@ -265,7 +234,7 @@ export default function LotListingPreviewModal({
   };
 
   const handleSubmitForApproval = async () => {
-    if (isMutationLocked() || lotRegenerationPending) return;
+    if (isMutationLocked()) return;
     if (!previewData) {
       toast.error("No preview data available");
       return;
@@ -498,45 +467,6 @@ export default function LotListingPreviewModal({
     }
   };
 
-  /**
-   * Re-Generate one lot: after confirmation, the on-screen preview is saved
-   * and the AI re-reads the lot's photos in the background. The editor stays
-   * read-only until the fresh lot arrives (useLotRegeneration polls).
-   */
-  const handleRegenerateLot = async (lot: any, index: number) => {
-    if (!canRegenerateLots || isMutationLocked() || lotRegenerationPending) return;
-    if (filesGenerating || filesRegenerating || !previewData) return;
-    const lotLabel = `Lot ${getLotDisplayNumber(lot, index)}`;
-    if (!window.confirm(lotRegenerationConfirmMessage(lotLabel))) return;
-    const mutation = beginMutation("regenerate");
-    if (!mutation) return;
-    const mutationContext = previewContextRef.current;
-    try {
-      const previewForRequest = applyDamageAnalysisLotPolicy(previewData);
-      const response = await regenerateLotListingPreviewLot(
-        reportId,
-        getLotUploadKey(lot, index),
-        previewForRequest
-      );
-      if (previewContextRef.current !== mutationContext) return;
-      if (response.data?.preview_data) {
-        setPreviewData(applyDamageAnalysisLotPolicy(response.data.preview_data));
-      }
-      if (Array.isArray(response.data?.imageUrls)) setImageUrls(response.data.imageUrls);
-      setLotRegeneration(readLotRegeneration(response.data?.lot_regeneration));
-      if (!hasEditsSince(mutation)) setHasChanges(false);
-      toast.info(response.message || `Re-generating ${lotLabel}.`);
-    } catch (error: any) {
-      if (previewContextRef.current === mutationContext) {
-        const data = error?.response?.data;
-        if (data?.lot_regeneration) setLotRegeneration(readLotRegeneration(data.lot_regeneration));
-        toast.error(data?.message || "Could not start Re-Generate.");
-      }
-    } finally {
-      finishMutation(mutation);
-    }
-  };
-
   const specsByCategory = React.useMemo(
     () =>
       new Map(
@@ -620,18 +550,14 @@ export default function LotListingPreviewModal({
   const mutationMessage =
     activeMutation === "upload"
       ? "Uploading images and updating this preview…"
-      : activeMutation === "regenerate"
-        ? "Saving your edits and starting Re-Generate…"
-        : activeMutation === "submit"
+      : activeMutation === "submit"
           ? effectiveResubmitMode
             ? "Saving changes and queuing regenerated listing files…"
             : "Saving changes and queuing listing files…"
           : "";
   const lockMessage = activeMutation
     ? `${mutationMessage} Keep this page open until it finishes.`
-    : lotRegenerationPending
-      ? `Re-generating ${lotRegenerationLotLabel(lotRegeneration)}. ${lotRegenerationStageText(lotRegeneration?.stage)} You can close this preview; the lot updates when it's done.`
-      : "";
+    : "";
 
   const requestClose = () => {
     if (isMutationLocked()) return;
@@ -649,7 +575,7 @@ export default function LotListingPreviewModal({
       open={isOpen}
       onClose={requestClose}
       title="Lot Listing Preview"
-      description="Review your edits, then Save: they are kept exactly as shown and all listing files are rebuilt. Use Re-Generate on a lot to have the AI re-read its photos. Files release automatically after generation succeeds."
+      description="Review your edits, then Save: your edited details are used to rebuild all listing files without re-reading photos. Files release automatically after generation succeeds."
       fullscreen
       dismissOnBackdrop={false}
       closeDisabled={activeMutation !== null}
@@ -917,16 +843,13 @@ export default function LotListingPreviewModal({
                 setGalleryLotImages((prev) => (prev ? { ...prev, currentIdx } : null))
               }
               onClose={() => setGalleryLotImages(null)}
-              onRemove={(photoIndex) => {
-                const entry = galleryLotImages.entries[photoIndex];
-                if (entry) deleteLotImage(entry.lotIndex, entry);
-              }}
             />
           )}
 
           {/* Lots Section */}
           <div className="mt-6 space-y-4 max-w-5xl mx-auto">
             <h3 className="text-base sm:text-lg font-bold text-[var(--app-text)]">Lots ({lotsArray.length})</h3>
+            <p className="text-sm text-[var(--app-text-muted)]">The Title is used as the Description in generated Excel and condition report files.</p>
             {lotsArray.length > 0 ? (
               <div className="space-y-4">
                 {lotsArray.map((lot, idx) => {
@@ -947,32 +870,6 @@ export default function LotListingPreviewModal({
                           Lot #{getLotDisplayNumber(lot, idx)}
                         </div>
                         <div className="flex items-center gap-2">
-                          {canRegenerateLots ? (
-                            <button
-                              type="button"
-                              onClick={() => void handleRegenerateLot(lot, idx)}
-                              disabled={
-                                editorLocked ||
-                                loading ||
-                                filesGenerating ||
-                                filesRegenerating
-                              }
-                              className="app-button app-button--secondary !min-h-7 !rounded-md !px-2 !py-1 !text-xs"
-                              aria-label={`Re-Generate lot ${getLotDisplayNumber(lot, idx)}`}
-                              title="Have the AI re-read this lot's photos and replace its title, description, condition report, details and value."
-                            >
-                              <RefreshCw
-                                className={`h-3.5 w-3.5 ${
-                                  lotRegenerationPending && isLotRegenerationFor(lotRegeneration, lot, lotUploadKey)
-                                    ? "animate-spin"
-                                    : ""
-                                }`}
-                              />
-                              {lotRegenerationPending && isLotRegenerationFor(lotRegeneration, lot, lotUploadKey)
-                                ? "Re-generating…"
-                                : "Re-Generate"}
-                            </button>
-                          ) : null}
                           <button
                             onClick={() => deleteLot(idx)}
                             className="app-button app-button--danger !min-h-7 !rounded-md !px-2 !py-1 !text-xs"
@@ -981,12 +878,6 @@ export default function LotListingPreviewModal({
                           </button>
                         </div>
                       </div>
-                      {lotRegeneration?.status === "failed" &&
-                      isLotRegenerationFor(lotRegeneration, lot, lotUploadKey) ? (
-                        <p className="mx-4 mb-3 text-xs font-medium text-[var(--app-danger)]" role="alert">
-                          Re-Generate failed: {lotRegeneration.error || "Nothing on the lot was changed."}
-                        </p>
-                      ) : null}
 
                       {/* Lot Images */}
                       <div className="mb-3">
@@ -1093,16 +984,6 @@ export default function LotListingPreviewModal({
                             onChange={(e) => updateLot(idx, "estimated_value", e.target.value)}
                             className="w-full px-3 py-2 border border-[var(--app-border)] rounded-md focus:ring-2 focus:ring-purple-500 focus:border-transparent text-sm"
                             placeholder="0.00"
-                          />
-                        </div>
-                        <div className="sm:col-span-2">
-                          <label className="block text-xs text-[var(--app-text-muted)] mb-1">Description</label>
-                          <textarea
-                            value={lot.description || ""}
-                            onChange={(e) => updateLot(idx, "description", e.target.value)}
-                            className="w-full px-3 py-2 border border-[var(--app-border)] rounded-md focus:ring-2 focus:ring-purple-500 focus:border-transparent text-sm resize-y min-h-[80px]"
-                            placeholder="Description"
-                            rows={3}
                           />
                         </div>
                         <div>

@@ -1,5 +1,7 @@
 import API from "@/lib/api";
+import { assertAuthSessionCurrent, captureAuthSession, isAuthSessionCurrent } from "@/lib/auth-storage";
 import type { AxiosProgressEvent } from "axios";
+import { assertReportUploadAccepted } from "./reportTransferErrors";
 import {
   isUploadSessionUnsupportedError,
   uploadReportFilesDirectToR2,
@@ -117,6 +119,7 @@ export const AssetService = {
     videos?: File[] | undefined,
     options?: CreateOptions
   ): Promise<AssetCreateResponse> {
+    const authSession = captureAuthSession();
     // Transport every selected image. Any AI inspection cap is a server-side
     // analysis concern and must not silently drop photos from the report.
     const filesToSend = images;
@@ -157,8 +160,10 @@ export const AssetService = {
         files: directFiles,
         onUploadProgress: options?.onUploadProgress,
         signal: options?.signal,
+        authSession,
       });
     } catch (error: any) {
+      assertAuthSessionCurrent(authSession);
       if (options?.signal?.aborted) throw options.signal.reason || error;
       if (!isUploadSessionUnsupportedError(error)) throw error;
       console.warn("[AssetService] Direct upload is unsupported; using legacy multipart upload.");
@@ -170,9 +175,10 @@ export const AssetService = {
     // Append videos (if any) under a separate field; backend will include them in the zip, not AI
     videoFiles.forEach((file) => fd.append("videos", file));
 
+    assertAuthSessionCurrent(authSession);
     const { data } = await API.post<AssetCreateResponse>("/asset", fd, {
       onUploadProgress: (e: AxiosProgressEvent) => {
-        if (!options?.onUploadProgress) return;
+        if (!options?.onUploadProgress || options.signal?.aborted || !isAuthSessionCurrent(authSession)) return;
         let fraction = typeof e.progress === "number" ? e.progress : 0;
         if (
           !fraction &&
@@ -182,10 +188,16 @@ export const AssetService = {
         ) {
           fraction = e.loaded / e.total;
         }
-        options.onUploadProgress(Math.max(0, Math.min(1, fraction)));
+        // Sending all request bytes is not server acceptance. Keep the same
+        // completion boundary as session uploads, including on older servers.
+        options.onUploadProgress(Number.isFinite(fraction) ? Math.max(0, Math.min(0.95, fraction)) : 0);
       },
       signal: options?.signal,
     });
+    assertAuthSessionCurrent(authSession);
+    if (options?.signal?.aborted) throw options.signal.reason || new DOMException("The operation was aborted.", "AbortError");
+    assertReportUploadAccepted(data);
+    options?.onUploadProgress?.(1);
     return data;
   },
 

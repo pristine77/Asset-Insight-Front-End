@@ -122,8 +122,13 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
      navigation that unmounts the shell leaves a running upload alone.
   */
   useEffect(() => {
-    backgroundUploads.setOwner(ownerId || null);
-  }, [ownerId]);
+    backgroundUploads.setOwner(!loading && !loggingOut && !deviceAccess ? ownerId || null : null);
+  }, [ownerId, loading, loggingOut, deviceAccess]);
+  useEffect(() => backgroundUploads.onAccepted((event) => {
+    if (event.ownerId === ownerId && !loading && !loggingOut && !deviceAccess) {
+      window.dispatchEvent(new Event("cv:report-created"));
+    }
+  }), [ownerId, loading, loggingOut, deviceAccess]);
   if (loading || loggingOut || deviceAccess || !ownerId) return <div className="app-page" role="status">Opening workspace…</div>;
   if (pathname === "/workspaces") return <>{children}</>;
   if (pathMatches(pathname, "/crm") && user?.isCrmAgent !== true) return (

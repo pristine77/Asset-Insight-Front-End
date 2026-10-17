@@ -455,20 +455,6 @@ class AssetService {
   }
 
   /**
-   * Re-Generate one lot (owner decision 2026-10-11). The server saves the
-   * on-screen preview first, then queues an AI re-read of this lot's photos
-   * and answers 202 with `data.lot_regeneration`; the preview screen polls
-   * the preview until that record clears. Files are rebuilt on the next Save.
-   */
-  async regenerateLot(reportId: string, lotKey: string | number, previewData: any): Promise<any> {
-    const response = await api.post(
-      `${API_ENDPOINTS.UPDATE_PREVIEW}/${reportId}/preview/lots/${encodeURIComponent(String(lotKey))}/regenerate`,
-      { preview_data: previewData }
-    );
-    return response.data;
-  }
-
-  /**
    * Submit preview for approval
    */
   async submitPreview(reportId: string, previewData?: any): Promise<any> {

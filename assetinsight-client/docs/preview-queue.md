@@ -1,31 +1,48 @@
 # Preview queue reliability — 2026-10-03
 
-## Save and per-lot Re-Generate — 2026-10-11 (local)
+## Title-led generated descriptions — 2026-10-14 (local)
 
-Owner decision: the single footer action is split in two.
+Asset and Lot Listing previews now expose Title as the text used under
+Description in generated Excel and condition report files. Separate lot
+Description controls and the Asset freeform Specs/notes controls are hidden;
+structured condition-report fields, including their Notes fields, remain editable.
+Hidden `description` and `details` values remain in the full saved snapshot,
+unchanged: the browser never deletes them or copies Title into them. Existing
+pagination, media order, approval gates and the atomic Save request are retained.
+Deploy matching title-led backend exporters before this UI. Existing files do
+not change until an explicit Save regenerates them.
 
-- **Save** (accessible name "Save preview"; "Save & Approve" for an assigned
-  Asset approver) is the previous Save & Generate / Save & Regenerate path,
-  unchanged: one submit/resubmit request with the complete on-screen snapshot,
-  files rebuilt from it. The AI never runs again on saved work; the button's
-  title says so.
-- **Re-Generate** is a per-lot button (Lot Listing card header; Asset phone
-  card header and desktop Actions column). It asks first
-  (`lotRegenerationConfirmMessage`), then posts the on-screen preview to
-  `POST /lot-listing/:id/preview/lots/:lotKey/regenerate` or
-  `POST /asset/:id/preview/lots/:lotKey/regenerate`. The API saves that
-  preview and queues an AI re-read of the one lot's photos (the first
-  reading's photo limit, photos added since always included). The lot's
-  title, description, condition report, details, category, serial, value,
-  item condition and damage are replaced; lot number, photos, auction
-  settings and Condition / Completeness / Legal choices stay.
-- While the server reports `lot_regeneration` queued/processing, the editor is
-  read-only with a status banner (`useLotRegeneration` polls the preview every
-  4 s, skipping hidden tabs) and the API refuses saves, uploads and generation
-  with 409 `LOT_REGENERATION_PENDING`. Reopening a preview resumes the wait.
-  When the record clears, the fresh lot is shown for review; files are built
-  on the next Save. A failed reading changes nothing and is shown on the lot
-  until the next Save. Drafts and assigned approvers have no Re-Generate.
+## Large Asset preview navigation — 2026-10-13 (local)
+
+Asset previews keep the full edited report in memory while rendering 20 lots
+at a time. Both the top and bottom of the lot list now show the visible range,
+explicit page number and Previous/Next controls. Bottom navigation moves focus
+and scroll to the start of the new page; it does not reload, submit or discard
+edits. Page group counts are labelled as being on this page. The save footer
+explicitly says that all report lots across every page are used for file generation.
+The already-bounded page keeps its rows laid out, avoiding content-visibility
+placeholder shifts that can move the bottom navigation under a pointer click.
+
+The owner, assigned-approver and draft-preview entry points share this editor.
+Lot Listing already renders its full lot list and is not newly paginated. No API,
+snapshot, media ordering, generation or approval behavior changes are involved.
+
+## Save and read-only photo viewer — 2026-10-13 (local)
+
+**Save** (accessible name "Save preview"; "Save & Approve" for an assigned
+Asset approver) retains the existing atomic submit/resubmit path: one request
+with the complete edited snapshot rebuilds the report files. It does not ask
+the AI to re-read a lot's photographs. Existing whole-report file generation,
+retry, draft promotion, approval and release rules remain unchanged.
+
+The upstream per-lot AI Re-Generate feature is intentionally not included:
+there are no controls, request functions, polling hooks or state for it.
+
+Asset, Lot Listing and Real Estate photos open in a floating viewer with
+keyboard navigation, move, resize, minimize and maximize controls. The viewer
+is read-only and has no Remove/Delete action or callback. Explicit photo-edit
+controls in the underlying preview remain governed by its mutation lock and
+the normal saved-snapshot workflow.
 
 ## Reviewed specification authority — 2026-10-08 (local)
 
@@ -56,8 +73,9 @@ The intercepted loopback API uses the actual built backend spec normalization;
 payloads preserve edits/blanks/deletions and issue one POST, no preceding PUT.
 Four real XLSX workbooks were reopened and the corresponding five-page CR PDF
 was rendered and visually checked, including an empty reviewed-table fixture.
-No provider or customer data was used. Source verification retained browser
-logs, artifact readback results, screenshots and PDF page renders locally.
+No provider or customer data was used. Evidence is in
+`/tmp/assetinsight-reviewed-cr-qa.arqkiL` (browser-with-backend.log,
+artifact-verification.json, screenshots and PDF page renders).
 Backend API/workers must precede web and the new native binary.
 No historical data repair, automatic regeneration, provider calls, deployment
 or customer mutation was performed for these client changes.

@@ -19,7 +19,7 @@ describe("explicit Outlook actions", () => {
     fireEvent.click(button); fireEvent.click(button);
     expect(CrmService.addTasksToOutlookCalendarBulk).toHaveBeenCalledTimes(1);
     await act(async () => resolve({ createdCount: 1, failedCount: 0, created: [{ taskId: "a".repeat(24), webLink: "https://outlook.office.com/test" }], failed: [] }));
-    expect(screen.getByText("1 created · 0 failed")).toBeInTheDocument();
+    expect(screen.getByText("1 confirmed · 0 failed")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Export selected" })).toBeDisabled();
   });
   it("does not replay uncertain exports or claim success", async () => {
@@ -29,6 +29,17 @@ describe("explicit Outlook actions", () => {
     expect(await screen.findByRole("alert")).toHaveTextContent("Check your calendar");
     expect(CrmService.addTasksToOutlookCalendarBulk).toHaveBeenCalledTimes(1);
     expect(screen.getByRole("button", { name: "Export selected" })).toBeDisabled();
+  });
+  it("shows queued results as pending, not created or omitted", async () => {
+    vi.mocked(CrmService.addTasksToOutlookCalendarBulk).mockResolvedValue({ createdCount: 0, failedCount: 0, pendingCount: 1, created: [], failed: [], pending: [{ taskId: "a".repeat(24), reason: "Follow-up sync is queued." }] });
+    mount(); fireEvent.click(await screen.findByText("Choose Alex"));
+    fireEvent.click(screen.getByRole("button", { name: "Export selected" }));
+    expect(await screen.findByText("0 confirmed · 0 failed · 1 pending")).toBeInTheDocument();
+    expect(screen.getByText(/No completed event is confirmed yet/)).toHaveTextContent("Follow-up sync is queued.");
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: "Open confirmed event" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Export selected" })).toBeDisabled();
+    expect(CrmService.addTasksToOutlookCalendarBulk).toHaveBeenCalledTimes(1);
   });
   it("warns when the server omits selected tasks", async () => {
     vi.mocked(CrmService.addTasksToOutlookCalendarBulk).mockResolvedValue({ createdCount: 0, failedCount: 0, created: [], failed: [] });

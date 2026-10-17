@@ -39,7 +39,6 @@ describe("submissionFilesFromLots", () => {
     expect(submissionFilesFromLots(null)).toEqual({ images: [], videos: [] });
   });
 });
-
 describe("submissionFilesMatchManifest", () => {
   it("accepts rehydrated media identical to the frozen manifest", () => {
     const rebuilt = describeSubmissionFiles(

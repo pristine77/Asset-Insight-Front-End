@@ -1,6 +1,8 @@
 import React from 'react';
+import { Alert } from 'react-native';
 import { fireEvent, render, screen } from '@testing-library/react-native';
 import CrmTasksScreen from './CrmTasksScreen';
+import CrmOutlookCalendarScreen from './CrmOutlookCalendarScreen';
 import crmTaskApi, { type CrmTaskItem } from '../services/crmService';
 
 jest.mock('@expo/vector-icons', () => ({ Feather: () => null, FontAwesome: () => null }));
@@ -42,6 +44,8 @@ jest.mock('../services/crmService', () => ({
     submitTaskUpdate: jest.fn(),
     requestTaskTransfer: jest.fn(),
     getTask: jest.fn(),
+    addTaskToOutlookCalendar: jest.fn(),
+    addTasksToOutlookCalendarBulk: jest.fn(),
   },
 }));
 
@@ -68,6 +72,36 @@ beforeEach(() => {
     .mockResolvedValue([{ _id: 'agent-2', username: 'Receiving agent' }] as Awaited<
       ReturnType<typeof crmTaskApi.listTransferAgents>
     >);
+});
+
+describe('truthful Outlook synchronization', () => {
+  it('shows queued bulk calendar work separately from confirmed additions', async () => {
+    const alert = jest.spyOn(Alert, 'alert').mockImplementation(() => undefined);
+    jest.mocked(crmTaskApi.getOutlookCalendarStatus).mockResolvedValue({ connected: true, configured: true });
+    jest.mocked(crmTaskApi.addTasksToOutlookCalendarBulk).mockResolvedValue({
+      createdCount: 0, failedCount: 0, pendingCount: 1, created: [], failed: [],
+      pending: [{ taskId: 'task-1', reason: 'Queued for Outlook.' }],
+    });
+    await render(<CrmOutlookCalendarScreen onOpenDrawer={jest.fn()} onBack={jest.fn()} />);
+    await fireEvent.press(screen.getByText('Pick Tasks to Sync'));
+    await fireEvent.press(screen.getByRole('button', { name: 'Sync selected tasks' }));
+    expect(alert).toHaveBeenCalledWith('Outlook sync queued', '0 task(s) added to calendar.\n\n1 queued, not yet confirmed by Outlook.');
+    alert.mockRestore();
+  });
+  it.each([
+    [{ pending: true, message: 'Queued for Outlook.' }, 'Outlook sync queued', 'Queued for Outlook.'],
+    [{ pending: false }, 'Outlook confirmation unavailable', expect.stringContaining('not confirmed')],
+    [{ pending: false, eventId: 'confirmed-event' }, 'Added to Outlook', 'Task added to your Outlook calendar.'],
+  ])('distinguishes queued, unconfirmed and confirmed responses', async (response, title, message) => {
+    const alert = jest.spyOn(Alert, 'alert').mockImplementation(() => undefined);
+    jest.mocked(crmTaskApi.getOutlookCalendarStatus).mockResolvedValue({ connected: true, configured: true });
+    jest.mocked(crmTaskApi.addTaskToOutlookCalendar).mockResolvedValue(response);
+    await render(<CrmTasksScreen onOpenDrawer={jest.fn()} onBack={jest.fn()} />);
+    await fireEvent.press(screen.getByRole('button', { name: 'Add Example Client to calendar' }));
+    expect(alert).toHaveBeenCalledWith(title, message);
+    if (!('eventId' in response)) expect(alert).not.toHaveBeenCalledWith('Added to Outlook', expect.anything());
+    alert.mockRestore();
+  });
 });
 
 it('keeps task comments stable through status edits and cancel does not submit', async () => {

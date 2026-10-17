@@ -180,11 +180,19 @@ export type CrmEmailRewritePayload = {
   senderCompany?: string;
 };
 export type CrmCalendarEvent = { eventId?: string; webLink?: string };
+export type CrmCalendarSync = CrmCalendarEvent | {
+  pending: true;
+  message: string;
+  eventId?: never;
+  webLink?: never;
+};
 export type CrmBulkCalendarResponse = {
   createdCount: number;
   failedCount: number;
   created: Array<CrmCalendarEvent & { taskId: string }>;
   failed: Array<{ taskId: string; reason: string }>;
+  pendingCount?: number;
+  pending?: Array<{ taskId: string; reason: string }>;
 };
 
 export const CRM_READ_TIMEOUT_MS = 20_000;
@@ -352,7 +360,7 @@ function calendarEvent(value: unknown): CrmCalendarEvent {
   const rawId = text(data.eventId);
   const eventId = rawId && /^[a-z\d][a-z\d._~+/=-]{0,4095}$/i.test(rawId) ? rawId : undefined;
   const webLink = safeCrmUrl(data.webLink);
-  if (!eventId && !webLink) {
+  if (data.pending || (!eventId && !webLink)) {
     throw new Error("Outlook did not return a verifiable event. Check your calendar before trying again.");
   }
   return { eventId, webLink };
@@ -383,8 +391,20 @@ function checkedCalendarBatch(value: unknown, taskIds: string[]): CrmBulkCalenda
     if (!reason) throw failure();
     return { taskId, reason };
   });
+  let pending: CrmBulkCalendarResponse["pending"];
+  if (data.pendingCount !== undefined || data.pending !== undefined) {
+    if (!integer(data.pendingCount, 0) || !Array.isArray(data.pending) || data.pendingCount !== data.pending.length) throw failure();
+    pending = data.pending.map((value) => {
+      const entry = record(value);
+      const taskId = checkedId(entry);
+      const reason = text(entry.reason);
+      if (!reason || entry.eventId || entry.webLink) throw failure();
+      return { taskId, reason };
+    });
+  }
   // Omitted attempted IDs stay omitted; the caller presents that uncertainty.
-  return { createdCount: data.createdCount, failedCount: data.failedCount, created, failed };
+  return { createdCount: data.createdCount, failedCount: data.failedCount, created, failed,
+    ...(pending ? { pendingCount: pending.length, pending } : {}) };
 }
 
 export const CrmService = {
@@ -523,8 +543,14 @@ export const CrmService = {
     return OutlookService.disconnect(mutationOptions);
   },
 
-  async addTaskToOutlookCalendar(taskId: string): Promise<CrmCalendarEvent> {
-    const { data } = await API.post(`${taskPath(taskId)}/calendar/ms/outlook`, undefined, mutationOptions);
+  async addTaskToOutlookCalendar(taskId: string): Promise<CrmCalendarSync> {
+    const { data, status } = await API.post(`${taskPath(taskId)}/calendar/ms/outlook`, undefined, mutationOptions);
+    if (status === 202 || data?.pending !== undefined) {
+      if (status !== 202 || data?.pending !== true || data.eventId || data.webLink) {
+        throw new Error("Outlook did not confirm the calendar sync. Check your calendar before trying again.");
+      }
+      return { pending: true, message: text(data.message) || "Outlook sync is pending. Check your calendar later; no completed event is confirmed yet." };
+    }
     return calendarEvent(data);
   },
 

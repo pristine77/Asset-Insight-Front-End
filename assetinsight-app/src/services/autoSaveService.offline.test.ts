@@ -186,13 +186,9 @@ it('uses owner-bound create-only storage for cloud restoration and never overwri
   expect(OfflineCaptureStore.createCloudDraft).toHaveBeenCalledTimes(1);
 });
 
-/*
- * Empty duplicate drafts (owner, 2026-10-11 phone test): a form closed after
- * typing a contract number leaves a draft with no photos; opening the form
- * again starts another. When the new draft gets its first photo, the older
- * empty one of the same contract is discarded -- and only such a draft.
- */
-describe('empty drafts of the same contract', () => {
+// A contract groups independent drafts. Saving one never discards another,
+// including a text-only draft or a photo save racing a stale empty summary.
+describe('independent drafts of the same contract', () => {
   const emptyDraft = (id: string, values: Partial<OfflineReportDraft> = {}): OfflineReportDraft => ({
     id, ownerId: 'owner', type: 'lotListing', title: '93530', contractNo: '93530', normalizedContractNo: '93530',
     captureMode: 'online', submissionState: 'local', localRevision: 1,
@@ -207,11 +203,12 @@ describe('empty drafts of the same contract', () => {
   });
   const state = (id: string) => saved.get(id)?.submissionState;
 
-  it('discards the older empty draft when the new draft gets its first photo', async () => {
+  it('retains the older empty draft when the new draft gets its first photo', async () => {
     saved.set('empty', emptyDraft('empty'));
     await AutoSaveService.saveDraft(lotListing('new', [photo(1)], ' 93530 '));
-    expect(state('empty')).toBe('discarded');
+    expect(state('empty')).toBe('local');
     expect(state('new')).not.toBe('discarded');
+    expect(OfflineCaptureStore.setSubmissionState).not.toHaveBeenCalled();
   });
 
   it('waits for the first photo: a draft that has none yet discards nothing', async () => {
@@ -221,10 +218,37 @@ describe('empty drafts of the same contract', () => {
     expect(OfflineCaptureStore.listSummaries).not.toHaveBeenCalled();
   });
 
-  it('checks once per draft, not on every later autosave', async () => {
+  it('never scans other drafts to delete them on first or later autosaves', async () => {
     await AutoSaveService.saveDraft(lotListing('new', [photo(1)]));
     await AutoSaveService.saveDraft(lotListing('new', [photo(1), photo(2)]));
-    expect(OfflineCaptureStore.listSummaries).toHaveBeenCalledTimes(1);
+    expect(OfflineCaptureStore.listSummaries).not.toHaveBeenCalled();
+    expect(OfflineCaptureStore.setSubmissionState).not.toHaveBeenCalled();
+  });
+
+  it('preserves meaningful typed work in a different photo-free draft', async () => {
+    const earlier = emptyDraft('prepared', { formData: {
+      contractNo: '93530', clientName: 'Prepared customer', ownerName: 'Prepared owner',
+      factorsAnalysis: 'Instructions entered before the site visit', clientSubmissionId: 'prepared-submit',
+    } });
+    saved.set(earlier.id, earlier);
+    await AutoSaveService.saveDraft(lotListing('new', [photo(1)]));
+    expect(saved.get(earlier.id)).toEqual(earlier);
+    expect(OfflineCaptureStore.setSubmissionState).not.toHaveBeenCalled();
+  });
+
+  it('cannot hide a later media save based on an older empty snapshot', async () => {
+    const earlier = emptyDraft('prepared');
+    saved.set(earlier.id, earlier);
+    const persist = jest.mocked(OfflineCaptureStore.saveDraft).getMockImplementation()!;
+    jest.mocked(OfflineCaptureStore.saveDraft).mockImplementation(async (...args) => {
+      saved.set(earlier.id, { ...earlier, localRevision: 2, lots: [{ id: 'retained', mode: 'single_lot',
+        mainImages: [photo(9)], extraImages: [], videoFiles: [], coverIndex: 0 }] as any });
+      return persist(...args);
+    });
+    await AutoSaveService.saveDraft(lotListing('new', [photo(1)]));
+    expect(saved.get(earlier.id)).toMatchObject({ submissionState: 'local', localRevision: 2 });
+    expect(saved.get(earlier.id)?.lots[0].mainImages).toEqual([photo(9)]);
+    expect(OfflineCaptureStore.setSubmissionState).not.toHaveBeenCalled();
   });
 
   it('keeps every draft that holds something or belongs elsewhere', async () => {

@@ -38,7 +38,7 @@ jest.setTimeout(20_000);
 let mockOwner: string | null = 'owner';
 jest.mock('expo-crypto', () => ({ randomUUID: () => require('node:crypto').randomUUID() }));
 jest.mock('@react-native-community/netinfo', () => ({ __esModule: true, default: { fetch: jest.fn(async () => ({ isConnected: true, isInternetReachable: true })) } }));
-jest.mock('../../services/offlineCaptureStore', () => ({ __esModule: true, default: { getOwnerId: () => mockOwner, setSubmissionState: jest.fn(async () => undefined), recordDraftOpened: jest.fn(async () => undefined) } }));
+jest.mock('../../services/offlineCaptureStore', () => ({ __esModule: true, default: { getOwnerId: () => mockOwner, getDraft: jest.fn(), setSubmissionState: jest.fn(async () => undefined), recordDraftOpened: jest.fn(async () => undefined) } }));
 jest.mock('../../services/offlineSubmissionService', () => ({ prepareOfflineSubmission: jest.fn(async draft => draft) }));
 // The wait for a steady connection is the test's to end (signalWaits below).
 jest.mock('../../services/uploadAutoResume', () => ({
@@ -326,6 +326,10 @@ describe.each(['asset', 'lotListing'] as const)('%s Submit on the Dashboard', (t
 
   it('waits in the open form when the line may not take it (background uploads off)', async () => {
     const waits = signalWaits();
+    jest.mocked(OfflineCaptureStore.getDraft).mockImplementation(async () => {
+      const saves = jest.mocked(AutoSaveService.saveDraft).mock.results;
+      return await saves[saves.length - 1].value;
+    });
     jest.mocked(OfflineQueueService.getConnectivityStatus).mockResolvedValueOnce({ status: 'offline' } as any);
     const { closed } = await mount(false);
     await fireEvent.press(screen.getByRole('button', { name: submitLabel }));

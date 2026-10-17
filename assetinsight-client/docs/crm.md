@@ -1,5 +1,15 @@
 # Appraiser web CRM
 
+## Outlook sync receipts — 2026-10-13 (local)
+
+An HTTP 202 pending receipt is not a completed calendar event. Single-task controls
+show “Outlook sync pending” and prevent a duplicate click; bulk results report
+pending tasks separately from confirmed and failed tasks. Pending rows are not
+treated as missing receipts and do not offer an event link. Follow-ups refresh
+their existing event; other task exports retain the existing new-event behavior.
+Malformed, contradictory, duplicate or out-of-selection receipts remain uncertain,
+with guidance to check Outlook rather than automatically replay the request.
+
 `/crm` brings the existing native CRM workflows into a separate appraiser web workspace.
 Only an explicitly enabled `isCrmAgent === true` user sees the navigation or
 starts CRM requests. Backend authentication, device checks, current assignment
@@ -54,9 +64,10 @@ and update authorship remain authoritative; admin role alone grants no access.
   can be accepted/rejected in Transfers. The API returns the latest 100 per status,
   which the UI labels explicitly rather than claiming an unlimited archive.
 - **Outlook:** connection/disconnection and explicit single/bulk task-event
-  export (at most 100 selected). This is not a calendar event-reader API. Every
-  export creates new events; repeats can duplicate them. Validate provider
-  receipts, expose actual outcomes and do not infer success for missing results.
+  export (at most 100 selected). This is not a calendar event-reader API. Follow-up
+  exports refresh their existing event; other tasks create new events and repeats
+  can duplicate them. Validate provider receipts, keep queued work separate from
+  confirmed events, and do not infer success for missing results.
 
 ## Performance and safety
 

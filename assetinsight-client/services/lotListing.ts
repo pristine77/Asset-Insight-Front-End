@@ -1,15 +1,10 @@
-import type { LotRegeneration } from "@/lib/lotRegeneration";
 import API from "@/lib/api";
+import { assertAuthSessionCurrent, captureAuthSession, isAuthSessionCurrent } from "@/lib/auth-storage";
+import type { AxiosProgressEvent } from "axios";
 import type { ReportWorkflowStage } from "./assets";
-import {
-  isUploadSessionUnsupportedError,
-  uploadReportFilesDirectToR2,
-} from "./directUpload";
-import {
-  lotListingDirectUploadFiles,
-  submissionFilesFromLots,
-  type SubmissionLotMedia,
-} from "./uploadJobFiles";
+import { isUploadSessionUnsupportedError, uploadReportFilesDirectToR2 } from "./directUpload";
+import { assertReportUploadAccepted } from "./reportTransferErrors";
+import { lotListingDirectUploadFiles, submissionFilesFromLots, type SubmissionLotMedia } from "./uploadJobFiles";
 
 export interface LotListingLot {
   lot_id: string;
@@ -327,35 +322,27 @@ export async function getSubmittedLotListings(): Promise<{ data: LotListing[] }>
   return { data: submitted };
 }
 
-/**
- * Submits a Lot Listing's details and media.
- *
- * This is the one place the upload array is assembled, so the background line
- * and a resumed upload present exactly the manifest the original submission
- * did. Callers pass the lots themselves rather than a flattened file list,
- * because the per-lot ordering is part of the manifest identity.
- *
- * The multipart fallback is kept for backends without upload sessions; it uses
- * the flat images/videos fields that path has always expected.
- */
+/** Keep the original lot/media order when submitting or resuming the same job. */
 export async function createLotListing(
   details: Record<string, unknown>,
   lots: readonly SubmissionLotMedia[],
-  options?: {
-    onUploadProgress?: (fraction: number) => void;
-    signal?: AbortSignal;
-  }
+  options?: { onUploadProgress?: (fraction: number) => void; signal?: AbortSignal }
 ): Promise<Record<string, unknown>> {
+  const authSession = captureAuthSession();
   try {
-    return (await uploadReportFilesDirectToR2({
+    return await uploadReportFilesDirectToR2({
       endpoint: "/lot-listing",
       details,
       files: lotListingDirectUploadFiles(lots),
       onUploadProgress: options?.onUploadProgress,
       signal: options?.signal,
-    })) as Record<string, unknown>;
+      authSession,
+    }) as Record<string, unknown>;
   } catch (error) {
+    assertAuthSessionCurrent(authSession);
     if (options?.signal?.aborted) throw options.signal.reason || error;
+    // Only initial capability failure authorizes the older transport. Business
+    // errors and uncertain session outcomes retain the original identity.
     if (!isUploadSessionUnsupportedError(error)) throw error;
   }
 
@@ -364,41 +351,22 @@ export async function createLotListing(
   images.forEach((file) => formData.append("images", file));
   videos.forEach((file) => formData.append("videos", file));
   formData.append("details", JSON.stringify(details));
-  const response = await API.post("/lot-listing", formData, {
-    headers: { "Content-Type": "multipart/form-data" },
+  assertAuthSessionCurrent(authSession);
+  const { data } = await API.post<Record<string, unknown>>("/lot-listing", formData, {
     signal: options?.signal,
-    onUploadProgress: (progressEvent: { loaded: number; total?: number }) => {
-      options?.onUploadProgress?.(
-        progressEvent.total ? progressEvent.loaded / progressEvent.total : 0
-      );
+    onUploadProgress: (event: AxiosProgressEvent) => {
+      if (!options?.onUploadProgress || options.signal?.aborted || !isAuthSessionCurrent(authSession)) return;
+      const fraction = typeof event.progress === "number" ? event.progress :
+        typeof event.total === "number" && event.total > 0 ? event.loaded / event.total : 0;
+      // Multipart transport progress is not an acceptance receipt.
+      options.onUploadProgress(Number.isFinite(fraction) ? Math.max(0, Math.min(0.95, fraction)) : 0);
     },
   });
-  return response.data as Record<string, unknown>;
-}
-
-/**
- * Re-Generate one lot: saves the on-screen preview, then the AI re-reads the
- * lot's photos in the background (HTTP 202). Poll the preview until
- * `lot_regeneration` clears or reports failed.
- */
-export async function regenerateLotListingPreviewLot(
-  id: string,
-  lotKey: string | number,
-  previewData: any
-): Promise<{
-  message: string;
-  data: {
-    preview_data: any;
-    lot_regeneration: LotRegeneration | null;
-    imageUrls?: string[];
-    image_count?: number;
-  };
-}> {
-  const response = await API.post(
-    `/lot-listing/${id}/preview/lots/${encodeURIComponent(String(lotKey))}/regenerate`,
-    { preview_data: previewData }
-  );
-  return response.data;
+  assertAuthSessionCurrent(authSession);
+  if (options?.signal?.aborted) throw options.signal.reason || new DOMException("The operation was aborted.", "AbortError");
+  assertReportUploadAccepted(data);
+  options?.onUploadProgress?.(1);
+  return data;
 }
 
 export const LotListingService = {
@@ -410,7 +378,6 @@ export const LotListingService = {
   getLotListingSubmittedPreview,
   updateLotListingPreview,
   uploadLotListingPreviewLotImages,
-  regenerateLotListingPreviewLot,
   refreshLotListingSpecPdf,
   submitLotListingForApproval,
   resubmitLotListing,

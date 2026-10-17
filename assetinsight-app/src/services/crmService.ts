@@ -474,10 +474,12 @@ class CrmService {
     await api.delete(API_ENDPOINTS.CRM_OUTLOOK_DISCONNECT);
   }
 
-  async addTaskToOutlookCalendar(taskId: string): Promise<{ eventId?: string; webLink?: string }> {
+  async addTaskToOutlookCalendar(taskId: string): Promise<{ eventId?: string; webLink?: string; pending: boolean; message?: string }> {
     const safeTaskId = encodeURIComponent(taskId);
     const { data } = await api.post(`${API_ENDPOINTS.CRM_TASKS}/${safeTaskId}/calendar/ms/outlook`);
     return {
+      pending: data?.pending === true,
+      message: String(data?.message || '').trim() || undefined,
       eventId: String(data?.eventId || "").trim() || undefined,
       webLink: String(data?.webLink || "").trim() || undefined,
     };
@@ -486,15 +488,19 @@ class CrmService {
   async addTasksToOutlookCalendarBulk(taskIds: string[]): Promise<{
     createdCount: number;
     failedCount: number;
+    pendingCount: number;
     created: { taskId: string; eventId?: string; webLink?: string }[];
     failed: { taskId: string; reason: string }[];
+    pending: { taskId: string; reason: string }[];
   }> {
     const { data } = await api.post(API_ENDPOINTS.CRM_OUTLOOK_BULK_ADD, { taskIds });
     return {
       createdCount: Number(data?.createdCount || 0),
       failedCount: Number(data?.failedCount || 0),
+      pendingCount: Number(data?.pendingCount || 0),
       created: Array.isArray(data?.created) ? data.created : [],
       failed: Array.isArray(data?.failed) ? data.failed : [],
+      pending: Array.isArray(data?.pending) ? data.pending : [],
     };
   }
 

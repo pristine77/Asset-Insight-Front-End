@@ -1,5 +1,20 @@
 # Asset Insight Admin
 
+## 17 October 2026 source synchronization
+
+Condition editing uses one Title field, which supplies the Description column
+in Excel and CR PDF/DOCX after Save & regenerate files. Separate narratives and
+freeform details are hidden, not erased; structured CR fields and Custom note
+remain. Grouped Excel rows use child Titles while CR pages retain parent scope.
+The matching backend also uses saved Titles and selected-only valuations in
+Schedule A. Existing files require explicit regeneration after deployment.
+
+Full-lot counts and Previous/Next/Jump controls are available at both ends of
+preview/report details. YouTube status and Resume reviewed upload use the same
+reviewed upload session and never claim publication before provider confirmation.
+Backend capability/authorization, HttpOnly BFF and revision guards are unchanged.
+Provider credits/accounting panels and routes remain excluded from this export.
+
 Offline review activity (2026-09-18): Report Activity displays and filters
 `draft_opened` as **Draft opened for review**. It is a device observation of
 opening saved local work, not evidence of upload/submission. Counts, receipt

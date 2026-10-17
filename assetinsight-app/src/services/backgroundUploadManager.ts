@@ -285,6 +285,11 @@ export function createBackgroundUploadManager() {
    */
   function onGlobalPause(reason?: UploadPauseReason) {
     if (reason === 'connection') return;
+    // A network rejection can win before this pause is observed by transport.
+    // Revoke the attempt as well as an already registered waiter, so its late
+    // catch cannot re-arm a job after Offline/logout. Accepted receipts still
+    // follow the existing protected reconciliation path.
+    if (active) active.pauseRequested = true;
     const waiting = active && active.status === 'waiting' ? active : null;
     // The line first: hold() below starts the next upload in line, and there
     // must be none left to start.

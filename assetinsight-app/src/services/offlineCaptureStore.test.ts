@@ -1,6 +1,7 @@
 import { createOfflineCaptureStore, countOfflineDraft } from './offlineCaptureStore';
 import type { OfflineReportDraft } from './autoSaveService';
 import type { DurableContinuationIntent } from './durableContinuationTypes';
+import { canResumeDraftSnapshot, uploadResumeDraftKey } from './uploadResumeDraft';
 
 jest.mock('@react-native-async-storage/async-storage', () => ({ multiGet: jest.fn(async () => []) }));
 jest.mock('expo-crypto', () => ({ randomUUID: () => 'capture-uuid' }));
@@ -35,6 +36,22 @@ const draft = (id = 'draft-one', count = 2): OfflineReportDraft => ({
 });
 
 describe('owner-scoped offline capture metadata', () => {
+  test('foreground retry keeps exact content through real ready/paused revision bumps, but rejects edited or accepted drafts', async () => {
+    const { store } = fixtureStore();
+    const saved = await store.saveDraft(draft());
+    const authority = uploadResumeDraftKey(saved);
+    await store.setSubmissionState(saved.id, 'ready');
+    await store.setSubmissionState(saved.id, 'paused');
+    const paused = (await store.getDraft(saved.id))!;
+    expect(paused.localRevision).toBeGreaterThan(saved.localRevision!);
+    expect(canResumeDraftSnapshot(paused, authority)).toBe(true);
+    await store.saveDraft({ ...paused, formData: { ...paused.formData, ownerName: 'Later typed work' } });
+    await store.setSubmissionState(saved.id, 'paused');
+    expect(canResumeDraftSnapshot(await store.getDraft(saved.id), authority)).toBe(false);
+    const fresh = await store.saveDraft(draft('second'));
+    await store.setSubmissionState(fresh.id, 'accepted', 'report');
+    expect(canResumeDraftSnapshot(await store.getDraft(fresh.id), uploadResumeDraftKey(fresh))).toBe(false);
+  });
   test('Continue journal checkpoints never alter frozen parent revision, originals or accepted visibility', async () => {
     const { store } = fixtureStore();
     const saved = await store.saveDraft({ ...draft(), formData: { ...draft().formData, auctioneerWorkItemId: 'work-parent' } });

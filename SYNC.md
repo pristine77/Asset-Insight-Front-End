@@ -1,5 +1,62 @@
 # Sanitized application synchronization
 
+## 17 October 2026 follow-up
+
+Content-only synchronization on Pristine77 `dc9f93b`:
+
+| Application | Source revision |
+| --- | --- |
+| Admin | `6098cf3` |
+| Web | `41b9811` |
+| Native application workflows | `087184c` |
+
+Includes Title-only preview/condition editing with hidden narratives preserved,
+clear all-lot pagination, read-only floating photo viewer, YouTube same-session
+retry/status guidance, guarded Outlook follow-up operations, and durable web
+submission recovery. Per-lot AI Re-Generate controls are removed; Save rebuilds
+files without rereading photos. Backend `23f4197` supplies the matching output,
+selected valuation, large-artifact and workflow fixes.
+
+Ordinary web Asset/Lot Submit persists immutable originals before closing the
+form. Storage failure keeps the form open. Acceptance requires a server receipt;
+account switches fence old callbacks. Closing the browser stops unfinished
+transfers; reopening offers explicit Finish upload with the same identity.
+This is not byte-offset resume or a promise of upload while the browser is shut.
+Incoming/Create & Continue stays foreground on web.
+
+Mobile Incoming uses the current Auctioneer assigned queue, safe error/Retry
+states and guarded continuation, without the retired Auctionsoft loopback proxy.
+Foreground submitted retry is bound to immutable draft content; a saved-only
+draft never gains automatic submission authority. Empty same-contract drafts
+are not silently discarded. Native upload recovery and CRM fixes are included.
+
+Camera exception: the existing destination camera engine, UI and paired native
+tests are intentionally retained, not replaced or combined with the separate
+canonical camera-only commit `1a9a1c8`. Camera/photo quality, 720p video, signing
+identity, package/version and backup-off settings remain unchanged. Both mobile
+copies receive the same non-camera workflow changes while retaining their own
+existing repository-specific files and camera content.
+
+OpenAI/provider accounting, credit/cost calculations, usage multipliers and
+Salvage provider-cost tracking remain excluded. No source Git history, secrets,
+private operational records or generated APK/AAB files are exported. This push
+does not deploy, sign a binary, submit to Play or mutate customer reports.
+
+Local verification: web 1,438 tests/123 files, typecheck, lint and production
+build; admin 126 policy tests and verify/build; each native copy 1,554 tests/124
+suites plus typecheck; paired Android/iOS Hermes export; five export-boundary
+tests. All passed. An obsolete downstream test cleanup hook referenced the
+replaced upload manager's removed test API; it was aligned with the current
+isolated tests and the complete web gates reran successfully.
+
+Eleven Chromium desktop/mobile synthetic-API scenarios (1366/390/320px,
+light/dark) pass submit/handoff, immutable originals, reload/resume, pause,
+storage failure, two uploads, account switch, conflicts and unconfirmed receipts.
+Page identity/content, no error overlay/overflow, explained console errors and
+screenshots pass. Browser plugin absent; existing Playwright used. No physical
+Android device/emulator, APK/AAB build, production account, real-provider or
+large-original endurance test is claimed by this source synchronization.
+
 ## 10 October 2026 follow-up
 
 Content-only update on Pristine77 `474a712`, from web `ddcc11e` and admin

@@ -5,7 +5,7 @@ import FloatingPhotoViewer from "@/components/reports/FloatingPhotoViewer";
 
 const photos = ["a.jpg", "b.jpg", "c.jpg"].map((name) => ({ url: `https://assetinsight.test/${name}`, key: name }));
 
-function Harness({ onRemove, onClose = vi.fn() }: { onRemove?: (index: number) => void; onClose?: () => void }) {
+function Harness({ onClose = vi.fn() }: { onClose?: () => void }) {
   const [index, setIndex] = useState(0);
   return (
     <>
@@ -16,7 +16,6 @@ function Harness({ onRemove, onClose = vi.fn() }: { onRemove?: (index: number) =
         index={index}
         onIndexChange={setIndex}
         onClose={onClose}
-        onRemove={onRemove}
       />
     </>
   );
@@ -93,18 +92,20 @@ describe("FloatingPhotoViewer", () => {
     expect(onClose).toHaveBeenCalledTimes(2);
   });
 
-  it("removes the current photo through the caller and links to the full-size photo", () => {
-    const onRemove = vi.fn();
-    render(<Harness onRemove={onRemove} />);
+  it("links to the full-size photo without an editing action", () => {
+    render(<Harness />);
     fireEvent.keyDown(window, { key: "ArrowRight" });
-    fireEvent.click(screen.getByRole("button", { name: "Remove photo 2" }));
-    expect(onRemove).toHaveBeenCalledWith(1);
     expect(screen.getByRole("link", { name: "Open full-size photo in a new tab" })).toHaveAttribute("href", photos[1].url);
+    expect(screen.queryByRole("button", { name: /Remove|Delete/i })).not.toBeInTheDocument();
   });
 
-  it("hides Remove when the caller does not allow it", () => {
+  it("never exposes Remove or Delete in either window state", () => {
     render(<Harness />);
-    expect(screen.queryByRole("button", { name: /Remove photo/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Remove|Delete/i })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Minimize photo viewer" }));
+    expect(screen.queryByRole("button", { name: /Remove|Delete/i })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Restore photo viewer" }));
+    expect(screen.queryByRole("button", { name: /Remove|Delete/i })).not.toBeInTheDocument();
   });
 
   it("moves when the title bar is dragged and stays reachable on screen", () => {

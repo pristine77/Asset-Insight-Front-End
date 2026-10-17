@@ -1,4 +1,5 @@
 import API from "@/lib/api";
+import { assertAuthSessionCurrent, captureAuthSession, type AuthSessionSnapshot } from "@/lib/auth-storage";
 import { assertReportUploadAccepted } from "./reportTransferErrors";
 
 export type DirectUploadFile = {
@@ -210,14 +211,18 @@ async function withServerFallbackSlot<T>(
   }
 }
 
-function postWithSignal<T>(
+async function postWithSignal<T>(
   url: string,
   data: unknown,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  authSession = captureAuthSession()
 ) {
-  return signal
+  assertAuthSessionCurrent(authSession);
+  const response = await (signal
     ? API.post<T>(url, data, { signal })
-    : API.post<T>(url, data);
+    : API.post<T>(url, data));
+  assertAuthSessionCurrent(authSession);
+  return response;
 }
 
 const isRetryableServerUploadError = (error: unknown) => {
@@ -228,19 +233,23 @@ const isRetryableServerUploadError = (error: unknown) => {
 async function completeUploadSessionWithRetry(
   endpoint: "/asset" | "/lot-listing",
   sessionId: string,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  authSession = captureAuthSession()
 ) {
   let lastError: unknown;
   for (let attempt = 1; attempt <= COMPLETE_SESSION_RETRIES; attempt += 1) {
     throwIfAborted(signal);
+    assertAuthSessionCurrent(authSession);
     try {
       return await postWithSignal<any>(
         `${endpoint}/upload-session/${sessionId}/complete`,
         {},
-        signal
+        signal,
+        authSession
       );
     } catch (error) {
       lastError = error;
+      assertAuthSessionCurrent(authSession);
       if (signal?.aborted) throw abortReason(signal);
       if (!isRetryableServerUploadError(error) || attempt === COMPLETE_SESSION_RETRIES) {
         throw error;
@@ -259,9 +268,11 @@ export function putFileWithProgress(
   contentType: string,
   onDelta?: (delta: number) => void,
   headers?: Record<string, string>,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  authSession = captureAuthSession()
 ) {
   return new Promise<void>((resolve, reject) => {
+    assertAuthSessionCurrent(authSession);
     const xhr = new XMLHttpRequest();
     let lastLoaded = 0;
     let settled = false;
@@ -285,6 +296,18 @@ export function putFileWithProgress(
         rejectOnce(abortReason(signal));
       }
     };
+    const canContinue = () => {
+      if (settled) return false;
+      try {
+        throwIfAborted(signal);
+        assertAuthSessionCurrent(authSession);
+        return true;
+      } catch (error) {
+        rejectOnce(error);
+        xhr.abort();
+        return false;
+      }
+    };
     xhr.open("PUT", url);
     let hasSignedContentType = false;
     for (const [name, value] of Object.entries(headers || {})) {
@@ -300,18 +323,19 @@ export function putFileWithProgress(
       );
     }
     xhr.upload.onprogress = (event) => {
-      if (!event.lengthComputable) return;
+      if (!canContinue() || !event.lengthComputable) return;
       const delta = Math.max(0, event.loaded - lastLoaded);
       lastLoaded = event.loaded;
       onDelta?.(delta);
     };
     xhr.onload = () => {
+      if (!canContinue()) return;
       if (xhr.status >= 200 && xhr.status < 300) {
         const delta = Math.max(0, file.size - lastLoaded);
         if (delta) onDelta?.(delta);
         resolveOnce();
       } else {
-        rejectOnce(new Error(`The photo upload failed for ${file.name} (${xhr.status}).`));
+        rejectOnce(new Error(`The photo upload could not be confirmed for ${file.name}. Retry this same upload.`));
       }
     };
     xhr.onerror = () =>
@@ -340,12 +364,15 @@ export async function uploadFileThroughServerFallback(
   sessionId: string,
   fileId: string,
   file: File,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  authSession = captureAuthSession()
 ) {
+  assertAuthSessionCurrent(authSession);
   await withServerFallbackSlot(async () => {
     let lastError: unknown;
     for (let attempt = 0; attempt <= SERVER_FALLBACK_RETRIES; attempt += 1) {
       throwIfAborted(signal);
+      assertAuthSessionCurrent(authSession);
       const formData = new FormData();
       formData.append("file", file, file.name);
       try {
@@ -360,9 +387,12 @@ export async function uploadFileThroughServerFallback(
             ...(signal ? { signal } : {}),
           }
         );
+        assertAuthSessionCurrent(authSession);
+        throwIfAborted(signal);
         return;
       } catch (error) {
         lastError = error;
+        assertAuthSessionCurrent(authSession);
         if (signal?.aborted) throw abortReason(signal);
         if (
           attempt >= SERVER_FALLBACK_RETRIES ||
@@ -381,12 +411,14 @@ export async function verifyUploadSessionFile(
   endpoint: "/asset" | "/lot-listing",
   sessionId: string,
   fileId: string,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  authSession = captureAuthSession()
 ) {
   const { data } = await postWithSignal<any>(
     `${endpoint}/upload-session/${sessionId}/files/${encodeURIComponent(fileId)}/verify`,
     {},
-    signal
+    signal,
+    authSession
   );
   return data?.data?.verified === true;
 }
@@ -401,7 +433,10 @@ export async function uploadFileToReportSession(args: {
   headers?: Record<string, string>;
   onDelta?: (delta: number) => void;
   signal?: AbortSignal;
+  authSession?: AuthSessionSnapshot;
 }) {
+  const authSession = args.authSession || captureAuthSession();
+  assertAuthSessionCurrent(authSession);
   throwIfAborted(args.signal);
   if (
     !canUseDirectBrowserUpload(args.uploadUrl) ||
@@ -412,7 +447,8 @@ export async function uploadFileToReportSession(args: {
       args.sessionId,
       args.fileId,
       args.file,
-      args.signal
+      args.signal,
+      authSession
     );
     return { transport: "server" as const };
   }
@@ -424,10 +460,12 @@ export async function uploadFileToReportSession(args: {
       args.contentType,
       args.onDelta,
       args.headers,
-      args.signal
+      args.signal,
+      authSession
     );
     return { transport: "direct" as const };
   } catch (directUploadError) {
+    assertAuthSessionCurrent(authSession);
     if (args.signal?.aborted) {
       throw abortReason(args.signal);
     }
@@ -439,10 +477,12 @@ export async function uploadFileToReportSession(args: {
         args.endpoint,
         args.sessionId,
         args.fileId,
-        args.signal
+        args.signal,
+        authSession
       );
       if (verified) return { transport: "direct-verified" as const };
     } catch {
+      assertAuthSessionCurrent(authSession);
       if (args.signal?.aborted) {
         throw abortReason(args.signal);
       }
@@ -465,10 +505,12 @@ export async function uploadFileToReportSession(args: {
         args.sessionId,
         args.fileId,
         args.file,
-        args.signal
+        args.signal,
+        authSession
       );
       return { transport: "server" as const };
     } catch (fallbackError) {
+      assertAuthSessionCurrent(authSession);
       if (args.signal?.aborted) {
         throw abortReason(args.signal);
       }
@@ -485,11 +527,13 @@ export async function putFileWithRetry(
   contentType: string,
   onDelta?: (delta: number) => void,
   headers?: Record<string, string>,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  authSession = captureAuthSession()
 ) {
   let lastError: unknown;
   for (let attempt = 0; attempt <= DIRECT_UPLOAD_RETRIES; attempt += 1) {
     throwIfAborted(signal);
+    assertAuthSessionCurrent(authSession);
     try {
       await putFileWithProgress(
         url,
@@ -497,11 +541,13 @@ export async function putFileWithRetry(
         contentType,
         onDelta,
         headers,
-        signal
+        signal,
+        authSession
       );
       return;
     } catch (error) {
       lastError = error;
+      assertAuthSessionCurrent(authSession);
       if (signal?.aborted) throw abortReason(signal);
       if (attempt < DIRECT_UPLOAD_RETRIES) {
         await sleep(500 * (attempt + 1), signal);
@@ -547,7 +593,10 @@ export async function uploadReportFilesDirectToR2(args: {
   files: DirectUploadFile[];
   onUploadProgress?: (fraction: number) => void;
   signal?: AbortSignal;
+  authSession?: AuthSessionSnapshot;
 }) {
+  const authSession = args.authSession || captureAuthSession();
+  assertAuthSessionCurrent(authSession);
   throwIfAborted(args.signal);
   const totalBytes = args.files.reduce((sum, item) => sum + (item.file.size || 1), 0) || 1;
   let uploadedBytes = 0;
@@ -576,22 +625,27 @@ export async function uploadReportFilesDirectToR2(args: {
         details: args.details,
         files: manifest,
       },
-      args.signal
+      args.signal,
+      authSession
     );
     sessionEnvelope = response.data;
   } catch (error) {
+    assertAuthSessionCurrent(authSession);
     if (args.signal?.aborted) throw abortReason(args.signal);
     if (isInitialUploadSessionCapabilityError(error)) {
       throw new UploadSessionUnsupportedError(args.endpoint, error);
     }
     throw error;
   }
+  throwIfAborted(args.signal);
+  assertAuthSessionCurrent(authSession);
   const session = sessionEnvelope.data;
   if (session.alreadyQueued === true && session.reportId) {
-    assertReportUploadAccepted(session);
+    assertReportUploadAccepted(sessionEnvelope);
     args.onUploadProgress?.(1);
     return {
       message: "Submission already accepted and is being processed.",
+      accepted: true,
       jobId: session.jobId,
       reportId: session.reportId,
       status: session.status || "processing",
@@ -630,7 +684,9 @@ export async function uploadReportFilesDirectToR2(args: {
             contentType: target.contentType,
             headers: target.headers,
             signal: uploadController.signal,
+            authSession,
             onDelta: (delta) => {
+              if (uploadController.signal.aborted) return;
               const nextLoaded = Math.min(item.file.size, fileLoaded + delta);
               uploadedBytes += Math.max(0, nextLoaded - fileLoaded);
               fileLoaded = nextLoaded;
@@ -646,7 +702,8 @@ export async function uploadReportFilesDirectToR2(args: {
         }
         // Direct progress events may be unavailable, and server fallback has no
         // browser upload progress. Count the file as complete exactly once.
-        if (fileLoaded < item.file.size) {
+        assertAuthSessionCurrent(authSession);
+        if (!uploadController.signal.aborted && fileLoaded < item.file.size) {
           uploadedBytes += item.file.size - fileLoaded;
           fileLoaded = item.file.size;
           args.onUploadProgress?.(Math.max(0, Math.min(0.9, uploadedBytes / totalBytes)));
@@ -663,12 +720,16 @@ export async function uploadReportFilesDirectToR2(args: {
   }
 
   throwIfAborted(args.signal);
+  assertAuthSessionCurrent(authSession);
   args.onUploadProgress?.(0.95);
   const { data } = await completeUploadSessionWithRetry(
     args.endpoint,
     session.sessionId,
-    args.signal
+    args.signal,
+    authSession
   );
+  throwIfAborted(args.signal);
+  assertAuthSessionCurrent(authSession);
   assertReportUploadAccepted(data);
   args.onUploadProgress?.(1);
   return data;

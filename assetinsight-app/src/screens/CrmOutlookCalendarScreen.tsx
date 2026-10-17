@@ -282,10 +282,12 @@ export default function CrmOutlookCalendarScreen({
         result.failedCount > 0
           ? `\n\n${result.failedCount} failed. ${result.failed[0]?.reason || 'Check your task dates and try again.'}`
           : '';
+      const pendingHint = result.pendingCount > 0
+        ? `\n\n${result.pendingCount} queued, not yet confirmed by Outlook.` : '';
       setCalendarSyncModalVisible(false);
       Alert.alert(
-        'Outlook Sync Complete',
-        `${result.createdCount} task(s) added to calendar.${failedHint}`
+        result.pendingCount > 0 ? 'Outlook sync queued' : 'Outlook Sync Complete',
+        `${result.createdCount} task(s) added to calendar.${pendingHint}${failedHint}`
       );
     } catch (e: any) {
       Alert.alert(

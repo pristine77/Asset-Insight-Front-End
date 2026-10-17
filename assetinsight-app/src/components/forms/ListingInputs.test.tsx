@@ -77,7 +77,7 @@ it('keeps Asset fields mounted and accepts split contract identifiers without su
 
 it('keeps an expanded condition field editor scrollable and retains long multiline values locally', async () => {
   const view = await render(<PreviewScreen reportId="fixture" reportType="LotListing" mode="pending" onBack={jest.fn()} onSuccess={jest.fn()} />);
-  await waitFor(() => expect(screen.getByLabelText('Lot 1 description')).toBeTruthy());
+  await waitFor(() => expect(screen.getByLabelText('Lot 1 title')).toBeTruthy());
   expect(screen.getByLabelText('Lot 1, Exterior notes').props.value).toBe('No visible defects in this photograph');
   expect(screen.getByLabelText('Lot 1, Spare wheel').props.value).toBe('Yes');
   expect(screen.getByLabelText('Lot 1, Tool kit').props.value).toBe('No');
@@ -136,18 +136,19 @@ it.each(['asset', 'lotListing'] as const)('%s Offline saves incomplete details l
   jest.mocked(NetInfo.fetch).mockResolvedValue({ isConnected: true, isInternetReachable: true } as any);
 });
 
-it.each(['Asset', 'LotListing'] as const)('%s preview retains focused lot description and user lot number on parent updates', async (reportType) => {
+it.each(['Asset', 'LotListing'] as const)('%s preview retains focused lot Title and user lot number on parent updates', async (reportType) => {
   const view = await render(<PreviewScreen reportId="fixture" reportType={reportType} mode="pending" onBack={jest.fn()} onSuccess={jest.fn()} />);
-  await waitFor(() => expect(screen.getByLabelText('Lot 1 description')).toBeTruthy());
-  const description = screen.getByLabelText('Lot 1 description');
-  for (const text of ['Edited', 'Edited first line\nSecond line', 'Edited first line\nSecond line\nThird line']) {
-    await fireEvent.changeText(description, text);
-    expect(screen.getByLabelText('Lot 1 description')).toBe(description);
-    expect(description.props.value).toBe(text);
+  await waitFor(() => expect(screen.getByLabelText('Lot 1 title')).toBeTruthy());
+  expect(screen.queryByLabelText('Lot 1 description')).toBeNull();
+  const title = screen.getByLabelText('Lot 1 title');
+  for (const text of ['Edited', 'Edited vehicle', 'Edited vehicle with attachments']) {
+    await fireEvent.changeText(title, text);
+    expect(screen.getByLabelText('Lot 1 title')).toBe(title);
+    expect(title.props.value).toBe(text);
   }
   await fireEvent.changeText(screen.getByLabelText('Lot 1 number'), '157A');
   expect(screen.getByLabelText('Lot 1 number').props.value).toBe('157A');
-  expect(description.props.value).toBe('Edited first line\nSecond line\nThird line');
+  expect(title.props.value).toBe('Edited vehicle with attachments');
   expect(api.put).not.toHaveBeenCalled();
   expect(api.post).not.toHaveBeenCalled();
   await view.unmount();
